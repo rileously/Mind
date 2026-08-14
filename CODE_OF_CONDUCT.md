@@ -24,7 +24,3 @@ Violations may result in comments being removed, issues being locked, or users b
 ## Scope
 
 This applies to all project spaces: issues, pull requests, discussions, and comments.
-
-## Contact
-
-me@musheer360.com

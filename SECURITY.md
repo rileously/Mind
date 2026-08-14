@@ -2,11 +2,9 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in SwiftSlate Desktop, please report it privately:
-
-**Email:** me@musheer360.com
-
-**Subject line:** `[SwiftSlate Desktop Security] Brief description`
+If you discover a security vulnerability in Mind, please use the repository's
+[private vulnerability reporting form](https://github.com/rileously/Mind/security/advisories/new).
+Do not open a public issue or include API keys, credentials, or other secrets in a report.
 
 Please include:
 - Description of the vulnerability
@@ -14,7 +12,7 @@ Please include:
 - Affected component (e.g., keystroke handling, clipboard operations, API calls)
 - Potential impact
 
-I'll acknowledge your report within 48 hours and provide a fix timeline.
+The Mind maintainer will review the report and coordinate a fix and disclosure timeline with you.
 
 ## Scope
 

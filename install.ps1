@@ -1,7 +1,7 @@
-# SwiftSlate Desktop
-# https://github.com/Musheer360/SwiftSlate-Desktop
-# irm https://raw.githubusercontent.com/Musheer360/SwiftSlate-Desktop/master/install.ps1 | iex
-# (CDN mirror: irm https://cdn.jsdelivr.net/gh/Musheer360/SwiftSlate-Desktop@master/install.ps1 | iex)
+# Legacy SwiftSlate installer retained for migration support in Mind.
+# https://github.com/rileously/Mind
+# irm https://raw.githubusercontent.com/rileously/Mind/main/install.ps1 | iex
+# (CDN mirror: irm https://cdn.jsdelivr.net/gh/rileously/Mind@main/install.ps1 | iex)
 
 # --- Locations ---
 $installDir = Join-Path $env:USERPROFILE ".swiftslate"
@@ -12,8 +12,8 @@ $shortcutPath = Join-Path $startupDir "SwiftSlate Desktop.lnk"
 # --- Download sources ---
 # Raw is always tried first: it never caches, so it always serves the latest push.
 # jsDelivr is the fallback: fast, but can lag a push by up to ~12 hours.
-$repoRaw = "https://raw.githubusercontent.com/Musheer360/SwiftSlate-Desktop/master"
-$repoCdn = "https://cdn.jsdelivr.net/gh/Musheer360/SwiftSlate-Desktop@master"
+$repoRaw = "https://raw.githubusercontent.com/rileously/Mind/main"
+$repoCdn = "https://cdn.jsdelivr.net/gh/rileously/Mind@main"
 $pythonVersion = "3.13.15"
 $pythonZipUrl = "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
 # "3.13.15" -> "313" for python313.dll / python313.zip (major.minor only)
