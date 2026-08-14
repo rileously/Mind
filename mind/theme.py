@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -188,6 +188,22 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     QWidget#PaletteShell {{
         background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px;
     }}
+    QWidget#DefinitionCard {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 13px;
+    }}
+    QLabel#DefinitionWord {{
+        font-family: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI";
+        font-size: 20px; font-weight: 760; color: {p['text']};
+    }}
+    QLabel#DefinitionPronunciation {{
+        color: {p['muted']}; font-size: 12px;
+    }}
+    QLabel#DefinitionPart {{
+        color: {p['accent']}; font-size: 10px; font-weight: 750;
+    }}
+    QLabel#DefinitionBody {{
+        color: {p['text']}; font-size: 13px;
+    }}
     QLabel#PalettePreview {{
         background: {p['surface_alt']}; color: {p['muted']}; border: 1px solid {p['border_soft']};
         border-radius: 11px; padding: 11px;
@@ -240,6 +256,17 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     QPushButton#SegmentButton:hover {{ background: {p['surface_hover']}; color: {p['text']}; border-color: {p['border']}; }}
     QPushButton#SegmentButton:checked {{ background: {p['surface_alt']}; color: {p['text']}; font-weight: 650; }}
     QPushButton#PaletteAction {{ text-align: left; min-height: 42px; padding-left: 14px; }}
+    QPushButton#DefinitionClose {{
+        min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px;
+        padding: 0; border: 0; border-radius: 6px; background: transparent;
+        color: {p['muted']}; font-size: 18px; font-weight: 500;
+    }}
+    QPushButton#DefinitionClose:hover {{ background: {p['surface_hover']}; color: {p['text']}; }}
+    QPushButton#DefinitionSource {{
+        min-height: 22px; padding: 0; border: 0; background: transparent;
+        color: {p['muted']}; font-size: 10px; font-weight: 500;
+    }}
+    QPushButton#DefinitionSource:hover {{ color: {p['accent']}; border: 0; background: transparent; }}
     QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {{
         background: {p['surface_alt']}; border: 1px solid {p['border']};
         border-radius: 6px; padding: 7px 10px; selection-background-color: {p['accent']};

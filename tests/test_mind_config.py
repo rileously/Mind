@@ -40,6 +40,7 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertFalse(config["onboarding_complete"])
         self.assertFalse(config["mind_palette_enabled"])
         self.assertFalse(config["mind_palette_auto_show_on_selection"])
+        self.assertTrue(config["word_definitions_enabled"])
         self.assertEqual(config["schema_version"], CONFIG_SCHEMA_VERSION)
         self.assertEqual(config["bundled_commands_revision"], BUNDLED_COMMANDS_REVISION)
         self.assertEqual(config["mind_palette_actions"], DEFAULT_PALETTE_ACTIONS)

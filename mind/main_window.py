@@ -34,6 +34,8 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .config_store import ConfigStore
+from .definition_popup import DefinitionPopup
+from .dictionary import normalize_selected_word
 from .engine_manager import EngineManager
 from .hotkeys import PALETTE_SHORTCUTS, shortcut_candidates
 from .paths import launcher_path
@@ -541,6 +543,14 @@ class SettingsPage(QWidget):
             self.autocorrect,
             "✓",
         )
+        self.word_definitions = ToggleSwitch()
+        self._setting_row(
+            behavior_layout,
+            "Word definitions",
+            "Shows an English definition above single-word selections in other apps. Only the selected word is looked up online.",
+            self.word_definitions,
+            "Aa",
+        )
         self.autocorrect_strength = QComboBox()
         self.autocorrect_strength.addItem("Conservative", "conservative")
         self.autocorrect_strength.addItem("Balanced (recommended)", "balanced")
@@ -717,6 +727,7 @@ class SettingsPage(QWidget):
         self.spinner.setCurrentIndex(max(spinner_index, 0))
         self.delay.setValue(int(config.get("key_delay", 200)))
         self.autocorrect.setChecked(bool(config.get("autocorrect_after_space", False)))
+        self.word_definitions.setChecked(bool(config.get("word_definitions_enabled", True)))
         strength_index = self.autocorrect_strength.findData(config.get("autocorrect_strength", "balanced"))
         self.autocorrect_strength.setCurrentIndex(max(strength_index, 0))
         self.autocorrect_strength.setEnabled(self.autocorrect.isChecked())
@@ -745,6 +756,7 @@ class SettingsPage(QWidget):
                 "spinner": self.spinner.currentData(),
                 "key_delay": self.delay.value(),
                 "autocorrect_after_space": self.autocorrect.isChecked(),
+                "word_definitions_enabled": self.word_definitions.isChecked(),
                 "autocorrect_strength": self.autocorrect_strength.currentData(),
                 "theme": self.theme.currentData(),
                 "accent_color": self.accent.currentData(),
@@ -905,7 +917,9 @@ class MindWindow(QMainWindow):
         self._palette_hotkey_registered = False
         self._palette_shortcut = "Ctrl+Alt+M"
         self._palette_pending = False
+        self._selection_pending = False
         self.palette: MindPalette | None = None
+        self.definition_popup = DefinitionPopup()
         self.selection_monitor = SelectionMonitor(self)
         self.setWindowTitle("Mind • AI Writing Workspace")
         self.setWindowIcon(app_icon())
@@ -914,7 +928,7 @@ class MindWindow(QMainWindow):
         self._build_ui()
         self._build_tray()
         self.selection_monitor.set_ignored_window(int(self.winId()))
-        self.selection_monitor.selection_gesture.connect(self._automatic_palette_requested)
+        self.selection_monitor.selection_gesture.connect(self._automatic_selection_requested)
         self.apply_theme(
             str(self.config.get("theme", "system")),
             str(self.config.get("accent_color", "teal")),
@@ -985,7 +999,7 @@ class MindWindow(QMainWindow):
             ("▦", "Dashboard", "home overview engine workspace"),
             ("◇", "Providers", "api key gemini groq ollama lm studio connection model"),
             ("⌘", "Commands", "trigger automation writing actions"),
-            ("⚙", "Preferences", "settings behavior typing spelling theme startup palette shortcut"),
+            ("⚙", "Preferences", "settings behavior typing spelling definition dictionary tooltip theme startup palette shortcut"),
             ("▥", "Diagnostics", "logs troubleshooting system health data folder"),
         ]
         for index, (icon, title, search_terms) in enumerate(nav_items):
@@ -1115,6 +1129,8 @@ class MindWindow(QMainWindow):
     def quit_app(self) -> None:
         self._quitting = True
         self.configure_palette(False, self._palette_shortcut)
+        self.definition_popup.dismiss()
+        self.definition_popup.close()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1193,6 +1209,7 @@ class MindWindow(QMainWindow):
             if self.palette:
                 self.palette.close()
                 self.palette = None
+            self._configure_selection_monitor()
             return
         chosen = None
         for shortcut, modifiers, virtual_key in shortcut_candidates(preferred_shortcut):
@@ -1203,9 +1220,7 @@ class MindWindow(QMainWindow):
             self._palette_hotkey_registered = True
             self._palette_shortcut = chosen
             config = self.store.load()
-            self.selection_monitor.set_enabled(
-                bool(config.get("mind_palette_auto_show_on_selection", False))
-            )
+            self._configure_selection_monitor(config)
             self._log(f"Mind Palette enabled: {chosen}")
             if chosen != preferred_shortcut:
                 config["mind_palette_shortcut"] = chosen
@@ -1222,6 +1237,7 @@ class MindWindow(QMainWindow):
         config = self.store.load()
         config["mind_palette_enabled"] = False
         self.store.save(config)
+        self._configure_selection_monitor(config)
         self.settings.refresh()
         self.tray.showMessage(
             "Mind Palette unavailable",
@@ -1229,6 +1245,18 @@ class MindWindow(QMainWindow):
             QSystemTrayIcon.Warning,
             4000,
         )
+
+    def _configure_selection_monitor(self, config: dict | None = None) -> None:
+        if self._quitting:
+            self.selection_monitor.set_enabled(False)
+            return
+        current = config or self.store.load()
+        definitions_enabled = bool(current.get("word_definitions_enabled", True))
+        palette_auto = bool(
+            current.get("mind_palette_enabled", False)
+            and current.get("mind_palette_auto_show_on_selection", False)
+        )
+        self.selection_monitor.set_enabled(definitions_enabled or palette_auto)
 
     def nativeEvent(self, event_type, message):
         try:
@@ -1255,26 +1283,52 @@ class MindWindow(QMainWindow):
         self._palette_pending = True
         QTimer.singleShot(100, lambda: self._open_palette_for_selection(target_hwnd))
 
-    def _automatic_palette_requested(
+    def _automatic_selection_requested(
         self,
         target_hwnd: int,
         avoid_rect: tuple[int, int, int, int] | None,
     ) -> None:
-        if self.palette and self.palette.isVisible():
+        config = self.store.load()
+        definitions_enabled = bool(config.get("word_definitions_enabled", True))
+        palette_auto = bool(
+            config.get("mind_palette_enabled", False)
+            and config.get("mind_palette_auto_show_on_selection", False)
+        )
+        if not definitions_enabled and not palette_auto:
             return
-        if self._palette_pending or target_hwnd == int(self.winId()):
+        if self._selection_pending or target_hwnd == int(self.winId()):
             return
-        self._palette_pending = True
+        self._selection_pending = True
         QTimer.singleShot(
             140,
-            lambda: self._open_palette_for_selection(
-                target_hwnd,
-                allow_image=False,
-                notify_when_empty=False,
-                capture_timeout=0.35,
-                avoid_rect=avoid_rect,
-            ),
+            lambda: self._open_automatic_selection(target_hwnd, avoid_rect),
         )
+
+    def _open_automatic_selection(
+        self,
+        target_hwnd: int,
+        avoid_rect: tuple[int, int, int, int] | None,
+    ) -> None:
+        self._selection_pending = False
+        if ctypes.windll.user32.GetForegroundWindow() != target_hwnd:
+            return
+        session = SelectionSession.capture(target_hwnd, timeout=0.35)
+        if session is None:
+            return
+        config = self.store.load()
+        word = normalize_selected_word(session.text)
+        if bool(config.get("word_definitions_enabled", True)) and word is not None:
+            if self.palette and self.palette.isVisible():
+                self.palette.close()
+            self.definition_popup.lookup(word, avoid_rect)
+            return
+
+        self.definition_popup.dismiss()
+        if bool(
+            config.get("mind_palette_enabled", False)
+            and config.get("mind_palette_auto_show_on_selection", False)
+        ):
+            self._show_palette_for_session(session, avoid_rect)
 
     def _open_palette_for_selection(
         self,
@@ -1305,6 +1359,15 @@ class MindWindow(QMainWindow):
             )
             return
         if session is None:
+            return
+        self._show_palette_for_session(session, avoid_rect)
+
+    def _show_palette_for_session(
+        self,
+        session: SelectionSession | ClipboardImageSession,
+        avoid_rect: tuple[int, int, int, int] | None,
+    ) -> None:
+        if self.palette and self.palette.isVisible():
             return
         self.palette = MindPalette(self.store, session, avoid_rect=avoid_rect)
         self.palette.completed.connect(self._palette_completed)

@@ -54,6 +54,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "start_engine_on_launch": False,
     "mind_palette_enabled": False,
     "mind_palette_auto_show_on_selection": False,
+    "word_definitions_enabled": True,
     "mind_palette_shortcut": "Ctrl+Alt+M",
     "mind_palette_actions": DEFAULT_PALETTE_ACTIONS,
     "mind_palette_columns": 2,

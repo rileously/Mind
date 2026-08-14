@@ -12,6 +12,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from PySide6.QtWidgets import QApplication
 
 from mind.config_store import ConfigStore
+from mind.definition_popup import DefinitionPopup
+from mind.dictionary import DefinitionResult, DefinitionSense
 from mind.main_window import MindWindow
 from mind.palette import MindPalette
 from mind.selection import SelectionSession
@@ -32,6 +34,7 @@ def main() -> None:
     diagnostics_output = PROJECT_ROOT / "artifacts" / "mind-diagnostics.png"
     palette_output = PROJECT_ROOT / "artifacts" / "mind-palette.png"
     customize_output = PROJECT_ROOT / "artifacts" / "mind-palette-customize.png"
+    definition_output = PROJECT_ROOT / "artifacts" / "mind-definition.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         store = ConfigStore(Path(temporary) / "data", PROJECT_ROOT)
@@ -70,6 +73,26 @@ def main() -> None:
         app.processEvents()
         palette.grab().save(str(palette_output))
         palette.close()
+        definition = DefinitionPopup()
+        definition.show_result(DefinitionResult(
+            word="serendipity",
+            pronunciation="ˌserənˈdipitē",
+            senses=(
+                DefinitionSense(
+                    "noun",
+                    "The occurrence of events by chance in a happy or beneficial way.",
+                ),
+                DefinitionSense(
+                    "noun",
+                    "An unexpected discovery that turns out to be valuable.",
+                ),
+            ),
+            source_name="Datamuse · WordNet & Wiktionary",
+            source_url="https://www.datamuse.com/api/",
+        ))
+        app.processEvents()
+        definition.grab().save(str(definition_output))
+        definition.close()
         app.setStyleSheet(stylesheet("dark", "purple"))
         customize = PaletteCustomizeDialog(store)
         customize.show()
@@ -87,6 +110,7 @@ def main() -> None:
     print(diagnostics_output)
     print(palette_output)
     print(customize_output)
+    print(definition_output)
 
 
 if __name__ == "__main__":
