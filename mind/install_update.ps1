@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][int]$MindProcessId,
+    [int]$MindParentProcessId = 0,
     [Parameter(Mandatory = $true)][string]$Source,
     [Parameter(Mandatory = $true)][string]$Target
 )
@@ -28,9 +29,21 @@ try {
         throw "The update files did not pass validation."
     }
 
+    # A PyInstaller one-file application has a bootloader parent and a Python
+    # child. Both must exit before the executable is replaced and restarted.
+    $mindProcessIds = @($MindProcessId, $MindParentProcessId) |
+        Where-Object { $_ -gt 0 } |
+        Select-Object -Unique
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
-    while ((Get-Process -Id $MindProcessId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
+    do {
+        $runningMindProcesses = @(
+            $mindProcessIds | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }
+        )
+        if ($runningMindProcesses.Count -eq 0) { break }
         Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($runningMindProcesses.Count -gt 0) {
+        throw "Mind did not close before the update timeout."
     }
 
     $backupPath = Join-Path $targetItem.DirectoryName "Mind.previous.exe"
@@ -50,9 +63,34 @@ try {
         throw "Windows could not replace the running application."
     }
 
-    Start-Process -FilePath $targetPath -ErrorAction Stop
+    # Avoid volatile system temp cleanup and antivirus races while the new
+    # one-file build extracts its bundled Python runtime on first launch.
+    $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Mind\Runtime"))
+    New-Item -ItemType Directory -Path $runtimeRoot -Force -ErrorAction Stop | Out-Null
+    $runtimeItem = Get-Item -LiteralPath $runtimeRoot -Force -ErrorAction Stop
+    if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The Mind runtime directory cannot be a link or junction."
+    }
+    $env:TEMP = $runtimeRoot
+    $env:TMP = $runtimeRoot
+
+    try {
+        $startedProcess = Start-Process -FilePath $targetPath `
+            -WorkingDirectory $targetItem.DirectoryName -PassThru -ErrorAction Stop
+        Start-Sleep -Seconds 6
+        $startedProcess.Refresh()
+        if ($startedProcess.HasExited) {
+            throw "The updated application exited during its startup check (code $($startedProcess.ExitCode))."
+        }
+    } catch {
+        $startupError = $_.Exception.Message
+        Copy-Item -LiteralPath $backupPath -Destination $targetPath -Force -ErrorAction Stop
+        Start-Process -FilePath $targetPath -WorkingDirectory $targetItem.DirectoryName -ErrorAction Stop
+        throw "The update could not start, so the previous version was restored. $startupError"
+    }
+
     Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
-    Write-UpdateLog "Installed update successfully. Previous build: $backupPath"
+    Write-UpdateLog "Installed update and passed the startup check. Previous build: $backupPath"
 } catch {
     Write-UpdateLog "Update failed: $($_.Exception.Message)"
     exit 1

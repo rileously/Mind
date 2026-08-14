@@ -248,6 +248,8 @@ def launch_update_installer(download_path: str | Path) -> None:
         str(installer_script),
         "-MindProcessId",
         str(os.getpid()),
+        "-MindParentProcessId",
+        str(os.getppid()),
         "-Source",
         str(source),
         "-Target",

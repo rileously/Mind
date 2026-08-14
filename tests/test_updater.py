@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+from mind import updater
 from mind.updater import UpdateError, is_newer_version, parse_release, version_tuple
 
 
@@ -56,6 +60,32 @@ class UpdaterTests(unittest.TestCase):
                 },
                 "0.3.0",
             )
+
+    def test_installer_waits_for_onefile_parent_and_child(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            updates_path = temporary_path / "Updates"
+            updates_path.mkdir()
+            source_path = updates_path / "Mind-0.4.0.exe"
+            source_path.write_bytes(b"MZ")
+            target_path = temporary_path / "Mind.exe"
+            target_path.write_bytes(b"MZ")
+
+            with (
+                patch.object(updater.sys, "frozen", True, create=True),
+                patch.object(updater.sys, "executable", str(target_path)),
+                patch.object(updater, "updates_dir", return_value=updates_path),
+                patch.object(updater.os, "getpid", return_value=1234),
+                patch.object(updater.os, "getppid", return_value=5678),
+                patch.object(updater.shutil, "copy2"),
+                patch.object(updater.subprocess, "Popen") as popen,
+            ):
+                updater.launch_update_installer(source_path)
+
+            command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("-MindProcessId") + 1], "1234")
+            self.assertEqual(command[command.index("-MindParentProcessId") + 1], "5678")
+            self.assertEqual(popen.call_args.kwargs["creationflags"], 0x08000000)
 
 
 if __name__ == "__main__":

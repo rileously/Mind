@@ -40,7 +40,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # Avoid executable compression, which can increase antivirus scrutiny of
+    # the one-file runtime during update extraction.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
