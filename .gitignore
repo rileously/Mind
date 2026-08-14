@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.lock
+debug.log
+.venv/
+build/
+dist/
+*.spec
+!Mind.spec
+.pytest_cache/
+artifacts/
+assets/mind-logo-v2.png

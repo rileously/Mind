@@ -1,0 +1,90 @@
+# Mind
+
+[Download the latest Windows release](https://github.com/rileously/Mind/releases/latest/download/Mind.exe)
+
+Mind is a modern Windows writing assistant that transforms text directly inside any app.
+Type a trigger such as `?fix` after a sentence and Mind replaces the text in place using
+Gemini, Groq, Ollama, LM Studio, or another OpenAI-compatible provider.
+
+Mind is derived from [SwiftSlate Desktop](https://github.com/Musheer360/SwiftSlate-Desktop)
+and retains its fast Windows Raw Input engine. The new desktop layer adds a visual setup
+wizard, dashboard, encrypted API-key storage, provider testing, command management,
+themes, diagnostics, and system-tray controls.
+
+## Development preview
+
+Requirements:
+
+- Windows 10 or 11 (64-bit)
+- Python 3.10+
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe mind_app.pyw
+```
+
+Mind stores its settings in `%APPDATA%\Mind`. Your existing `%USERPROFILE%\.swiftslate`
+installation is not modified. On first launch, Mind can import its provider configuration
+and commands; imported API keys are immediately protected with Windows DPAPI.
+
+## Standalone Windows executable
+
+Build the portable, single-file Windows application with:
+
+```powershell
+.\build_exe.ps1
+```
+
+The result is written to `artifacts\Mind.exe`. The destination PC does not need Python;
+copy `Mind.exe` to a permanent folder, double-click it, and complete the setup wizard.
+The executable is currently unsigned, so Windows may show an unknown-publisher warning.
+
+## Current preview features
+
+- Four-step visual onboarding
+- Optional SwiftSlate configuration migration
+- Gemini, Groq, Ollama, LM Studio, and custom providers
+- Read-only provider connection test
+- Windows-encrypted API-key storage
+- Start, pause, and monitor the background engine
+- Visual command editor with duplicate validation and shell warnings
+- Optional Mind Palette (`Ctrl+Alt+M`) for transforming selected text
+- Optional automatic Palette popup after mouse-dragging or double-clicking selected text
+- Backspace or Delete dismisses the Palette and erases the original selection
+- Customizable Palette actions, order, columns, width, and text preview
+- Offline Palette tools for spacing cleanup, line-to-bullet conversion, duplicate-line
+  removal, uppercase/lowercase conversion, and writing statistics
+- Bundled AI commands for summarizing, extracting action items, translating to English,
+  and turning prose into structured bullets
+- Local Windows OCR for copied images, with extract, Dhivehi, writing-fix, summary, number-sum, and equation-solving actions
+- Optional local English spelling correction after Space, with Conservative, Balanced,
+  and Strong modes plus immediate Backspace undo
+- Teal, blue, purple, rose, and orange accent colors
+- Light, dark, and system themes
+- Per-user Windows startup registration
+- Diagnostics view with no API-key logging
+
+## Privacy
+
+Mind does not include telemetry and does not store a history of transformed text. Realtime
+spelling, image text extraction, and offline Palette text tools run locally. Cloud providers
+receive text only when you invoke an AI transformation, including an image action such as
+translate, fix, or summarize; the image itself is not uploaded. Local replacer commands run
+on the computer. Shell replacers
+execute with the current user's permissions and should only be created from trusted commands.
+
+## Testing
+
+```powershell
+python -m unittest discover -s tests -v
+python -c "import py_compile; py_compile.compile('SwiftSlate.pyw', doraise=True)"
+```
+
+The keyboard-capture and inline-replacement path must also be tested manually on Windows
+in Notepad, browsers, Office apps, and messaging clients.
+
+## License and attribution
+
+This project is distributed under the MIT License. See [LICENSE](LICENSE) and
+[NOTICE.md](NOTICE.md). SwiftSlate Desktop copyright remains with its original author.
