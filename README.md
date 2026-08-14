@@ -6,10 +6,9 @@ Mind is a modern Windows writing assistant that transforms text directly inside 
 Type a trigger such as `?fix` after a sentence and Mind replaces the text in place using
 Gemini, Groq, Ollama, LM Studio, or another OpenAI-compatible provider.
 
-Mind is derived from [SwiftSlate Desktop](https://github.com/Musheer360/SwiftSlate-Desktop)
-and retains its fast Windows Raw Input engine. The new desktop layer adds a visual setup
-wizard, dashboard, encrypted API-key storage, provider testing, command management,
-themes, diagnostics, and system-tray controls.
+Mind combines a fast Windows Raw Input engine with a modern desktop layer that adds a
+visual setup wizard, dashboard, encrypted API-key storage, provider testing, command
+management, themes, diagnostics, and system-tray controls.
 
 ## Development preview
 
