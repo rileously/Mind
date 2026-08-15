@@ -2,11 +2,12 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_dir = Path(SPECPATH)
 spellchecker_data = collect_data_files("spellchecker")
+mind_submodules = collect_submodules("mind")
 
 
 a = Analysis(
@@ -20,7 +21,7 @@ a = Analysis(
         (str(project_dir / "mind" / "install_update.ps1"), "mind"),
         (str(project_dir / "mind" / "windows_ocr.ps1"), "mind"),
     ] + spellchecker_data,
-    hiddenimports=["spellchecker", "mind.autocorrect"],
+    hiddenimports=["spellchecker"] + mind_submodules,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
