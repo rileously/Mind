@@ -54,8 +54,12 @@ from .clipboard_history_dialog import ClipboardHistoryDialog
 from .converter_tools import detect_and_convert
 from .quick_paste_popup import QuickPastePopup
 from .palette import MindPalette
+from .secret_detector import detect_secrets
+from .secret_shield_card import SecretShieldCard
 from .snipping_overlay import SnippingOverlay
 from .snip_card import SnipCard
+from .url_peek_card import UrlPeekCard
+from .url_tools import is_http_url
 from .selection import (
     ClipboardImageSession,
     SelectionSession,
@@ -699,6 +703,22 @@ class SettingsPage(QWidget):
             "📋",
         )
         self.clipboard_history.toggled.connect(self.clipboard_shortcut.setEnabled)
+        self.secret_shield = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Secret & Privacy Shield",
+            "Alert and offer 1-click redaction when copying API keys, tokens, or credentials.",
+            self.secret_shield,
+            "🛡️",
+        )
+        self.url_peek = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "URL & Media Quick Peek",
+            "Show floating clean link, summary, and preview when selecting or copying links.",
+            self.url_peek,
+            "🔗",
+        )
         self.customize_palette = QPushButton("Customize actions and layout")
         self.customize_palette.clicked.connect(self._customize_palette)
         self._setting_row(
@@ -835,6 +855,8 @@ class SettingsPage(QWidget):
         clip_index = self.clipboard_shortcut.findData(clip_shortcut)
         self.clipboard_shortcut.setCurrentIndex(max(clip_index, 0))
         self.clipboard_shortcut.setEnabled(self.clipboard_history.isChecked())
+        self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
+        self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
 
     def save(self) -> None:
         prefix = self.prefix.text().strip()
@@ -862,6 +884,8 @@ class SettingsPage(QWidget):
                 "screen_snip_shortcut": self.snip_shortcut.currentData(),
                 "clipboard_history_enabled": self.clipboard_history.isChecked(),
                 "clipboard_history_shortcut": self.clipboard_shortcut.currentData(),
+                "secret_shield_enabled": self.secret_shield.isChecked(),
+                "url_peek_enabled": self.url_peek.isChecked(),
             }
         )
         try:
@@ -1030,6 +1054,9 @@ class MindWindow(QMainWindow):
         self.snipping_overlay.snip_captured.connect(self._on_snip_captured)
         self.clipboard_history_dialog = ClipboardHistoryDialog(self.store)
         self.clipboard_history_dialog.ai_action_requested.connect(self._on_clipboard_ai_action)
+        self.secret_shield_card = SecretShieldCard()
+        self.url_peek_card = UrlPeekCard()
+        self.url_peek_card.summarize_requested.connect(self._on_url_summarize_requested)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -1280,6 +1307,10 @@ class MindWindow(QMainWindow):
         self.snip_card.close()
         self.clipboard_history_dialog.dismiss()
         self.clipboard_history_dialog.close()
+        self.secret_shield_card.dismiss()
+        self.secret_shield_card.close()
+        self.url_peek_card.dismiss()
+        self.url_peek_card.close()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1491,6 +1522,13 @@ class MindWindow(QMainWindow):
         session = SelectionSession(selected_text=text, is_editable=False, source_hwnd=0)
         self.ask_ai_popup.show_for_selection(session, initial_prompt=prompt)
 
+    def _on_url_summarize_requested(self, clean_url: str) -> None:
+        session = SelectionSession(selected_text=clean_url, is_editable=False, source_hwnd=0)
+        self.ask_ai_popup.show_for_selection(
+            session,
+            initial_prompt=f"Summarize the key information, main takeaways, and context from this webpage:\n{clean_url}",
+        )
+
     def _configure_selection_monitor(self, config: dict | None = None) -> None:
         if self._quitting:
             self.selection_monitor.set_enabled(False)
@@ -1589,6 +1627,16 @@ class MindWindow(QMainWindow):
                 self.ask_ai_popup.show_converter_result(conversion, avoid_rect)
                 return
 
+        if bool(config.get("url_peek_enabled", True)) and is_http_url(session.text) and not is_notion_input(target_hwnd):
+            if self.palette and self.palette.isVisible():
+                self.palette.close()
+            if self.ask_ai_popup.isVisible():
+                self.ask_ai_popup.dismiss()
+            if self.definition_popup.isVisible():
+                self.definition_popup.dismiss()
+            self.url_peek_card.show_for_url(session.text)
+            return
+
         is_question = is_question_text(session.text)
         is_unsolved_math = is_math_or_number_problem(session.text)
 
@@ -1673,6 +1721,11 @@ class MindWindow(QMainWindow):
             self._pasted_texts.clear()
             if hasattr(self, "clipboard_history_dialog") and self.clipboard_history_dialog:
                 self.clipboard_history_dialog.history_store.add_entry(text)
+            config = self.store.load()
+            if bool(config.get("secret_shield_enabled", True)) and hasattr(self, "secret_shield_card") and self.secret_shield_card:
+                findings = detect_secrets(text)
+                if findings:
+                    self.secret_shield_card.show_for_findings(text, findings)
 
     def _on_single_click_gesture(
         self,

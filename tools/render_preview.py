@@ -21,11 +21,15 @@ from mind.dictionary import DefinitionResult, DefinitionSense
 from mind.main_window import MindWindow
 from mind.palette import MindPalette
 from mind.quick_paste_popup import QuickPastePopup
+from mind.secret_detector import detect_secrets
+from mind.secret_shield_card import SecretShieldCard
 from mind.selection import SelectionSession
 from mind.setup_wizard import SetupWizard
 from mind.snip_card import SnipCard
 from mind.theme import stylesheet
 from mind.ui_components import PaletteCustomizeDialog
+from mind.url_peek_card import UrlPeekCard
+from mind.url_tools import extract_quick_metadata
 
 
 def main() -> None:
@@ -45,6 +49,8 @@ def main() -> None:
     converter_output = PROJECT_ROOT / "artifacts" / "mind-converter.png"
     snip_card_output = PROJECT_ROOT / "artifacts" / "mind-snip-card.png"
     clipboard_output = PROJECT_ROOT / "artifacts" / "mind-clipboard-history.png"
+    secret_shield_output = PROJECT_ROOT / "artifacts" / "mind-secret-shield.png"
+    url_peek_output = PROJECT_ROOT / "artifacts" / "mind-url-peek.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         store = ConfigStore(Path(temporary) / "data", PROJECT_ROOT)
@@ -133,6 +139,20 @@ def main() -> None:
         app.processEvents()
         clip_dialog.grab().save(str(clipboard_output))
         clip_dialog.close()
+        shield_card = SecretShieldCard()
+        sample_secret = "export OPENAI_API_KEY=sk-proj-9xL2pQ8mK5vZ1wY4tE7rB0nC3aD6eF8gH1jK2lM3nP4qR5sT6uV7wX8yZ9"
+        findings = detect_secrets(sample_secret)
+        shield_card.show_for_findings(sample_secret, findings)
+        app.processEvents()
+        shield_card.grab().save(str(secret_shield_output))
+        shield_card.close()
+        url_card = UrlPeekCard()
+        sample_url = "https://github.com/rileously/Mind?utm_source=twitter&utm_medium=social&utm_campaign=launch"
+        meta = extract_quick_metadata(sample_url, html_snippet="<title>rileously/Mind: Universal AI writing and editing companion</title>")
+        url_card.show_for_url(sample_url, meta)
+        app.processEvents()
+        url_card.grab().save(str(url_peek_output))
+        url_card.close()
         app.setStyleSheet(stylesheet("dark", "purple"))
         customize = PaletteCustomizeDialog(store)
         customize.show()
@@ -155,6 +175,8 @@ def main() -> None:
     print(converter_output)
     print(snip_card_output)
     print(clipboard_output)
+    print(secret_shield_output)
+    print(url_peek_output)
 
 
 if __name__ == "__main__":

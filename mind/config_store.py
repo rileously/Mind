@@ -62,6 +62,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "clipboard_history_enabled": True,
     "clipboard_history_shortcut": "Ctrl+Alt+V",
     "clipboard_history_max_items": 100,
+    "secret_shield_enabled": True,
+    "url_peek_enabled": True,
     "mind_palette_shortcut": "Ctrl+Alt+M",
     "mind_palette_actions": DEFAULT_PALETTE_ACTIONS,
     "mind_palette_columns": 2,

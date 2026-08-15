@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup, QDialog#SnipCard, QDialog#ClipboardHistoryDialog {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup, QDialog#SnipCard, QDialog#ClipboardHistoryDialog, QDialog#SecretShieldCard, QDialog#UrlPeekCard {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -265,6 +265,62 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QLabel#ClipboardFooterHint {{
         font-size: 10px; color: {p['muted']}; padding-top: 2px;
+    }}
+    QWidget#SecretShieldFrame {{
+        background: {p['surface']}; border: 1px solid #E6A23C; border-radius: 14px;
+    }}
+    QLabel#SecretShieldIcon {{ font-size: 16px; }}
+    QLabel#SecretShieldTitle {{ font-size: 13px; font-weight: 700; color: {p['text']}; }}
+    QLabel#SecretShieldTypeBadge {{
+        font-size: 10px; font-weight: 700; color: #E6A23C;
+        background: {p['surface_alt']}; border: 1px solid #E6A23C;
+        border-radius: 4px; padding: 2px 6px;
+    }}
+    QFrame#SecretShieldPreviewContainer {{
+        background: {p['surface_alt']}; border: 1px solid {p['border']}; border-radius: 6px;
+    }}
+    QLabel#SecretShieldPreviewText {{
+        font-family: "Cascadia Mono", monospace; font-size: 11px; color: {p['text']};
+    }}
+    QPushButton#SecretShieldRedactButton {{
+        min-height: 28px; padding: 0 12px; font-size: 11px; font-weight: 700;
+        border-radius: 6px; background: #E6A23C; color: black; border: 0;
+    }}
+    QPushButton#SecretShieldRedactButton:hover {{ background: #F5BC68; }}
+    QPushButton#SecretShieldKeepButton {{
+        min-height: 28px; padding: 0 10px; font-size: 11px; font-weight: 600;
+        border-radius: 6px; background: {p['surface_alt']}; color: {p['text']};
+        border: 1px solid {p['border']};
+    }}
+    QPushButton#SecretShieldKeepButton:hover {{
+        background: {p['surface_hover']};
+    }}
+    QWidget#UrlPeekFrame {{
+        background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 14px;
+    }}
+    QLabel#UrlPeekDomainBadge {{
+        font-size: 11px; font-weight: 700; color: {p['accent']};
+        background: {p['surface_alt']}; border: 1px solid {p['border']};
+        border-radius: 4px; padding: 2px 6px;
+    }}
+    QLabel#UrlPeekTitle {{
+        font-size: 13px; font-weight: 700; color: {p['text']};
+    }}
+    QLabel#UrlPeekUrlText {{
+        font-family: "Cascadia Mono", monospace; font-size: 11px; color: {p['muted']};
+    }}
+    QPushButton#UrlPeekCleanButton {{
+        min-height: 28px; padding: 0 10px; font-size: 11px; font-weight: 700;
+        border-radius: 6px; background: {p['accent']}; color: white; border: 0;
+    }}
+    QPushButton#UrlPeekCleanButton:hover {{ background: {p['accent_hover']}; }}
+    QPushButton#UrlPeekAiButton, QPushButton#UrlPeekOpenButton {{
+        min-height: 28px; padding: 0 10px; font-size: 11px; font-weight: 600;
+        border-radius: 6px; background: {p['surface_alt']}; color: {p['text']};
+        border: 1px solid {p['border']};
+    }}
+    QPushButton#UrlPeekAiButton:hover, QPushButton#UrlPeekOpenButton:hover {{
+        background: {p['surface_hover']};
     }}
     QLabel#SectionTitle {{ font-size: 15px; font-weight: 650; }}
     QLabel#SettingTitle {{ font-size: 13px; font-weight: 600; }}
