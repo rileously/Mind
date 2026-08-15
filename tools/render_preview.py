@@ -16,6 +16,7 @@ from mind.definition_popup import DefinitionPopup
 from mind.dictionary import DefinitionResult, DefinitionSense
 from mind.main_window import MindWindow
 from mind.palette import MindPalette
+from mind.quick_paste_popup import QuickPastePopup
 from mind.selection import SelectionSession
 from mind.setup_wizard import SetupWizard
 from mind.theme import stylesheet
@@ -35,6 +36,7 @@ def main() -> None:
     palette_output = PROJECT_ROOT / "artifacts" / "mind-palette.png"
     customize_output = PROJECT_ROOT / "artifacts" / "mind-palette-customize.png"
     definition_output = PROJECT_ROOT / "artifacts" / "mind-definition.png"
+    quick_paste_output = PROJECT_ROOT / "artifacts" / "mind-quick-paste.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         store = ConfigStore(Path(temporary) / "data", PROJECT_ROOT)
@@ -93,6 +95,11 @@ def main() -> None:
         app.processEvents()
         definition.grab().save(str(definition_output))
         definition.close()
+        quick_paste = QuickPastePopup()
+        quick_paste.show_for_text("https://github.com/rileously/Mind", 1)
+        app.processEvents()
+        quick_paste.grab().save(str(quick_paste_output))
+        quick_paste.close()
         app.setStyleSheet(stylesheet("dark", "purple"))
         customize = PaletteCustomizeDialog(store)
         customize.show()
@@ -111,6 +118,7 @@ def main() -> None:
     print(palette_output)
     print(customize_output)
     print(definition_output)
+    print(quick_paste_output)
 
 
 if __name__ == "__main__":

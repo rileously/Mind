@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -128,7 +128,50 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     QLabel#PageTitle {{
         font-family: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI";
         font-size: 26px; font-weight: 650;
+        color: {p['text']};
     }}
+    QLabel#PageSubtitle {{ color: {p['muted']}; font-size: 12px; }}
+    QLabel#CardTitle {{ font-size: 16px; font-weight: 700; color: {p['text']}; }}
+    QLabel#CardBody {{ color: {p['muted']}; font-size: 12px; }}
+    QLabel#HeroHeading {{
+        font-family: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI";
+        font-size: 32px; font-weight: 760;
+        color: {p['text']};
+    }}
+    QLabel#HeroSubheading {{
+        color: {p['muted']}; font-size: 14px; max-width: 720px;
+    }}
+    QFrame#Card {{
+        background: {p['surface']}; border: 1px solid {p['border_soft']}; border-radius: 14px;
+    }}
+    QFrame#Card:hover {{ border-color: {p['border']}; }}
+    QFrame#StatusCard {{
+        background: {p['surface_alt']}; border: 1px solid {p['border_soft']}; border-radius: 12px;
+    }}
+    QFrame#SettingRow {{
+        background: {p['surface_alt']}; border: 1px solid {p['border_soft']}; border-radius: 10px;
+    }}
+    QFrame#SettingRow:hover {{
+        background: {p['surface_hover']}; border-color: {p['border']};
+    }}
+    QWidget#PaletteShell {{
+        background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px;
+    }}
+    QWidget#DefinitionCard, QWidget#AskAiCard {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 13px;
+    }}
+    QWidget#QuickPasteCard {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 12px;
+    }}
+    QLabel#QuickPasteIcon {{ font-size: 13px; }}
+    QLabel#QuickPastePreview {{
+        color: {p['text']}; font-size: 12px; font-weight: 550;
+    }}
+    QPushButton#QuickPasteButton {{
+        min-height: 26px; padding: 0 12px; font-size: 11px; font-weight: 700;
+        border-radius: 6px; background: {p['accent']}; color: white; border: 0;
+    }}
+    QPushButton#QuickPasteButton:hover {{ background: {p['accent_hover']}; }}
     QLabel#SectionTitle {{ font-size: 15px; font-weight: 650; }}
     QLabel#SettingTitle {{ font-size: 13px; font-weight: 600; }}
     QLabel#SettingsGroupTitle {{

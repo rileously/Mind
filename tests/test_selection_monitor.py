@@ -50,6 +50,13 @@ class SelectionGestureTrackerTests(unittest.TestCase):
         self.tracker.update(self.sample(True, 10, 20, 1.2))
         self.assertIsNone(self.tracker.update(self.sample(False, 10, 20, 1.3)))
 
+    def test_single_click_tracks_last_single_click(self):
+        self.tracker.update(self.sample(True, 10, 20, 1.0))
+        result = self.tracker.update(self.sample(False, 11, 20, 1.1, hwnd=300))
+        self.assertIsNone(result)
+        self.assertIsNotNone(self.tracker.last_single_click)
+        self.assertEqual(self.tracker.last_single_click[0], 300)
+
 
 if __name__ == "__main__":
     unittest.main()

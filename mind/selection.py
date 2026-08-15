@@ -539,3 +539,14 @@ def is_notion_input(target_hwnd: int) -> bool:
     return is_editable_input_target(target_hwnd)
 
 
+def send_paste_input(target_hwnd: int | None = None) -> bool:
+    """Send Ctrl+V to the target window to paste clipboard contents."""
+    if target_hwnd:
+        user32 = ctypes.windll.user32
+        if user32.GetForegroundWindow() != target_hwnd:
+            user32.SetForegroundWindow(target_hwnd)
+            time.sleep(0.04)
+    return _send_ctrl_key(0x56)
+
+
+

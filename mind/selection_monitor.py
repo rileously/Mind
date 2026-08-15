@@ -28,7 +28,7 @@ class PointerSample:
 
 
 class SelectionGestureTracker:
-    """Recognize mouse drags and double-clicks without reacting to ordinary clicks."""
+    """Recognize mouse drags, double-clicks, and single clicks."""
 
     def __init__(self, double_click_seconds: float = 0.5):
         self.double_click_seconds = max(0.1, double_click_seconds)
@@ -42,10 +42,18 @@ class SelectionGestureTracker:
         self._last_click_y = 0
         self._last_click_hwnd = 0
         self._selection_bounds: tuple[int, int, int, int] | None = None
+        self._last_single_click_hwnd = 0
+        self._last_single_click_bounds: tuple[int, int, int, int] | None = None
 
     @property
     def selection_bounds(self) -> tuple[int, int, int, int] | None:
         return self._selection_bounds
+
+    @property
+    def last_single_click(self) -> tuple[int, tuple[int, int, int, int]] | None:
+        if self._last_single_click_hwnd and self._last_single_click_bounds:
+            return (self._last_single_click_hwnd, self._last_single_click_bounds)
+        return None
 
     def reset(self) -> None:
         self._pressed = False
@@ -53,8 +61,13 @@ class SelectionGestureTracker:
         self._last_click_time = 0.0
         self._last_click_hwnd = 0
         self._selection_bounds = None
+        self._last_single_click_hwnd = 0
+        self._last_single_click_bounds = None
 
     def update(self, sample: PointerSample) -> int | None:
+        self._last_single_click_hwnd = 0
+        self._last_single_click_bounds = None
+
         if sample.down:
             if not self._pressed:
                 self._selection_bounds = None
@@ -106,7 +119,16 @@ class SelectionGestureTracker:
                 sample.x + 70,
                 sample.y + 22,
             )
-        return sample.hwnd if double_click else None
+            return sample.hwnd
+
+        self._last_single_click_hwnd = sample.hwnd
+        self._last_single_click_bounds = (
+            sample.x - 16,
+            sample.y - 12,
+            sample.x + 16,
+            sample.y + 12,
+        )
+        return None
 
     def _remember_click(self, sample: PointerSample) -> None:
         self._last_click_time = sample.when
@@ -117,6 +139,7 @@ class SelectionGestureTracker:
 
 class SelectionMonitor(QObject):
     selection_gesture = Signal(int, object)
+    single_click_gesture = Signal(int, object)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -176,6 +199,14 @@ class SelectionMonitor(QObject):
                     target, bounds
                 ),
             )
+        elif self._tracker.last_single_click:
+            click_hwnd, click_bounds = self._tracker.last_single_click
+            QTimer.singleShot(
+                120,
+                lambda target=click_hwnd, bounds=click_bounds: self._emit_single_click(
+                    target, bounds
+                ),
+            )
 
     def _emit_target(
         self,
@@ -186,3 +217,13 @@ class SelectionMonitor(QObject):
             return
         if target and target != self._ignored_hwnd:
             self.selection_gesture.emit(target, bounds)
+
+    def _emit_single_click(
+        self,
+        target: int,
+        bounds: tuple[int, int, int, int] | None,
+    ) -> None:
+        if not self._enabled:
+            return
+        if target and target != self._ignored_hwnd:
+            self.single_click_gesture.emit(target, bounds)

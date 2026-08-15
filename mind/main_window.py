@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from .math_tools import is_math_or_number_problem, solve_math_locally
 from .paths import launcher_path
 from .phone_tools import parse_maldivian_phone
 from .ask_ai_popup import AskAiPopup
+from .quick_paste_popup import QuickPastePopup
 from .palette import MindPalette
 from .selection import (
     ClipboardImageSession,
@@ -560,6 +562,14 @@ class SettingsPage(QWidget):
             self.word_definitions,
             "Aa",
         )
+        self.quick_paste = ToggleSwitch()
+        self._setting_row(
+            behavior_layout,
+            "Quick paste tooltip",
+            "Shows a floating Paste button when clicking into an editable field after copying text.",
+            self.quick_paste,
+            "📋",
+        )
         self.autocorrect_strength = QComboBox()
         self.autocorrect_strength.addItem("Conservative", "conservative")
         self.autocorrect_strength.addItem("Balanced (recommended)", "balanced")
@@ -737,6 +747,7 @@ class SettingsPage(QWidget):
         self.delay.setValue(int(config.get("key_delay", 200)))
         self.autocorrect.setChecked(bool(config.get("autocorrect_after_space", False)))
         self.word_definitions.setChecked(bool(config.get("word_definitions_enabled", True)))
+        self.quick_paste.setChecked(bool(config.get("quick_paste_enabled", True)))
         strength_index = self.autocorrect_strength.findData(config.get("autocorrect_strength", "balanced"))
         self.autocorrect_strength.setCurrentIndex(max(strength_index, 0))
         self.autocorrect_strength.setEnabled(self.autocorrect.isChecked())
@@ -766,6 +777,7 @@ class SettingsPage(QWidget):
                 "key_delay": self.delay.value(),
                 "autocorrect_after_space": self.autocorrect.isChecked(),
                 "word_definitions_enabled": self.word_definitions.isChecked(),
+                "quick_paste_enabled": self.quick_paste.isChecked(),
                 "autocorrect_strength": self.autocorrect_strength.currentData(),
                 "theme": self.theme.currentData(),
                 "accent_color": self.accent.currentData(),
@@ -930,6 +942,14 @@ class MindWindow(QMainWindow):
         self.palette: MindPalette | None = None
         self.definition_popup = DefinitionPopup()
         self.ask_ai_popup = AskAiPopup(self.store)
+        self.quick_paste_popup = QuickPastePopup()
+        self.quick_paste_popup.pasted.connect(self._on_quick_paste_pasted)
+        self._last_copied_text = ""
+        self._last_copied_time = 0.0
+        self._pasted_texts: set[str] = set()
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.dataChanged.connect(self._on_clipboard_data_changed)
         self.selection_monitor = SelectionMonitor(self)
         self.setWindowTitle("Mind • AI Writing Workspace")
         self.setWindowIcon(app_icon())
@@ -939,6 +959,7 @@ class MindWindow(QMainWindow):
         self._build_tray()
         self.selection_monitor.set_ignored_window(int(self.winId()))
         self.selection_monitor.selection_gesture.connect(self._automatic_selection_requested)
+        self.selection_monitor.single_click_gesture.connect(self._on_single_click_gesture)
         self.apply_theme(
             str(self.config.get("theme", "system")),
             str(self.config.get("accent_color", "teal")),
@@ -1141,6 +1162,10 @@ class MindWindow(QMainWindow):
         self.configure_palette(False, self._palette_shortcut)
         self.definition_popup.dismiss()
         self.definition_popup.close()
+        self.ask_ai_popup.dismiss()
+        self.ask_ai_popup.close()
+        self.quick_paste_popup.dismiss()
+        self.quick_paste_popup.close()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1411,3 +1436,41 @@ class MindWindow(QMainWindow):
         if self.palette:
             self.palette.deleteLater()
             self.palette = None
+
+    def _on_clipboard_data_changed(self) -> None:
+        clipboard = QApplication.clipboard()
+        if not clipboard:
+            return
+        text = clipboard.text()
+        if text and text.strip():
+            self._last_copied_text = text
+            self._last_copied_time = time.monotonic()
+            self._pasted_texts.clear()
+
+    def _on_single_click_gesture(
+        self,
+        target_hwnd: int,
+        avoid_rect: tuple[int, int, int, int] | None,
+    ) -> None:
+        if target_hwnd == int(self.winId()):
+            return
+        config = self.store.load()
+        if not bool(config.get("quick_paste_enabled", True)):
+            return
+        if not self._last_copied_text or self._last_copied_text in self._pasted_texts:
+            return
+        if time.monotonic() - self._last_copied_time > 180.0:
+            return
+        if not is_editable_input_target(target_hwnd):
+            return
+        if self.palette and self.palette.isVisible():
+            self.palette.close()
+        if self.definition_popup.isVisible():
+            self.definition_popup.dismiss()
+        if self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
+        self.quick_paste_popup.show_for_text(self._last_copied_text, target_hwnd, avoid_rect)
+
+    def _on_quick_paste_pasted(self, text: str) -> None:
+        self._pasted_texts.add(text)
+
