@@ -1133,6 +1133,13 @@ class MindWindow(QMainWindow):
                 str(self.config.get("clipboard_history_shortcut", "Ctrl+Alt+V")),
             ),
         )
+        QTimer.singleShot(
+            0,
+            lambda: self.configure_ghost_text(
+                bool(self.config.get("ghost_text_enabled", True)),
+                str(self.config.get("ghost_text_shortcut", "Ctrl+Alt+Space")),
+            ),
+        )
         if self.config.get("start_engine_on_launch", False):
             QTimer.singleShot(300, self.engine.start)
         QTimer.singleShot(2500, lambda: self.settings.check_for_updates(silent=True))
@@ -1268,6 +1275,8 @@ class MindWindow(QMainWindow):
         snip_action.triggered.connect(self.trigger_screen_snip)
         clip_action = QAction("📋 Clipboard History", self)
         clip_action.triggered.connect(self.trigger_clipboard_history)
+        ghost_action = QAction("🪄 Ghost Text Finisher", self)
+        ghost_action.triggered.connect(self.trigger_ghost_text)
         self.tray_engine_action = QAction("Start engine", self)
         self.tray_engine_action.triggered.connect(self.toggle_engine)
         quit_action = QAction("Quit Mind", self)
@@ -1275,6 +1284,7 @@ class MindWindow(QMainWindow):
         menu.addAction(open_action)
         menu.addAction(snip_action)
         menu.addAction(clip_action)
+        menu.addAction(ghost_action)
         menu.addAction(self.tray_engine_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -1601,9 +1611,19 @@ class MindWindow(QMainWindow):
         self.settings.refresh()
 
     def trigger_ghost_text(self) -> None:
+        if self.palette and self.palette.isVisible():
+            self.palette.close()
+        if self.ask_ai_popup and self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
+        if self.definition_popup and self.definition_popup.isVisible():
+            self.definition_popup.dismiss()
+        if self.quick_paste_popup and self.quick_paste_popup.isVisible():
+            self.quick_paste_popup.dismiss()
         target_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
         session = SelectionSession.capture(target_hwnd, timeout=0.25) if target_hwnd else None
         text = session.text if session else ""
+        if not text and hasattr(self, "_last_copied_text"):
+            text = self._last_copied_text
         suggestion = suggest_sentence_completion(text) if text else None
         if not suggestion:
             suggestion = " please let me know if you need anything else."
