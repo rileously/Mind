@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 import re
 
 from .config_store import ConfigStore
+from .converter_tools import ConversionResult
 from .transform_client import TransformError, transform_text
 
 
@@ -319,6 +320,35 @@ class AskAiPopup(QDialog):
         self._position_popup()
         self.show()
         self._hide_timer.start(15000)
+        self._dismiss_timer.start()
+
+    def show_converter_result(
+        self,
+        result: ConversionResult,
+        avoid_rect: tuple[int, int, int, int] | None = None,
+    ) -> None:
+        self._question = result.input_text.strip()
+        self._answer = result.output_text.strip()
+        self._is_expanded = True
+        self._avoid_rect = self._rect_from_tuple(avoid_rect)
+
+        self.pill_widget.hide()
+        self.card_widget.show()
+
+        self.title_icon.setText(result.icon)
+        self.title_label.setText(result.title)
+        display_input = self._question if len(self._question) <= 80 else self._question[:77] + "…"
+        self.question_label.setText(f"Input: {display_input}")
+        self.answer_label.setText(self._answer)
+        self.progress_bar.hide()
+        self.copy_button.show()
+        self._hide_phone_buttons()
+        self._reset_copy_button()
+
+        self.adjustSize()
+        self._position_popup()
+        self.show()
+        self._hide_timer.start(18000)
         self._dismiss_timer.start()
 
     def show_pill_for_question(

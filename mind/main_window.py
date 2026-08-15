@@ -38,13 +38,24 @@ from .config_store import ConfigStore
 from .definition_popup import DefinitionPopup
 from .dictionary import normalize_selected_word
 from .engine_manager import EngineManager
-from .hotkeys import PALETTE_SHORTCUTS, shortcut_candidates
+from .hotkeys import (
+    CLIPBOARD_HISTORY_SHORTCUTS,
+    PALETTE_SHORTCUTS,
+    SNIP_SHORTCUTS,
+    clipboard_history_shortcut_candidates,
+    shortcut_candidates,
+    snip_shortcut_candidates,
+)
 from .math_tools import is_math_or_number_problem, solve_math_locally
 from .paths import launcher_path
 from .phone_tools import parse_maldivian_phone
 from .ask_ai_popup import AskAiPopup
+from .clipboard_history_dialog import ClipboardHistoryDialog
+from .converter_tools import detect_and_convert
 from .quick_paste_popup import QuickPastePopup
 from .palette import MindPalette
+from .snipping_overlay import SnippingOverlay
+from .snip_card import SnipCard
 from .selection import (
     ClipboardImageSession,
     SelectionSession,
@@ -77,6 +88,8 @@ from .ui_components import (
 
 WM_HOTKEY = 0x0312
 MIND_PALETTE_HOTKEY_ID = 0x4D49
+MIND_SNIP_HOTKEY_ID = 0x534E
+MIND_CLIPBOARD_HOTKEY_ID = 0x4348
 
 
 class DashboardPage(QWidget):
@@ -372,7 +385,7 @@ class CommandsPage(QWidget):
             if not query or query in searchable:
                 shown.append((index, command))
         self.table.setRowCount(len(shown))
-        labels = {"ai": "AI", "replacer-text": "Fixed text", "replacer-shell": "Shell"}
+        labels = {"ai": "AI", "replacer-text": "Snippet", "replacer-shell": "Shell"}
         for row, (source_index, command) in enumerate(shown):
             kind = str(command.get("type", "ai"))
             description = str(command.get("prompt", command.get("value", ""))).replace("\n", " ")
@@ -570,6 +583,14 @@ class SettingsPage(QWidget):
             self.quick_paste,
             "📋",
         )
+        self.converter_tooltips = ToggleSwitch()
+        self._setting_row(
+            behavior_layout,
+            "Instant converter",
+            "Shows real-time currency, unit, and timezone conversions above selected values.",
+            self.converter_tooltips,
+            "💱",
+        )
         self.autocorrect_strength = QComboBox()
         self.autocorrect_strength.addItem("Conservative", "conservative")
         self.autocorrect_strength.addItem("Balanced (recommended)", "balanced")
@@ -638,6 +659,46 @@ class SettingsPage(QWidget):
         )
         self.mind_palette.toggled.connect(self.palette_shortcut.setEnabled)
         self.mind_palette.toggled.connect(self.palette_auto_show.setEnabled)
+        self.screen_snip = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Screen Snip (OCR & AI)",
+            "Select any area of your screen with a crosshair to extract text or ask AI to explain.",
+            self.screen_snip,
+            "📸",
+        )
+        self.snip_shortcut = QComboBox()
+        for shortcut in SNIP_SHORTCUTS:
+            self.snip_shortcut.addItem(shortcut, shortcut)
+        self.snip_shortcut.setMinimumWidth(150)
+        self._setting_row(
+            appearance_layout,
+            "Snip shortcut",
+            "Shortcut to start on-screen rectangular snipping.",
+            self.snip_shortcut,
+            "✀",
+        )
+        self.screen_snip.toggled.connect(self.snip_shortcut.setEnabled)
+        self.clipboard_history = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Clipboard History",
+            "Keep a searchable history of copied items with instant paste and AI actions.",
+            self.clipboard_history,
+            "📋",
+        )
+        self.clipboard_shortcut = QComboBox()
+        for shortcut in CLIPBOARD_HISTORY_SHORTCUTS:
+            self.clipboard_shortcut.addItem(shortcut, shortcut)
+        self.clipboard_shortcut.setMinimumWidth(150)
+        self._setting_row(
+            appearance_layout,
+            "Clipboard history shortcut",
+            "Shortcut to open the floating clipboard history search modal.",
+            self.clipboard_shortcut,
+            "📋",
+        )
+        self.clipboard_history.toggled.connect(self.clipboard_shortcut.setEnabled)
         self.customize_palette = QPushButton("Customize actions and layout")
         self.customize_palette.clicked.connect(self._customize_palette)
         self._setting_row(
@@ -748,6 +809,7 @@ class SettingsPage(QWidget):
         self.autocorrect.setChecked(bool(config.get("autocorrect_after_space", False)))
         self.word_definitions.setChecked(bool(config.get("word_definitions_enabled", True)))
         self.quick_paste.setChecked(bool(config.get("quick_paste_enabled", True)))
+        self.converter_tooltips.setChecked(bool(config.get("converter_tooltips_enabled", True)))
         strength_index = self.autocorrect_strength.findData(config.get("autocorrect_strength", "balanced"))
         self.autocorrect_strength.setCurrentIndex(max(strength_index, 0))
         self.autocorrect_strength.setEnabled(self.autocorrect.isChecked())
@@ -763,6 +825,16 @@ class SettingsPage(QWidget):
         shortcut_index = self.palette_shortcut.findData(shortcut)
         self.palette_shortcut.setCurrentIndex(max(shortcut_index, 0))
         self.palette_shortcut.setEnabled(self.mind_palette.isChecked())
+        self.screen_snip.setChecked(bool(config.get("screen_snip_enabled", True)))
+        snip_shortcut = str(config.get("screen_snip_shortcut", "Ctrl+Alt+S"))
+        snip_index = self.snip_shortcut.findData(snip_shortcut)
+        self.snip_shortcut.setCurrentIndex(max(snip_index, 0))
+        self.snip_shortcut.setEnabled(self.screen_snip.isChecked())
+        self.clipboard_history.setChecked(bool(config.get("clipboard_history_enabled", True)))
+        clip_shortcut = str(config.get("clipboard_history_shortcut", "Ctrl+Alt+V"))
+        clip_index = self.clipboard_shortcut.findData(clip_shortcut)
+        self.clipboard_shortcut.setCurrentIndex(max(clip_index, 0))
+        self.clipboard_shortcut.setEnabled(self.clipboard_history.isChecked())
 
     def save(self) -> None:
         prefix = self.prefix.text().strip()
@@ -778,6 +850,7 @@ class SettingsPage(QWidget):
                 "autocorrect_after_space": self.autocorrect.isChecked(),
                 "word_definitions_enabled": self.word_definitions.isChecked(),
                 "quick_paste_enabled": self.quick_paste.isChecked(),
+                "converter_tooltips_enabled": self.converter_tooltips.isChecked(),
                 "autocorrect_strength": self.autocorrect_strength.currentData(),
                 "theme": self.theme.currentData(),
                 "accent_color": self.accent.currentData(),
@@ -785,6 +858,10 @@ class SettingsPage(QWidget):
                 "mind_palette_enabled": self.mind_palette.isChecked(),
                 "mind_palette_auto_show_on_selection": self.palette_auto_show.isChecked(),
                 "mind_palette_shortcut": self.palette_shortcut.currentData(),
+                "screen_snip_enabled": self.screen_snip.isChecked(),
+                "screen_snip_shortcut": self.snip_shortcut.currentData(),
+                "clipboard_history_enabled": self.clipboard_history.isChecked(),
+                "clipboard_history_shortcut": self.clipboard_shortcut.currentData(),
             }
         )
         try:
@@ -939,11 +1016,20 @@ class MindWindow(QMainWindow):
         self._palette_shortcut = "Ctrl+Alt+M"
         self._palette_pending = False
         self._selection_pending = False
+        self._snip_hotkey_registered = False
+        self._snip_shortcut = "Ctrl+Alt+S"
+        self._clipboard_hotkey_registered = False
+        self._clipboard_shortcut = "Ctrl+Alt+V"
         self.palette: MindPalette | None = None
         self.definition_popup = DefinitionPopup()
         self.ask_ai_popup = AskAiPopup(self.store)
         self.quick_paste_popup = QuickPastePopup()
         self.quick_paste_popup.pasted.connect(self._on_quick_paste_pasted)
+        self.snipping_overlay = SnippingOverlay()
+        self.snip_card = SnipCard(self.store)
+        self.snipping_overlay.snip_captured.connect(self._on_snip_captured)
+        self.clipboard_history_dialog = ClipboardHistoryDialog(self.store)
+        self.clipboard_history_dialog.ai_action_requested.connect(self._on_clipboard_ai_action)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -969,6 +1055,20 @@ class MindWindow(QMainWindow):
             lambda: self.configure_palette(
                 bool(self.config.get("mind_palette_enabled", False)),
                 str(self.config.get("mind_palette_shortcut", "Ctrl+Alt+M")),
+            ),
+        )
+        QTimer.singleShot(
+            0,
+            lambda: self.configure_snip(
+                bool(self.config.get("screen_snip_enabled", True)),
+                str(self.config.get("screen_snip_shortcut", "Ctrl+Alt+S")),
+            ),
+        )
+        QTimer.singleShot(
+            0,
+            lambda: self.configure_clipboard_history(
+                bool(self.config.get("clipboard_history_enabled", True)),
+                str(self.config.get("clipboard_history_shortcut", "Ctrl+Alt+V")),
             ),
         )
         if self.config.get("start_engine_on_launch", False):
@@ -1102,11 +1202,17 @@ class MindWindow(QMainWindow):
         menu = QMenu()
         open_action = QAction("Open Mind", self)
         open_action.triggered.connect(self.show_window)
+        snip_action = QAction("📸 Screen Snip (OCR & AI)", self)
+        snip_action.triggered.connect(self.trigger_screen_snip)
+        clip_action = QAction("📋 Clipboard History", self)
+        clip_action.triggered.connect(self.trigger_clipboard_history)
         self.tray_engine_action = QAction("Start engine", self)
         self.tray_engine_action.triggered.connect(self.toggle_engine)
         quit_action = QAction("Quit Mind", self)
         quit_action.triggered.connect(self.quit_app)
         menu.addAction(open_action)
+        menu.addAction(snip_action)
+        menu.addAction(clip_action)
         menu.addAction(self.tray_engine_action)
         menu.addSeparator()
         menu.addAction(quit_action)
@@ -1160,12 +1266,20 @@ class MindWindow(QMainWindow):
     def quit_app(self) -> None:
         self._quitting = True
         self.configure_palette(False, self._palette_shortcut)
+        self.configure_snip(False, self._snip_shortcut)
+        self.configure_clipboard_history(False, self._clipboard_shortcut)
         self.definition_popup.dismiss()
         self.definition_popup.close()
         self.ask_ai_popup.dismiss()
         self.ask_ai_popup.close()
         self.quick_paste_popup.dismiss()
         self.quick_paste_popup.close()
+        self.snipping_overlay.cancel_snip()
+        self.snipping_overlay.close()
+        self.snip_card.dismiss()
+        self.snip_card.close()
+        self.clipboard_history_dialog.dismiss()
+        self.clipboard_history_dialog.close()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1212,6 +1326,15 @@ class MindWindow(QMainWindow):
     def _settings_updated(self, theme: str, palette_enabled: bool, shortcut: str, accent: str) -> None:
         self.apply_theme(theme, accent)
         self.configure_palette(palette_enabled, shortcut)
+        config = self.store.load()
+        self.configure_snip(
+            bool(config.get("screen_snip_enabled", True)),
+            str(config.get("screen_snip_shortcut", "Ctrl+Alt+S")),
+        )
+        self.configure_clipboard_history(
+            bool(config.get("clipboard_history_enabled", True)),
+            str(config.get("clipboard_history_shortcut", "Ctrl+Alt+V")),
+        )
         self._config_updated()
 
     def _notify_update_available(self, version: str, title: str) -> None:
@@ -1281,6 +1404,93 @@ class MindWindow(QMainWindow):
             4000,
         )
 
+    def configure_snip(self, enabled: bool, preferred_shortcut: str) -> None:
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        if self._snip_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, MIND_SNIP_HOTKEY_ID)
+            self._snip_hotkey_registered = False
+        if not enabled:
+            return
+        chosen = None
+        for shortcut, modifiers, virtual_key in snip_shortcut_candidates(preferred_shortcut):
+            if user32.RegisterHotKey(hwnd, MIND_SNIP_HOTKEY_ID, modifiers, virtual_key):
+                chosen = shortcut
+                break
+        if chosen:
+            self._snip_hotkey_registered = True
+            self._snip_shortcut = chosen
+            self._log(f"Screen Snip enabled: {chosen}")
+            if chosen != preferred_shortcut:
+                config = self.store.load()
+                config["screen_snip_shortcut"] = chosen
+                self.store.save(config)
+                self.settings.refresh()
+            return
+
+        config = self.store.load()
+        config["screen_snip_enabled"] = False
+        self.store.save(config)
+        self.settings.refresh()
+
+    def trigger_screen_snip(self) -> None:
+        if self.palette and self.palette.isVisible():
+            self.palette.close()
+        if self.ask_ai_popup and self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
+        if self.definition_popup and self.definition_popup.isVisible():
+            self.definition_popup.dismiss()
+        if self.quick_paste_popup and self.quick_paste_popup.isVisible():
+            self.quick_paste_popup.dismiss()
+        self.snipping_overlay.start_snip()
+
+    def _on_snip_captured(self, pixmap, global_rect) -> None:
+        self.snip_card.show_for_pixmap(pixmap, global_rect)
+
+    def configure_clipboard_history(self, enabled: bool, preferred_shortcut: str) -> None:
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        if self._clipboard_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, MIND_CLIPBOARD_HOTKEY_ID)
+            self._clipboard_hotkey_registered = False
+        if not enabled:
+            return
+        chosen = None
+        for shortcut, modifiers, virtual_key in clipboard_history_shortcut_candidates(preferred_shortcut):
+            if user32.RegisterHotKey(hwnd, MIND_CLIPBOARD_HOTKEY_ID, modifiers, virtual_key):
+                chosen = shortcut
+                break
+        if chosen:
+            self._clipboard_hotkey_registered = True
+            self._clipboard_shortcut = chosen
+            self._log(f"Clipboard History enabled: {chosen}")
+            if chosen != preferred_shortcut:
+                config = self.store.load()
+                config["clipboard_history_shortcut"] = chosen
+                self.store.save(config)
+                self.settings.refresh()
+            return
+
+        config = self.store.load()
+        config["clipboard_history_enabled"] = False
+        self.store.save(config)
+        self.settings.refresh()
+
+    def trigger_clipboard_history(self) -> None:
+        if self.palette and self.palette.isVisible():
+            self.palette.close()
+        if self.ask_ai_popup and self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
+        if self.definition_popup and self.definition_popup.isVisible():
+            self.definition_popup.dismiss()
+        if self.quick_paste_popup and self.quick_paste_popup.isVisible():
+            self.quick_paste_popup.dismiss()
+        self.clipboard_history_dialog.show_centered_or_cursor()
+
+    def _on_clipboard_ai_action(self, text: str, prompt: str) -> None:
+        session = SelectionSession(selected_text=text, is_editable=False, source_hwnd=0)
+        self.ask_ai_popup.show_for_selection(session, initial_prompt=prompt)
+
     def _configure_selection_monitor(self, config: dict | None = None) -> None:
         if self._quitting:
             self.selection_monitor.set_enabled(False)
@@ -1293,9 +1503,16 @@ class MindWindow(QMainWindow):
             if not pointer:
                 return super().nativeEvent(event_type, message)
             native_message = wintypes.MSG.from_address(pointer)
-            if native_message.message == WM_HOTKEY and native_message.wParam == MIND_PALETTE_HOTKEY_ID:
-                self._palette_requested()
-                return True, 0
+            if native_message.message == WM_HOTKEY:
+                if native_message.wParam == MIND_PALETTE_HOTKEY_ID:
+                    self._palette_requested()
+                    return True, 0
+                if native_message.wParam == MIND_SNIP_HOTKEY_ID:
+                    self.trigger_screen_snip()
+                    return True, 0
+                if native_message.wParam == MIND_CLIPBOARD_HOTKEY_ID:
+                    self.trigger_clipboard_history()
+                    return True, 0
         except (TypeError, ValueError, OSError):
             pass
         return super().nativeEvent(event_type, message)
@@ -1363,6 +1580,14 @@ class MindWindow(QMainWindow):
                 self.palette.close()
             self.ask_ai_popup.show_local_math_result(session.text, local_math_result, avoid_rect)
             return
+
+        if bool(config.get("converter_tooltips_enabled", True)) and not is_notion_input(target_hwnd):
+            conversion = detect_and_convert(session.text)
+            if conversion is not None:
+                if self.palette and self.palette.isVisible():
+                    self.palette.close()
+                self.ask_ai_popup.show_converter_result(conversion, avoid_rect)
+                return
 
         is_question = is_question_text(session.text)
         is_unsolved_math = is_math_or_number_problem(session.text)
@@ -1446,6 +1671,8 @@ class MindWindow(QMainWindow):
             self._last_copied_text = text
             self._last_copied_time = time.monotonic()
             self._pasted_texts.clear()
+            if hasattr(self, "clipboard_history_dialog") and self.clipboard_history_dialog:
+                self.clipboard_history_dialog.history_store.add_entry(text)
 
     def _on_single_click_gesture(
         self,

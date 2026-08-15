@@ -14,7 +14,11 @@
   { "trigger": "reply", "type": "ai", "prompt": "Generate a contextual reply to this message." },
   { "trigger": "dhivehi", "type": "ai", "prompt": "Act as an expert native Dhivehi editor from the Maldives. Translate the text into fluent, modern standard Dhivehi using correct natural word order and grammar, not a literal word-for-word rendering. Write only with Unicode Thaana letters U+0780 through U+07BF, from right to left. Never return Arabic, Bengali, Devanagari, or another script: convert foreign words and greetings into their standard Thaana spelling. For example, Bengali হ্যালো must be ހެލޯ, and Arabic السلام عليكم must be އައްސަލާމު ޢަލައިކުމް. Preserve the exact meaning, numbers, URLs, paragraph breaks, and formatting; do not add or remove information. If the input is already in Dhivehi, correct its grammar and fluency. Silently verify the translation before returning only the final Dhivehi text, with no labels, alternatives, transliteration, or explanation." },
 
-  { "trigger": "date", "type": "replacer-shell", "value": "powershell -NoProfile -Command \"Get-Date -Format 'dddd, MMMM dd, yyyy'\"" },
-  { "trigger": "time", "type": "replacer-shell", "value": "powershell -NoProfile -Command \"Get-Date -Format 'hh:mm tt'\"" },
+  { "trigger": "date", "type": "replacer-text", "value": "{date}" },
+  { "trigger": "time", "type": "replacer-text", "value": "{time}" },
+  { "trigger": "datetime", "type": "replacer-text", "value": "{datetime}" },
+  { "trigger": "uuid", "type": "replacer-text", "value": "{uuid}" },
+  { "trigger": "shrug", "type": "replacer-text", "value": "¯\\_(ツ)_/¯" },
+  { "trigger": "meet", "type": "replacer-text", "value": "Hi, let's connect on Google Meet:\nhttps://meet.google.com/new\n\nBest regards," },
   { "trigger": "ip", "type": "replacer-shell", "value": "curl -s https://ifconfig.me" }
 ]

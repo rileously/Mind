@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup, QDialog#SnipCard, QDialog#ClipboardHistoryDialog {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -172,6 +172,100 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
         border-radius: 6px; background: {p['accent']}; color: white; border: 0;
     }}
     QPushButton#QuickPasteButton:hover {{ background: {p['accent_hover']}; }}
+    QWidget#SnipCardFrame {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 14px;
+    }}
+    QLabel#SnipHeaderIcon {{ font-size: 15px; }}
+    QLabel#SnipHeaderTitle {{ font-size: 14px; font-weight: 700; color: {p['text']}; }}
+    QLabel#SnipSizeBadge {{
+        font-size: 10px; font-weight: 600; color: {p['muted']};
+        background: {p['surface_alt']}; border: 1px solid {p['border']};
+        border-radius: 4px; padding: 2px 6px;
+    }}
+    QLabel#SnipThumbnail {{
+        background: {p['surface_alt']}; border: 1px solid {p['border_soft']};
+        border-radius: 8px; padding: 4px;
+    }}
+    QFrame#SnipResultContainer {{
+        background: {p['surface_alt']}; border: 1px solid {p['border']}; border-radius: 8px;
+    }}
+    QLabel#SnipResultText {{
+        color: {p['text']}; font-size: 12px;
+    }}
+    QPushButton#SnipActionPrimary {{
+        min-height: 28px; padding: 0 10px; font-size: 11px; font-weight: 650;
+        border-radius: 6px; background: {p['accent']}; color: white; border: 0;
+    }}
+    QPushButton#SnipActionPrimary:hover {{ background: {p['accent_hover']}; }}
+    QPushButton#SnipActionSecondary {{
+        min-height: 28px; padding: 0 8px; font-size: 11px; font-weight: 600;
+        border-radius: 6px; background: {p['surface_alt']}; color: {p['text']};
+        border: 1px solid {p['border']};
+    }}
+    QPushButton#SnipActionSecondary:hover {{
+        background: {p['surface_hover']}; border-color: {p['accent']};
+    }}
+    QWidget#ClipboardHistoryShell {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 14px;
+    }}
+    QLabel#ClipboardHeaderIcon {{ font-size: 16px; }}
+    QLabel#ClipboardHeaderTitle {{ font-size: 14px; font-weight: 700; color: {p['text']}; }}
+    QPushButton#ClipboardClearButton {{
+        background: transparent; color: {p['muted']}; border: 0; font-size: 11px; font-weight: 600; padding: 2px 6px;
+    }}
+    QPushButton#ClipboardClearButton:hover {{ color: {p['danger']}; }}
+    QLineEdit#ClipboardSearchInput {{
+        background: {p['surface_alt']}; color: {p['text']}; border: 1px solid {p['border']};
+        border-radius: 8px; padding: 6px 10px; font-size: 12px;
+    }}
+    QLineEdit#ClipboardSearchInput:focus {{
+        border-color: {p['accent']};
+    }}
+    QPushButton#ClipboardCategoryFilterTab {{
+        background: {p['surface_alt']}; color: {p['muted']}; border: 1px solid {p['border_soft']};
+        border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600;
+    }}
+    QPushButton#ClipboardCategoryFilterTab:hover {{
+        background: {p['surface_hover']}; color: {p['text']};
+    }}
+    QPushButton#ClipboardCategoryFilterTab:checked {{
+        background: {p['accent']}; color: white; border-color: {p['accent']};
+    }}
+    QScrollArea#ClipboardHistoryScroll, QScrollArea#ClipboardHistoryScroll QWidget {{
+        background: transparent; border: 0;
+    }}
+    QFrame#ClipboardHistoryItem {{
+        background: {p['surface_alt']}; border: 1px solid {p['border_soft']}; border-radius: 8px;
+    }}
+    QFrame#ClipboardHistoryItem:hover {{
+        background: {p['surface_hover']}; border-color: {p['border']};
+    }}
+    QFrame#ClipboardHistoryItem[selected="true"] {{
+        background: {p['surface_hover']}; border-color: {p['accent']};
+    }}
+    QLabel#ClipboardCategoryBadge {{
+        font-size: 10px; font-weight: 700; color: {p['accent']};
+        background: {p['surface']}; border-radius: 4px; padding: 1px 5px;
+    }}
+    QLabel#ClipboardTimeLabel, QLabel#ClipboardCountLabel {{
+        font-size: 10px; color: {p['muted']};
+    }}
+    QPushButton#ClipboardItemActionPin, QPushButton#ClipboardItemActionAi, QPushButton#ClipboardItemActionDelete {{
+        background: transparent; color: {p['muted']}; border: 0; font-size: 11px; padding: 2px 4px;
+        border-radius: 4px;
+    }}
+    QPushButton#ClipboardItemActionPin:hover, QPushButton#ClipboardItemActionAi:hover, QPushButton#ClipboardItemActionDelete:hover {{
+        background: {p['surface']}; color: {p['text']};
+    }}
+    QLabel#ClipboardItemPreview {{
+        font-size: 12px; color: {p['text']}; line-height: 1.3;
+    }}
+    QLabel#ClipboardEmptyLabel {{
+        font-size: 12px; color: {p['muted']}; padding: 30px 0;
+    }}
+    QLabel#ClipboardFooterHint {{
+        font-size: 10px; color: {p['muted']}; padding-top: 2px;
+    }}
     QLabel#SectionTitle {{ font-size: 15px; font-weight: 650; }}
     QLabel#SettingTitle {{ font-size: 13px; font-weight: 600; }}
     QLabel#SettingsGroupTitle {{

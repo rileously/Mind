@@ -485,7 +485,7 @@ class CommandDialog(QDialog):
         form.addRow("Trigger", self.trigger)
         self.kind = QComboBox()
         self.kind.addItem("AI transformation", "ai")
-        self.kind.addItem("Fixed text", "replacer-text")
+        self.kind.addItem("Snippet / Fixed text", "replacer-text")
         self.kind.addItem("Shell command", "replacer-shell")
         index = self.kind.findData(self._command.get("type", "ai"))
         self.kind.setCurrentIndex(max(index, 0))
@@ -496,9 +496,28 @@ class CommandDialog(QDialog):
         form.addRow("", self.enabled)
         root.addLayout(form)
 
+        self.content_header = QHBoxLayout()
         self.content_label = QLabel()
         self.content_label.setObjectName("SectionTitle")
-        root.addWidget(self.content_label)
+        self.content_header.addWidget(self.content_label)
+        self.content_header.addStretch()
+        root.addLayout(self.content_header)
+
+        self.snippet_vars_widget = QWidget()
+        snippet_vars_layout = QHBoxLayout(self.snippet_vars_widget)
+        snippet_vars_layout.setContentsMargins(0, 0, 0, 4)
+        snippet_vars_layout.setSpacing(6)
+        vars_label = QLabel("Insert:")
+        vars_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #888;")
+        snippet_vars_layout.addWidget(vars_label)
+        for tag in ["{date}", "{time}", "{datetime}", "{clipboard}", "{uuid}", "{weekday}"]:
+            chip = QPushButton(tag)
+            chip.setStyleSheet("font-size: 11px; padding: 2px 6px; border-radius: 4px;")
+            chip.clicked.connect(lambda _, t=tag: self._insert_variable(t))
+            snippet_vars_layout.addWidget(chip)
+        snippet_vars_layout.addStretch()
+        root.addWidget(self.snippet_vars_widget)
+
         self.content = QPlainTextEdit()
         self.content.setMinimumHeight(140)
         initial = self._command.get("prompt", "") if self._command.get("type", "ai") == "ai" else self._command.get("value", "")
@@ -515,6 +534,10 @@ class CommandDialog(QDialog):
         root.addWidget(buttons)
         self._update_content_label()
 
+    def _insert_variable(self, tag: str) -> None:
+        self.content.insertPlainText(tag)
+        self.content.setFocus()
+
     def command(self) -> dict:
         kind = str(self.kind.currentData())
         result = {
@@ -527,7 +550,8 @@ class CommandDialog(QDialog):
 
     def _update_content_label(self) -> None:
         kind = str(self.kind.currentData())
-        self.content_label.setText("Transformation instruction" if kind == "ai" else "Replacement value")
+        self.content_label.setText("Transformation instruction" if kind == "ai" else "Snippet template" if kind == "replacer-text" else "Replacement value")
+        self.snippet_vars_widget.setVisible(kind == "replacer-text")
         self.warning.setVisible(kind == "replacer-shell")
 
     def _validate(self) -> None:

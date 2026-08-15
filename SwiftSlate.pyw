@@ -23,6 +23,7 @@ import urllib.parse
 
 from mind.provider_response import extract_gemini_text
 from mind.autocorrect import LocalAutocorrect
+from mind.snippet_expander import expand_snippet_template
 from mind.text_direction import (
     DHIVEHI_RETRY_PROMPT,
     common_dhivehi_translation,
@@ -2349,7 +2350,7 @@ def do_replacer(trigger_name, cmd_type, value):
         replacement = ""
         shell_error = None
         if cmd_type == "replacer-text":
-            replacement = value
+            replacement = expand_snippet_template(value, prev_clip or "")
         elif cmd_type == "replacer-shell":
             try:
                 # Capture to files, not pipes: a fast/malicious command must not exhaust

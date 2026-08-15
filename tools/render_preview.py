@@ -9,9 +9,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from mind.config_store import ConfigStore
+from mind.ask_ai_popup import AskAiPopup
+from mind.clipboard_history_dialog import ClipboardHistoryDialog
+from mind.converter_tools import detect_and_convert
 from mind.definition_popup import DefinitionPopup
 from mind.dictionary import DefinitionResult, DefinitionSense
 from mind.main_window import MindWindow
@@ -19,6 +23,7 @@ from mind.palette import MindPalette
 from mind.quick_paste_popup import QuickPastePopup
 from mind.selection import SelectionSession
 from mind.setup_wizard import SetupWizard
+from mind.snip_card import SnipCard
 from mind.theme import stylesheet
 from mind.ui_components import PaletteCustomizeDialog
 
@@ -37,6 +42,9 @@ def main() -> None:
     customize_output = PROJECT_ROOT / "artifacts" / "mind-palette-customize.png"
     definition_output = PROJECT_ROOT / "artifacts" / "mind-definition.png"
     quick_paste_output = PROJECT_ROOT / "artifacts" / "mind-quick-paste.png"
+    converter_output = PROJECT_ROOT / "artifacts" / "mind-converter.png"
+    snip_card_output = PROJECT_ROOT / "artifacts" / "mind-snip-card.png"
+    clipboard_output = PROJECT_ROOT / "artifacts" / "mind-clipboard-history.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         store = ConfigStore(Path(temporary) / "data", PROJECT_ROOT)
@@ -100,6 +108,31 @@ def main() -> None:
         app.processEvents()
         quick_paste.grab().save(str(quick_paste_output))
         quick_paste.close()
+        conv_popup = AskAiPopup(store)
+        conv_result = detect_and_convert("$49.99")
+        if conv_result:
+            conv_popup.show_converter_result(conv_result)
+        app.processEvents()
+        conv_popup.grab().save(str(converter_output))
+        conv_popup.close()
+        snip_card = SnipCard(store)
+        sample_pixmap = QPixmap(360, 180)
+        sample_pixmap.fill()
+        snip_card.show_for_pixmap(sample_pixmap)
+        app.processEvents()
+        snip_card.grab().save(str(snip_card_output))
+        snip_card.close()
+        clip_dialog = ClipboardHistoryDialog(store)
+        clip_dialog.history_store.add_entry("https://github.com/rileously/Mind - System-wide AI writing assistant")
+        clip_dialog.history_store.add_entry("def transform_text(prompt, text):\n    return client.generate(prompt + text)")
+        pinned = clip_dialog.history_store.add_entry("MVR 15,250.00 invoice balance due for quarterly services")
+        if pinned:
+            clip_dialog.history_store.toggle_pin(pinned["id"])
+        clip_dialog.history_store.add_entry("Team brainstorm: 1. Voice dictation, 2. Dynamic snippets, 3. Clipboard history")
+        clip_dialog.show_centered_or_cursor()
+        app.processEvents()
+        clip_dialog.grab().save(str(clipboard_output))
+        clip_dialog.close()
         app.setStyleSheet(stylesheet("dark", "purple"))
         customize = PaletteCustomizeDialog(store)
         customize.show()
@@ -119,6 +152,9 @@ def main() -> None:
     print(customize_output)
     print(definition_output)
     print(quick_paste_output)
+    print(converter_output)
+    print(snip_card_output)
+    print(clipboard_output)
 
 
 if __name__ == "__main__":
