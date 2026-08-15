@@ -255,8 +255,17 @@ def launch_update_installer(download_path: str | Path) -> None:
         "-Target",
         str(target),
     ]
+    env = os.environ.copy()
+    env.pop("_MEIPASS2", None)
+    env.pop("_MEIPASS", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    if "PATH" in env:
+        paths = env["PATH"].split(os.pathsep)
+        clean_paths = [p for p in paths if "_MEI" not in p]
+        env["PATH"] = os.pathsep.join(clean_paths)
     try:
-        subprocess.Popen(command, close_fds=True, creationflags=0x08000000)
+        subprocess.Popen(command, env=env, close_fds=True, creationflags=0x08000000)
     except OSError as exc:
         raise UpdateError("Windows could not start the update installer.") from exc
 

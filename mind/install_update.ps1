@@ -16,6 +16,18 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $logPath -Value "[$stamp] $Message" -Encoding UTF8
 }
 
+function Clear-PyInstallerEnvironment() {
+    Remove-Item env:_MEIPASS2 -ErrorAction SilentlyContinue
+    Remove-Item env:_MEIPASS -ErrorAction SilentlyContinue
+    Remove-Item env:PYTHONHOME -ErrorAction SilentlyContinue
+    Remove-Item env:PYTHONPATH -ErrorAction SilentlyContinue
+    if ($env:PATH) {
+        $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '[\\/]_MEI[0-9A-Za-z]+' }) -join ';'
+    }
+}
+
+Clear-PyInstallerEnvironment
+
 try {
     if (-not $sourcePath.StartsWith($updatesRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         throw "The source is outside the Mind updates directory."
@@ -63,6 +75,7 @@ try {
         throw "Windows could not replace the running application."
     }
 
+    Clear-PyInstallerEnvironment
     # Avoid volatile system temp cleanup and antivirus races while the new
     # one-file build extracts its bundled Python runtime on first launch.
     $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Mind\Runtime"))
@@ -85,6 +98,7 @@ try {
     } catch {
         $startupError = $_.Exception.Message
         Copy-Item -LiteralPath $backupPath -Destination $targetPath -Force -ErrorAction Stop
+        Clear-PyInstallerEnvironment
         Start-Process -FilePath $targetPath -WorkingDirectory $targetItem.DirectoryName -ErrorAction Stop
         throw "The update could not start, so the previous version was restored. $startupError"
     }

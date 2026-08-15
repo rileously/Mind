@@ -41,6 +41,10 @@ class EngineManager(QObject):
             return
 
         environment = QProcessEnvironment.systemEnvironment()
+        environment.remove("_MEIPASS2")
+        environment.remove("_MEIPASS")
+        environment.remove("PYTHONHOME")
+        environment.remove("PYTHONPATH")
         environment.insert("MIND_DATA_DIR", str(self.data_root))
         environment.insert("MIND_ENGINE_EMBEDDED", "1")
         self.process.setProcessEnvironment(environment)
