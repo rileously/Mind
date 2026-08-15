@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup, QDialog#SnipCard, QDialog#ClipboardHistoryDialog, QDialog#SecretShieldCard, QDialog#UrlPeekCard {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup, QDialog#QuickPastePopup, QDialog#SnipCard, QDialog#ClipboardHistoryDialog, QDialog#SecretShieldCard, QDialog#UrlPeekCard, QDialog#GhostTextOverlay {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -321,6 +321,18 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QPushButton#UrlPeekAiButton:hover, QPushButton#UrlPeekOpenButton:hover {{
         background: {p['surface_hover']};
+    }}
+    QFrame#GhostTextFrame {{
+        background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 12px;
+    }}
+    QLabel#GhostTextIcon {{ font-size: 13px; }}
+    QLabel#GhostTextLabel {{
+        font-size: 12px; font-style: italic; color: {p['text']}; font-weight: 500;
+    }}
+    QLabel#GhostTextTabBadge {{
+        font-size: 10px; font-weight: 700; color: {p['accent']};
+        background: {p['surface_alt']}; border: 1px solid {p['border']};
+        border-radius: 4px; padding: 2px 5px;
     }}
     QLabel#SectionTitle {{ font-size: 15px; font-weight: 650; }}
     QLabel#SettingTitle {{ font-size: 13px; font-weight: 600; }}

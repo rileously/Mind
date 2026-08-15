@@ -26,6 +26,12 @@ CLIPBOARD_HISTORY_SHORTCUTS: dict[str, tuple[int, int]] = {
     "Ctrl+Alt+H": (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("H")),
 }
 
+GHOST_TEXT_SHORTCUTS: dict[str, tuple[int, int]] = {
+    "Ctrl+Alt+Space": (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x20),
+    "Ctrl+Shift+Space": (MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, 0x20),
+    "Alt+/": (MOD_ALT | MOD_NOREPEAT, 0xBF),
+}
+
 
 def shortcut_candidates(preferred: str) -> list[tuple[str, int, int]]:
     """Put the chosen shortcut first, followed by quiet automatic fallbacks."""
@@ -44,6 +50,12 @@ def clipboard_history_shortcut_candidates(preferred: str) -> list[tuple[str, int
     selected = preferred if preferred in CLIPBOARD_HISTORY_SHORTCUTS else next(iter(CLIPBOARD_HISTORY_SHORTCUTS))
     ordered = [selected, *(name for name in CLIPBOARD_HISTORY_SHORTCUTS if name != selected)]
     return [(name, *CLIPBOARD_HISTORY_SHORTCUTS[name]) for name in ordered]
+
+
+def ghost_text_shortcut_candidates(preferred: str) -> list[tuple[str, int, int]]:
+    selected = preferred if preferred in GHOST_TEXT_SHORTCUTS else next(iter(GHOST_TEXT_SHORTCUTS))
+    ordered = [selected, *(name for name in GHOST_TEXT_SHORTCUTS if name != selected)]
+    return [(name, *GHOST_TEXT_SHORTCUTS[name]) for name in ordered]
 
 
 

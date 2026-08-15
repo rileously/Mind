@@ -34,15 +34,19 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .autocomplete_engine import suggest_sentence_completion
 from .config_store import ConfigStore
 from .definition_popup import DefinitionPopup
 from .dictionary import normalize_selected_word
 from .engine_manager import EngineManager
+from .ghost_text_overlay import GhostTextOverlay
 from .hotkeys import (
     CLIPBOARD_HISTORY_SHORTCUTS,
+    GHOST_TEXT_SHORTCUTS,
     PALETTE_SHORTCUTS,
     SNIP_SHORTCUTS,
     clipboard_history_shortcut_candidates,
+    ghost_text_shortcut_candidates,
     shortcut_candidates,
     snip_shortcut_candidates,
 )
@@ -70,14 +74,6 @@ from .selection import (
 from .selection_monitor import SelectionMonitor
 from .startup import is_start_with_windows_enabled, set_start_with_windows
 from .theme import app_icon, qt_palette, stylesheet, theme_palette
-from .updater import (
-    DownloadedUpdate,
-    ReleaseInfo,
-    UpdateCheckWorker,
-    UpdateDownloadWorker,
-    UpdateError,
-    launch_update_installer,
-)
 from .ui_components import (
     Card,
     CommandDialog,
@@ -88,12 +84,21 @@ from .ui_components import (
     page_header,
     section_title,
 )
+from .updater import (
+    DownloadedUpdate,
+    ReleaseInfo,
+    UpdateCheckWorker,
+    UpdateDownloadWorker,
+    UpdateError,
+    launch_update_installer,
+)
 
 
 WM_HOTKEY = 0x0312
 MIND_PALETTE_HOTKEY_ID = 0x4D49
 MIND_SNIP_HOTKEY_ID = 0x534E
 MIND_CLIPBOARD_HOTKEY_ID = 0x4348
+MIND_GHOST_TEXT_HOTKEY_ID = 0x4754
 
 
 class DashboardPage(QWidget):
@@ -719,6 +724,26 @@ class SettingsPage(QWidget):
             self.url_peek,
             "🔗",
         )
+        self.ghost_text = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Ghost Text & Sentence Finisher",
+            "Suggest smart sentence continuations inline as you type.",
+            self.ghost_text,
+            "🪄",
+        )
+        self.ghost_shortcut = QComboBox()
+        for shortcut in GHOST_TEXT_SHORTCUTS:
+            self.ghost_shortcut.addItem(shortcut, shortcut)
+        self.ghost_shortcut.setMinimumWidth(150)
+        self._setting_row(
+            appearance_layout,
+            "Ghost Text shortcut",
+            "Shortcut to trigger smart sentence continuation near cursor.",
+            self.ghost_shortcut,
+            "⌨️",
+        )
+        self.ghost_text.toggled.connect(self.ghost_shortcut.setEnabled)
         self.customize_palette = QPushButton("Customize actions and layout")
         self.customize_palette.clicked.connect(self._customize_palette)
         self._setting_row(
@@ -857,6 +882,11 @@ class SettingsPage(QWidget):
         self.clipboard_shortcut.setEnabled(self.clipboard_history.isChecked())
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
         self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
+        self.ghost_text.setChecked(bool(config.get("ghost_text_enabled", True)))
+        ghost_sc = str(config.get("ghost_text_shortcut", "Ctrl+Alt+Space"))
+        ghost_index = self.ghost_shortcut.findData(ghost_sc)
+        self.ghost_shortcut.setCurrentIndex(max(ghost_index, 0))
+        self.ghost_shortcut.setEnabled(self.ghost_text.isChecked())
 
     def save(self) -> None:
         prefix = self.prefix.text().strip()
@@ -886,6 +916,8 @@ class SettingsPage(QWidget):
                 "clipboard_history_shortcut": self.clipboard_shortcut.currentData(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
+                "ghost_text_enabled": self.ghost_text.isChecked(),
+                "ghost_text_shortcut": self.ghost_shortcut.currentData(),
             }
         )
         try:
@@ -1044,6 +1076,8 @@ class MindWindow(QMainWindow):
         self._snip_shortcut = "Ctrl+Alt+S"
         self._clipboard_hotkey_registered = False
         self._clipboard_shortcut = "Ctrl+Alt+V"
+        self._ghost_text_hotkey_registered = False
+        self._ghost_text_shortcut = "Ctrl+Alt+Space"
         self.palette: MindPalette | None = None
         self.definition_popup = DefinitionPopup()
         self.ask_ai_popup = AskAiPopup(self.store)
@@ -1057,6 +1091,7 @@ class MindWindow(QMainWindow):
         self.secret_shield_card = SecretShieldCard()
         self.url_peek_card = UrlPeekCard()
         self.url_peek_card.summarize_requested.connect(self._on_url_summarize_requested)
+        self.ghost_text_overlay = GhostTextOverlay()
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -1295,6 +1330,7 @@ class MindWindow(QMainWindow):
         self.configure_palette(False, self._palette_shortcut)
         self.configure_snip(False, self._snip_shortcut)
         self.configure_clipboard_history(False, self._clipboard_shortcut)
+        self.configure_ghost_text(False, self._ghost_text_shortcut)
         self.definition_popup.dismiss()
         self.definition_popup.close()
         self.ask_ai_popup.dismiss()
@@ -1311,6 +1347,8 @@ class MindWindow(QMainWindow):
         self.secret_shield_card.close()
         self.url_peek_card.dismiss()
         self.url_peek_card.close()
+        self.ghost_text_overlay.dismiss()
+        self.ghost_text_overlay.close()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1365,6 +1403,10 @@ class MindWindow(QMainWindow):
         self.configure_clipboard_history(
             bool(config.get("clipboard_history_enabled", True)),
             str(config.get("clipboard_history_shortcut", "Ctrl+Alt+V")),
+        )
+        self.configure_ghost_text(
+            bool(config.get("ghost_text_enabled", True)),
+            str(config.get("ghost_text_shortcut", "Ctrl+Alt+Space")),
         )
         self._config_updated()
 
@@ -1529,6 +1571,44 @@ class MindWindow(QMainWindow):
             initial_prompt=f"Summarize the key information, main takeaways, and context from this webpage:\n{clean_url}",
         )
 
+    def configure_ghost_text(self, enabled: bool, preferred_shortcut: str) -> None:
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        if self._ghost_text_hotkey_registered:
+            user32.UnregisterHotKey(hwnd, MIND_GHOST_TEXT_HOTKEY_ID)
+            self._ghost_text_hotkey_registered = False
+        if not enabled:
+            return
+        chosen = None
+        for shortcut, modifiers, virtual_key in ghost_text_shortcut_candidates(preferred_shortcut):
+            if user32.RegisterHotKey(hwnd, MIND_GHOST_TEXT_HOTKEY_ID, modifiers, virtual_key):
+                chosen = shortcut
+                break
+        if chosen:
+            self._ghost_text_hotkey_registered = True
+            self._ghost_text_shortcut = chosen
+            self._log(f"Ghost Text enabled: {chosen}")
+            if chosen != preferred_shortcut:
+                config = self.store.load()
+                config["ghost_text_shortcut"] = chosen
+                self.store.save(config)
+                self.settings.refresh()
+            return
+
+        config = self.store.load()
+        config["ghost_text_enabled"] = False
+        self.store.save(config)
+        self.settings.refresh()
+
+    def trigger_ghost_text(self) -> None:
+        target_hwnd = int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        session = SelectionSession.capture(target_hwnd, timeout=0.25) if target_hwnd else None
+        text = session.text if session else ""
+        suggestion = suggest_sentence_completion(text) if text else None
+        if not suggestion:
+            suggestion = " please let me know if you need anything else."
+        self.ghost_text_overlay.show_suggestion(suggestion, target_hwnd)
+
     def _configure_selection_monitor(self, config: dict | None = None) -> None:
         if self._quitting:
             self.selection_monitor.set_enabled(False)
@@ -1550,6 +1630,9 @@ class MindWindow(QMainWindow):
                     return True, 0
                 if native_message.wParam == MIND_CLIPBOARD_HOTKEY_ID:
                     self.trigger_clipboard_history()
+                    return True, 0
+                if native_message.wParam == MIND_GHOST_TEXT_HOTKEY_ID:
+                    self.trigger_ghost_text()
                     return True, 0
         except (TypeError, ValueError, OSError):
             pass

@@ -18,6 +18,7 @@ from mind.clipboard_history_dialog import ClipboardHistoryDialog
 from mind.converter_tools import detect_and_convert
 from mind.definition_popup import DefinitionPopup
 from mind.dictionary import DefinitionResult, DefinitionSense
+from mind.ghost_text_overlay import GhostTextOverlay
 from mind.main_window import MindWindow
 from mind.palette import MindPalette
 from mind.quick_paste_popup import QuickPastePopup
@@ -51,6 +52,7 @@ def main() -> None:
     clipboard_output = PROJECT_ROOT / "artifacts" / "mind-clipboard-history.png"
     secret_shield_output = PROJECT_ROOT / "artifacts" / "mind-secret-shield.png"
     url_peek_output = PROJECT_ROOT / "artifacts" / "mind-url-peek.png"
+    ghost_text_output = PROJECT_ROOT / "artifacts" / "mind-ghost-text.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temporary:
         store = ConfigStore(Path(temporary) / "data", PROJECT_ROOT)
@@ -153,6 +155,11 @@ def main() -> None:
         app.processEvents()
         url_card.grab().save(str(url_peek_output))
         url_card.close()
+        ghost_overlay = GhostTextOverlay()
+        ghost_overlay.show_suggestion(" hearing from you soon regarding the project timeline.")
+        app.processEvents()
+        ghost_overlay.grab().save(str(ghost_text_output))
+        ghost_overlay.close()
         app.setStyleSheet(stylesheet("dark", "purple"))
         customize = PaletteCustomizeDialog(store)
         customize.show()
@@ -177,6 +184,7 @@ def main() -> None:
     print(clipboard_output)
     print(secret_shield_output)
     print(url_peek_output)
+    print(ghost_text_output)
 
 
 if __name__ == "__main__":
