@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import urllib.parse
 from collections import OrderedDict
 from ctypes import wintypes
 
@@ -41,6 +42,7 @@ class DefinitionPopup(QDialog):
         self._workers: dict[int, _DefinitionWorker] = {}
         self._cache: OrderedDict[str, DefinitionResult] = OrderedDict()
         self._avoid_rect: QRect | None = None
+        self._current_word = ""
         self._source_url = ""
         self._user32 = ctypes.windll.user32
         self._user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
@@ -100,12 +102,27 @@ class DefinitionPopup(QDialog):
         self.body_label.setMaximumWidth(386)
         layout.addWidget(self.body_label)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(10)
+
         self.source_button = QPushButton()
         self.source_button.setObjectName("DefinitionSource")
         self.source_button.setFocusPolicy(Qt.NoFocus)
         self.source_button.setCursor(Qt.PointingHandCursor)
         self.source_button.clicked.connect(self._open_source)
-        layout.addWidget(self.source_button, 0, Qt.AlignLeft)
+        footer.addWidget(self.source_button, 0, Qt.AlignLeft)
+
+        footer.addStretch()
+
+        self.google_button = QPushButton("Search Google ↗")
+        self.google_button.setObjectName("DefinitionGoogle")
+        self.google_button.setFocusPolicy(Qt.NoFocus)
+        self.google_button.setCursor(Qt.PointingHandCursor)
+        self.google_button.clicked.connect(self._search_google)
+        footer.addWidget(self.google_button, 0, Qt.AlignRight)
+
+        layout.addLayout(footer)
         outer.addWidget(card)
 
         self._hide_timer = QTimer(self)
@@ -150,6 +167,7 @@ class DefinitionPopup(QDialog):
     ) -> None:
         if avoid_rect is not None:
             self._avoid_rect = self._rect_from_tuple(avoid_rect)
+        self._current_word = result.word
         self.word_label.setText(result.word)
         self.pronunciation_label.setText(
             f"/{result.pronunciation}/" if result.pronunciation else ""
@@ -167,16 +185,19 @@ class DefinitionPopup(QDialog):
         self._source_url = result.source_url
         self.source_button.setText(f"Source: {result.source_name}  ↗")
         self.source_button.setVisible(bool(self._source_url))
+        self.google_button.setVisible(bool(self._current_word))
         self._show_above_selection()
         self._hide_timer.start(12000)
 
     def _show_loading(self, word: str) -> None:
+        self._current_word = word
         self.word_label.setText(word)
         self.pronunciation_label.clear()
         self.part_label.setText("DEFINITION")
         self.body_label.setText("Looking up this word…")
         self.source_button.hide()
         self._source_url = ""
+        self.google_button.setVisible(bool(self._current_word))
         self._show_above_selection()
         self._hide_timer.start(8000)
 
@@ -186,6 +207,7 @@ class DefinitionPopup(QDialog):
         self.body_label.setText(message)
         self.source_button.hide()
         self._source_url = ""
+        self.google_button.setVisible(bool(self._current_word))
         self._show_above_selection()
         self._hide_timer.start(4500)
 
@@ -269,4 +291,11 @@ class DefinitionPopup(QDialog):
     def _open_source(self) -> None:
         if self._source_url:
             QDesktopServices.openUrl(QUrl(self._source_url))
+        self.dismiss()
+
+    def _search_google(self) -> None:
+        word = (self._current_word or self.word_label.text()).strip()
+        if word:
+            query = urllib.parse.quote_plus(word)
+            QDesktopServices.openUrl(QUrl(f"https://www.google.com/search?q={query}"))
         self.dismiss()

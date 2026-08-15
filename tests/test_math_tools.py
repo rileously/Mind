@@ -1,7 +1,14 @@
 import unittest
 from decimal import Decimal
 
-from mind.math_tools import MathInputError, extract_numbers, normalize_math_text, sum_number_list
+from mind.math_tools import (
+    MathInputError,
+    extract_numbers,
+    is_math_or_number_problem,
+    normalize_math_text,
+    solve_math_locally,
+    sum_number_list,
+)
 
 
 class MathToolsTests(unittest.TestCase):
@@ -25,6 +32,30 @@ class MathToolsTests(unittest.TestCase):
     def test_reports_image_without_numbers(self):
         with self.assertRaisesRegex(MathInputError, "No numbers"):
             sum_number_list("No numeric values here")
+
+    def test_solve_math_locally(self):
+        self.assertEqual(solve_math_locally("2 + 2"), "4")
+        self.assertEqual(solve_math_locally("(15 * 4) + 10 / 2"), "65")
+        self.assertEqual(solve_math_locally("15% of 80"), "12")
+        self.assertEqual(solve_math_locally("2^8"), "256")
+        self.assertIsNone(solve_math_locally("2x + 5 = 15"))
+        self.assertIsNone(solve_math_locally("x^2 - 4 = 0"))
+        self.assertIsNone(solve_math_locally("Just text"))
+
+    def test_is_math_or_number_problem(self):
+        self.assertTrue(is_math_or_number_problem("2x + 5 = 15"))
+        self.assertTrue(is_math_or_number_problem("x^2 - 5x + 6 = 0"))
+        self.assertTrue(is_math_or_number_problem("12 * (4 + 5)"))
+        self.assertTrue(is_math_or_number_problem("calculate 25% of 300"))
+        self.assertTrue(is_math_or_number_problem("find the value of x when 3x = 9"))
+        self.assertTrue(is_math_or_number_problem("\\frac{a}{b} = 2"))
+        self.assertTrue(is_math_or_number_problem('"If a car travels 60 miles\\nin 2 hours, what is the speed"'))
+        self.assertTrue(is_math_or_number_problem("If a car travels 60 miles in 2 hours, what is the speed"))
+        self.assertTrue(is_math_or_number_problem("If John has 5 apples and eats 2, how many apples are left?"))
+        self.assertTrue(is_math_or_number_problem("A train moves at 50 mph for 3 hours, what is the total distance?"))
+        self.assertFalse(is_math_or_number_problem("Hello world!"))
+        self.assertFalse(is_math_or_number_problem("The quick brown fox."))
+        self.assertFalse(is_math_or_number_problem("My phone number is 1234567890."))
 
 
 if __name__ == "__main__":

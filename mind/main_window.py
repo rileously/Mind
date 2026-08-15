@@ -38,9 +38,18 @@ from .definition_popup import DefinitionPopup
 from .dictionary import normalize_selected_word
 from .engine_manager import EngineManager
 from .hotkeys import PALETTE_SHORTCUTS, shortcut_candidates
+from .math_tools import is_math_or_number_problem, solve_math_locally
 from .paths import launcher_path
+from .phone_tools import parse_maldivian_phone
+from .ask_ai_popup import AskAiPopup
 from .palette import MindPalette
-from .selection import ClipboardImageSession, SelectionSession
+from .selection import (
+    ClipboardImageSession,
+    SelectionSession,
+    is_editable_input_target,
+    is_notion_input,
+    is_question_text,
+)
 from .selection_monitor import SelectionMonitor
 from .startup import is_start_with_windows_enabled, set_start_with_windows
 from .theme import app_icon, qt_palette, stylesheet, theme_palette
@@ -602,7 +611,7 @@ class SettingsPage(QWidget):
         self._setting_row(
             appearance_layout,
             "Automatic Palette",
-            "Opens after a text drag or double-click. Mind restores your clipboard after checking the selection.",
+            "Opens when text is selected inside a text input field. Mind restores your clipboard after checking the selection.",
             self.palette_auto_show,
             "↗",
         )
@@ -920,6 +929,7 @@ class MindWindow(QMainWindow):
         self._selection_pending = False
         self.palette: MindPalette | None = None
         self.definition_popup = DefinitionPopup()
+        self.ask_ai_popup = AskAiPopup(self.store)
         self.selection_monitor = SelectionMonitor(self)
         self.setWindowTitle("Mind • AI Writing Workspace")
         self.setWindowIcon(app_icon())
@@ -1250,13 +1260,7 @@ class MindWindow(QMainWindow):
         if self._quitting:
             self.selection_monitor.set_enabled(False)
             return
-        current = config or self.store.load()
-        definitions_enabled = bool(current.get("word_definitions_enabled", True))
-        palette_auto = bool(
-            current.get("mind_palette_enabled", False)
-            and current.get("mind_palette_auto_show_on_selection", False)
-        )
-        self.selection_monitor.set_enabled(definitions_enabled or palette_auto)
+        self.selection_monitor.set_enabled(True)
 
     def nativeEvent(self, event_type, message):
         try:
@@ -1272,6 +1276,8 @@ class MindWindow(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def _palette_requested(self) -> None:
+        if self.ask_ai_popup and self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
         if self.palette and self.palette.isVisible():
             self.palette.show_near_cursor()
             return
@@ -1288,14 +1294,6 @@ class MindWindow(QMainWindow):
         target_hwnd: int,
         avoid_rect: tuple[int, int, int, int] | None,
     ) -> None:
-        config = self.store.load()
-        definitions_enabled = bool(config.get("word_definitions_enabled", True))
-        palette_auto = bool(
-            config.get("mind_palette_enabled", False)
-            and config.get("mind_palette_auto_show_on_selection", False)
-        )
-        if not definitions_enabled and not palette_auto:
-            return
         if self._selection_pending or target_hwnd == int(self.winId()):
             return
         self._selection_pending = True
@@ -1320,15 +1318,44 @@ class MindWindow(QMainWindow):
         if bool(config.get("word_definitions_enabled", True)) and word is not None:
             if self.palette and self.palette.isVisible():
                 self.palette.close()
+            if self.ask_ai_popup.isVisible():
+                self.ask_ai_popup.dismiss()
             self.definition_popup.lookup(word, avoid_rect)
             return
 
         self.definition_popup.dismiss()
+
+        phone_info = parse_maldivian_phone(session.text)
+        if phone_info is not None and not is_notion_input(target_hwnd):
+            if self.palette and self.palette.isVisible():
+                self.palette.close()
+            self.ask_ai_popup.show_phone_actions(phone_info, avoid_rect)
+            return
+
+        local_math_result = solve_math_locally(session.text)
+        if local_math_result is not None and not is_notion_input(target_hwnd):
+            if self.palette and self.palette.isVisible():
+                self.palette.close()
+            self.ask_ai_popup.show_local_math_result(session.text, local_math_result, avoid_rect)
+            return
+
+        is_question = is_question_text(session.text)
+        is_unsolved_math = is_math_or_number_problem(session.text)
+
+        if (is_question or is_unsolved_math) and not is_notion_input(target_hwnd):
+            if self.palette and self.palette.isVisible():
+                self.palette.close()
+            self.ask_ai_popup.show_pill_for_question(session.text, avoid_rect)
+            return
+
+        self.ask_ai_popup.dismiss()
+
         if bool(
             config.get("mind_palette_enabled", False)
             and config.get("mind_palette_auto_show_on_selection", False)
         ):
-            self._show_palette_for_session(session, avoid_rect)
+            if is_editable_input_target(target_hwnd):
+                self._show_palette_for_session(session, avoid_rect)
 
     def _open_palette_for_selection(
         self,
@@ -1369,6 +1396,8 @@ class MindWindow(QMainWindow):
     ) -> None:
         if self.palette and self.palette.isVisible():
             return
+        if self.ask_ai_popup and self.ask_ai_popup.isVisible():
+            self.ask_ai_popup.dismiss()
         self.palette = MindPalette(self.store, session, avoid_rect=avoid_rect)
         self.palette.completed.connect(self._palette_completed)
         self.palette.finished.connect(self._palette_closed)

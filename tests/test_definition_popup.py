@@ -48,6 +48,24 @@ class DefinitionPopupTests(unittest.TestCase):
         self.assertFalse(self.popup.isVisible())
         self.assertNotIn("window", self.popup._cache)
 
+    def test_google_search_button_opens_default_browser_and_dismisses(self):
+        from unittest.mock import patch
+        from PySide6.QtCore import QUrl
+
+        self.assertTrue(self.popup.google_button.isVisible())
+        self.assertEqual(self.popup.google_button.text(), "Search Google ↗")
+
+        with patch("mind.definition_popup.QDesktopServices.openUrl") as open_url_mock:
+            self.popup._search_google()
+            open_url_mock.assert_called_once_with(
+                QUrl("https://www.google.com/search?q=window")
+            )
+        self.assertFalse(self.popup.isVisible())
+
+    def test_google_search_button_available_on_error(self):
+        self.popup._show_error("No definition found")
+        self.assertTrue(self.popup.google_button.isVisible())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,7 +29,7 @@ def _activate_existing_window() -> None:
     user32 = ctypes.windll.user32
     user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
     user32.FindWindowW.restype = ctypes.c_void_p
-    hwnd = user32.FindWindowW(None, "Mind")
+    hwnd = user32.FindWindowW(None, "Mind • AI Writing Workspace") or user32.FindWindowW(None, "Mind")
     if hwnd:
         user32.ShowWindow(hwnd, SW_RESTORE)
         user32.SetForegroundWindow(hwnd)

@@ -39,6 +39,7 @@ def transform_text(
     prompt: str,
     temperature_override: float | None = None,
     model_override: str | None = None,
+    system_prompt_override: str | None = None,
 ) -> str:
     provider = str(config.get("provider", "gemini"))
     model = str(model_override if model_override is not None else config.get("model", "")).strip()
@@ -57,11 +58,11 @@ def transform_text(
     for key in candidates:
         try:
             if provider == "gemini":
-                return _gemini(model, key, text, prompt, temperature)
+                return _gemini(model, key, text, prompt, temperature, system_prompt_override=system_prompt_override)
             base = endpoint if provider == "custom" else "https://api.groq.com/openai/v1"
             if not base:
                 raise TransformError("No provider endpoint is configured.")
-            return _openai_compatible(base, model, key, text, prompt, temperature)
+            return _openai_compatible(base, model, key, text, prompt, temperature, system_prompt_override=system_prompt_override)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 last_error = "The provider rejected the API key."
@@ -79,11 +80,19 @@ def transform_text(
     raise TransformError(last_error)
 
 
-def _gemini(model: str, key: str, text: str, prompt: str, temperature: float) -> str:
+def _gemini(
+    model: str,
+    key: str,
+    text: str,
+    prompt: str,
+    temperature: float,
+    system_prompt_override: str | None = None,
+) -> str:
     safe_model = urllib.parse.quote(model, safe="")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{safe_model}:generateContent"
+    system_text = system_prompt_override if system_prompt_override is not None else (SYSTEM_PROMPT + prompt)
     body = {
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + prompt}]},
+        "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"parts": [{"text": f"<input>\n{text}\n</input>"}]}],
         "generationConfig": {"temperature": temperature},
     }
@@ -99,11 +108,20 @@ def _gemini(model: str, key: str, text: str, prompt: str, temperature: float) ->
     return _read_gemini(request)
 
 
-def _openai_compatible(base: str, model: str, key: str, text: str, prompt: str, temperature: float) -> str:
+def _openai_compatible(
+    base: str,
+    model: str,
+    key: str,
+    text: str,
+    prompt: str,
+    temperature: float,
+    system_prompt_override: str | None = None,
+) -> str:
+    system_text = system_prompt_override if system_prompt_override is not None else (SYSTEM_PROMPT + prompt)
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT + prompt},
+            {"role": "system", "content": system_text},
             {"role": "user", "content": f"<input>\n{text}\n</input>"},
         ],
         "temperature": temperature,

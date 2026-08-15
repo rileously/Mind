@@ -112,7 +112,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QMainWindow, QDialog, QWidget#AppRoot, QWidget#ContentRoot, QWidget#Page, QStackedWidget,
     QScrollArea, QScrollArea QWidget#qt_scrollarea_viewport {{ background: {p['window']}; }}
-    QDialog#PaletteDialog, QDialog#DefinitionPopup {{ background: transparent; }}
+    QDialog#PaletteDialog, QDialog#DefinitionPopup, QDialog#AskAiPopup {{ background: transparent; }}
     QWidget#Sidebar {{ background: {p['sidebar']}; border-right: 1px solid {p['border_soft']}; }}
     QLabel#LogoMark {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
@@ -188,8 +188,36 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     QWidget#PaletteShell {{
         background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px;
     }}
-    QWidget#DefinitionCard {{
+    QWidget#DefinitionCard, QWidget#AskAiCard {{
         background: {p['surface']}; border: 1px solid {p['accent']}; border-radius: 13px;
+    }}
+    QPushButton#AskAiPillButton {{
+        min-height: 32px; padding: 0 16px; border-radius: 16px;
+        background: {p['surface']}; color: {p['accent']}; border: 1.5px solid {p['accent']};
+        font-size: 12px; font-weight: 750;
+    }}
+    QPushButton#AskAiPillButton:hover {{
+        background: {p['accent']}; color: white; border-color: {p['accent_hover']};
+    }}
+    QLabel#AskAiCardTitle {{
+        font-size: 14px; font-weight: 750; color: {p['accent']};
+    }}
+    QLabel#AskAiCardIcon {{
+        font-size: 14px; color: {p['accent']}; font-weight: 800;
+    }}
+    QLabel#AskAiQuestion {{
+        color: {p['muted']}; font-size: 12px; font-style: italic;
+    }}
+    QLabel#AskAiAnswer {{
+        color: {p['text']}; font-size: 13px;
+    }}
+    QPushButton#AskAiCopyButton, QPushButton#AskAiActionBtn {{
+        min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 6px;
+        background: {p['accent_soft']}; color: {p['accent']}; border: 1px solid {p['accent']};
+        font-weight: 650;
+    }}
+    QPushButton#AskAiCopyButton:hover, QPushButton#AskAiActionBtn:hover {{
+        background: {p['accent']}; color: white;
     }}
     QLabel#DefinitionWord {{
         font-family: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI";
@@ -262,11 +290,11 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
         color: {p['muted']}; font-size: 18px; font-weight: 500;
     }}
     QPushButton#DefinitionClose:hover {{ background: {p['surface_hover']}; color: {p['text']}; }}
-    QPushButton#DefinitionSource {{
+    QPushButton#DefinitionSource, QPushButton#DefinitionGoogle {{
         min-height: 22px; padding: 0; border: 0; background: transparent;
         color: {p['muted']}; font-size: 10px; font-weight: 500;
     }}
-    QPushButton#DefinitionSource:hover {{ color: {p['accent']}; border: 0; background: transparent; }}
+    QPushButton#DefinitionSource:hover, QPushButton#DefinitionGoogle:hover {{ color: {p['accent']}; border: 0; background: transparent; }}
     QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QListWidget {{
         background: {p['surface_alt']}; border: 1px solid {p['border']};
         border-radius: 6px; padding: 7px 10px; selection-background-color: {p['accent']};
