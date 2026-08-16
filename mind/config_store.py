@@ -77,6 +77,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mind_palette_image_ocr_enabled": True,
     "api_keys": [],
     "api_keys_protected": "",
+    # Telegram bridge. The bridge refuses to start unless at least one chat ID
+    # is listed, because a bot is reachable by anyone who knows its username.
+    "telegram_enabled": False,
+    "telegram_token_protected": "",
+    "telegram_allowed_chat_ids": [],
+    "telegram_default_command": "fix",
+    "telegram_notifications": False,
 }
 
 
@@ -155,6 +162,27 @@ class ConfigStore:
         updated = deepcopy(config)
         updated["api_keys"] = []
         updated["api_keys_protected"] = protect_text(json.dumps(clean)) if clean else ""
+        return updated
+
+    def get_telegram_token(self, config: dict[str, Any] | None = None) -> str:
+        """Read the bot token, which is stored encrypted like the API keys.
+
+        A bot token is a bearer credential: anyone holding it can send and read
+        messages as the bot, so it never sits in config.json as plain text.
+        """
+        current = config if config is not None else self.load()
+        protected = current.get("telegram_token_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return ""
+        try:
+            return unprotect_text(protected).strip()
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def set_telegram_token(self, config: dict[str, Any], token: str) -> dict[str, Any]:
+        clean = token.strip() if isinstance(token, str) else ""
+        updated = deepcopy(config)
+        updated["telegram_token_protected"] = protect_text(clean) if clean else ""
         return updated
 
     def ensure_commands(self) -> None:

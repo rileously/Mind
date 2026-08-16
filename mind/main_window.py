@@ -12,6 +12,7 @@ from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QDesktopServices,
+    QImage,
     QKeySequence,
     QShortcut,
 )
@@ -78,7 +79,11 @@ from .selection import (
     is_notion_input,
     is_question_text,
 )
+from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
+from .telegram_bridge import TelegramBridge
+from .telegram_routing import CommandRefused, parse_allowed_chat_ids, parse_message, select_command
+from .transform_client import TransformError, transform_text
 from .startup import is_start_with_windows_enabled, set_start_with_windows
 from .theme import app_icon, qt_palette, stylesheet, theme_palette
 from .ui_components import (
@@ -823,6 +828,66 @@ class SettingsPage(QWidget):
             "📋",
         )
         self.clipboard_history.toggled.connect(self.clipboard_shortcut.setEnabled)
+
+        self.telegram_enabled = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Telegram bridge",
+            "Use Mind commands from your phone. Send text or a photo to your bot and "
+            "Mind replies with the result. Shell commands are never available remotely.",
+            self.telegram_enabled,
+            "✈",
+        )
+        self.telegram_token = QLineEdit()
+        self.telegram_token.setEchoMode(QLineEdit.Password)
+        self.telegram_token.setPlaceholderText("Bot token from @BotFather")
+        self.telegram_token.setMinimumWidth(220)
+        self._setting_row(
+            appearance_layout,
+            "Bot token",
+            "Created by @BotFather in Telegram. Stored encrypted with Windows DPAPI, "
+            "the same as your API keys.",
+            self.telegram_token,
+            "✈",
+        )
+        self.telegram_chat_ids = QLineEdit()
+        self.telegram_chat_ids.setPlaceholderText("e.g. 123456789")
+        self.telegram_chat_ids.setMinimumWidth(220)
+        self._setting_row(
+            appearance_layout,
+            "Allowed chat IDs",
+            "Only these chats may use the bot. Anyone can message a Telegram bot, so "
+            "the bridge stays off until at least one ID is listed. Message @userinfobot "
+            "to find yours.",
+            self.telegram_chat_ids,
+            "✈",
+        )
+        self.telegram_default = QLineEdit()
+        self.telegram_default.setPlaceholderText("fix")
+        self.telegram_default.setMaximumWidth(150)
+        self._setting_row(
+            appearance_layout,
+            "Default command",
+            "Applied to plain messages sent without a command. Leave empty to require "
+            "a command every time.",
+            self.telegram_default,
+            "✈",
+        )
+        self.telegram_notifications = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Telegram notifications",
+            "Send Mind alerts, such as an available update, to your allowed chats.",
+            self.telegram_notifications,
+            "✈",
+        )
+        for widget in (
+            self.telegram_token,
+            self.telegram_chat_ids,
+            self.telegram_default,
+            self.telegram_notifications,
+        ):
+            self.telegram_enabled.toggled.connect(widget.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
             appearance_layout,
@@ -995,6 +1060,22 @@ class SettingsPage(QWidget):
         clip_index = self.clipboard_shortcut.findData(clip_shortcut)
         self.clipboard_shortcut.setCurrentIndex(max(clip_index, 0))
         self.clipboard_shortcut.setEnabled(self.clipboard_history.isChecked())
+        telegram_on = bool(config.get("telegram_enabled", False))
+        self.telegram_enabled.setChecked(telegram_on)
+        # Show that a token exists without ever displaying it.
+        self.telegram_token.setText("" if not self.store.get_telegram_token(config) else "•" * 12)
+        self.telegram_chat_ids.setText(
+            ", ".join(str(i) for i in sorted(parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids"))))
+        )
+        self.telegram_default.setText(str(config.get("telegram_default_command", "")))
+        self.telegram_notifications.setChecked(bool(config.get("telegram_notifications", False)))
+        for widget in (
+            self.telegram_token,
+            self.telegram_chat_ids,
+            self.telegram_default,
+            self.telegram_notifications,
+        ):
+            widget.setEnabled(telegram_on)
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
         self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
         self.ghost_text.setChecked(bool(config.get("ghost_text_enabled", True)))
@@ -1029,12 +1110,31 @@ class SettingsPage(QWidget):
                 "screen_snip_shortcut": self.snip_shortcut.currentData(),
                 "clipboard_history_enabled": self.clipboard_history.isChecked(),
                 "clipboard_history_shortcut": self.clipboard_shortcut.currentData(),
+                "telegram_enabled": self.telegram_enabled.isChecked(),
+                "telegram_allowed_chat_ids": sorted(
+                    parse_allowed_chat_ids(self.telegram_chat_ids.text())
+                ),
+                "telegram_default_command": self.telegram_default.text().strip().lstrip("?/"),
+                "telegram_notifications": self.telegram_notifications.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
                 "ghost_text_enabled": self.ghost_text.isChecked(),
                 "ghost_text_shortcut": self.ghost_shortcut.currentData(),
             }
         )
+        # The token field shows a mask when one is already stored, so only write
+        # a new value when the user actually typed one. Clearing the field on
+        # purpose still removes the saved token.
+        typed_token = self.telegram_token.text().strip()
+        if typed_token != "•" * 12:
+            config = self.store.set_telegram_token(config, typed_token)
+        if config.get("telegram_enabled") and not config.get("telegram_allowed_chat_ids"):
+            QMessageBox.warning(
+                self,
+                "Telegram needs an allowed chat",
+                "Anyone can message a Telegram bot, so Mind will not connect until you "
+                "list at least one chat ID that is allowed to use it.",
+            )
         try:
             self.store.save(config)
             set_start_with_windows(self.startup.isChecked(), launcher_path())
@@ -1207,6 +1307,11 @@ class MindWindow(QMainWindow):
         self.url_peek_card = UrlPeekCard()
         self.url_peek_card.summarize_requested.connect(self._on_url_summarize_requested)
         self.ghost_text_overlay = GhostTextOverlay()
+        self.telegram = TelegramBridge(self.store, self)
+        self.telegram.log.connect(self._log)
+        self.telegram.clipboard_requested.connect(self._on_telegram_clipboard_requested)
+        self.telegram.clipboard_received.connect(self._on_telegram_clipboard_received)
+        self.telegram.image_received.connect(self._on_telegram_image_received)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -1255,6 +1360,7 @@ class MindWindow(QMainWindow):
                 str(self.config.get("ghost_text_shortcut", "Ctrl+Alt+Space")),
             ),
         )
+        QTimer.singleShot(0, self.configure_telegram)
         if self.config.get("start_engine_on_launch", False):
             QTimer.singleShot(300, self.engine.start)
         QTimer.singleShot(2500, lambda: self.settings.check_for_updates(silent=True))
@@ -1474,6 +1580,7 @@ class MindWindow(QMainWindow):
         self.url_peek_card.close()
         self.ghost_text_overlay.dismiss()
         self.ghost_text_overlay.close()
+        self.telegram.stop()
         self.engine.shutdown()
         self.tray.hide()
         QApplication.instance().quit()
@@ -1514,8 +1621,101 @@ class MindWindow(QMainWindow):
 
     def _config_updated(self) -> None:
         self.dashboard.refresh()
+        self.configure_telegram()
         if self.engine.is_running:
             self._log("Configuration changed. The engine will hot-reload it.")
+
+    def configure_telegram(self) -> None:
+        """Start or stop the bridge to match the saved settings."""
+        if self._quitting:
+            self.telegram.stop()
+            return
+        config = self.store.load()
+        wanted = bool(config.get("telegram_enabled", False))
+        if wanted and not self.telegram.is_running:
+            self.telegram.start()
+        elif not wanted and self.telegram.is_running:
+            self.telegram.stop()
+            self._log("Telegram bridge stopped.")
+
+    def _on_telegram_clipboard_requested(self, chat_id: object) -> None:
+        clipboard = QApplication.clipboard()
+        text = clipboard.text() if clipboard else ""
+        self.telegram.send_text(
+            int(chat_id), text if text.strip() else "Your PC clipboard is empty."
+        )
+
+    def _on_telegram_clipboard_received(self, text: str) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
+
+    def _on_telegram_image_received(self, path: object, context: object) -> None:
+        """Read an image sent to the bot and reply with the text found in it.
+
+        OCR needs a QImage, which has to be built on the GUI thread, so the
+        worker hands the downloaded file over rather than decoding it itself.
+        """
+        details = context if isinstance(context, dict) else {}
+        chat_id = int(details.get("chat_id", 0) or 0)
+        source = Path(str(path))
+        try:
+            image = QImage(str(source))
+            if image.isNull():
+                self.telegram.send_text(chat_id, "Mind could not read that image.")
+                return
+            try:
+                extracted = extract_text_from_image(image)
+            except OcrError as exc:
+                self.telegram.send_text(chat_id, f"Mind could not read that image: {exc}")
+                return
+            if not extracted.strip():
+                self.telegram.send_text(chat_id, "No text was found in that image.")
+                return
+
+            caption = str(details.get("caption", "")).strip()
+            if not caption:
+                self.telegram.send_text(chat_id, extracted)
+                return
+            # A caption means "do this to what you read", e.g. send a photo with
+            # the caption /summarize.
+            request = parse_message(caption, str(self.store.load().get("prefix", "?")))
+            command = None
+            if request.trigger:
+                try:
+                    command = select_command(request, self.store.load_commands())
+                except CommandRefused as exc:
+                    self.telegram.send_text(chat_id, str(exc))
+                    return
+            if command is None:
+                self.telegram.send_text(chat_id, extracted)
+                return
+            config = self.store.load()
+            try:
+                result = transform_text(
+                    config,
+                    self.store.get_keys(config),
+                    extracted,
+                    str(command.get("prompt", "")),
+                )
+            except TransformError as exc:
+                self.telegram.send_text(chat_id, f"Read the image, but: {exc}")
+                return
+            self.telegram.send_text(chat_id, result)
+        finally:
+            # The download is scratch data; do not leave images in temp.
+            try:
+                source.unlink()
+            except OSError:
+                pass
+
+    def notify_telegram(self, message: str) -> None:
+        """Push an alert to every allowed chat, when the user asked for that."""
+        config = self.store.load()
+        if not config.get("telegram_notifications", False) or not self.telegram.is_running:
+            return
+        for chat_id in parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids")):
+            self.telegram.send_text(chat_id, message)
 
     def _settings_updated(self, theme: str, palette_enabled: bool, shortcut: str, accent: str) -> None:
         self.apply_theme(theme, accent)
