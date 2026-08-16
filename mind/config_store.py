@@ -84,6 +84,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram_allowed_chat_ids": [],
     "telegram_default_command": "fix",
     "telegram_notifications": False,
+    # Process names Mind's engine stays out of. Telegram is excluded by default
+    # because the Telegram bridge answers the same triggers from the chat, so
+    # typing "?fix" in Telegram Desktop would be rewritten in the message box
+    # before it was ever sent.
+    "excluded_apps": ["telegram"],
 }
 
 

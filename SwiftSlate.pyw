@@ -330,6 +330,13 @@ MAX_REPLACER_OUTPUT_BYTES = 65_536
 # the engine's trigger total is always larger than the command library count
 # shown in the desktop app.
 SYSTEM_COMMANDS = ("undo", "copy", "cut", "paste", "replace")
+# Apps Mind stays out of entirely. Telegram is excluded by default because the
+# Telegram bridge answers the same triggers from the chat itself: typing "?fix"
+# in Telegram Desktop would otherwise be rewritten in the message box before it
+# was ever sent, and the bot would then receive text that had already been fixed.
+DEFAULT_EXCLUDED_APPS = ("telegram",)
+excluded_apps = list(DEFAULT_EXCLUDED_APPS)
+fg_excluded = False  # Cached for the current foreground window
 last_fg_hwnd = 0  # Track foreground window for buffer clearing
 last_keystroke_time = 0.0  # Timestamp of last keystroke for idle gap detection
 BUFFER_IDLE_TIMEOUT = 2.5  # Seconds of silence before clearing buffer (catches mouse-click field switches)
@@ -484,6 +491,7 @@ def load_config():
     global trigger_strings, trigger_last_chars, max_buffer_len, keystroke_buffer
     global provider, temperature, custom_endpoint, key_delay, spinner_mode
     global autocorrect_enabled, autocorrect_strength, autocorrect_service, last_autocorrect
+    global excluded_apps, fg_excluded, last_fg_hwnd
 
     config_path = os.path.join(script_dir, "config.json")
 
@@ -594,6 +602,25 @@ def load_config():
         key_delay_ms = 200
     key_delay_ms = max(30, min(500, int(key_delay_ms)))  # Clamp 30-500ms
     key_delay = key_delay_ms / 1000.0  # Convert to seconds for time.sleep()
+
+    # Apps Mind stays out of. Substrings are matched against the process image
+    # name, so "telegram" covers Telegram.exe and its Store build alike.
+    requested_excluded = config.get("excluded_apps", list(DEFAULT_EXCLUDED_APPS))
+    if isinstance(requested_excluded, str):
+        requested_excluded = requested_excluded.replace(",", " ").split()
+    if isinstance(requested_excluded, (list, tuple)):
+        excluded_apps = [
+            str(item).strip().lower()
+            for item in requested_excluded
+            if isinstance(item, str) and str(item).strip()
+        ]
+    else:
+        log("WARNING: excluded_apps must be a list, using the default")
+        excluded_apps = list(DEFAULT_EXCLUDED_APPS)
+    # The exclusion decision is cached per foreground window, so drop the cache
+    # or an edited list would not take effect until the user switched apps.
+    fg_excluded = False
+    last_fg_hwnd = 0
 
     # Validate spinner mode (animated | static | off)
     spinner_mode = config.get("spinner", "animated")
@@ -753,6 +780,8 @@ def load_config():
         f"Commands loaded: {len(commands)} "
         f"({file_command_count} from commands.json + {system_command_count} built-in)"
     )
+    if excluded_apps:
+        log(f"Mind stays silent in: {', '.join(excluded_apps)}")
     return True
 
 # --- Hot reload: watch config files for changes ---
@@ -2477,9 +2506,44 @@ def process_keystroke(vkey, scan_code):
         log(f"ERROR in process_keystroke: {e}")
         keystroke_buffer.clear()
 
+def _window_is_excluded(hwnd):
+    """Whether Mind should stay silent in the app owning this window.
+
+    Matches the process image name only. The window title is deliberately not
+    consulted: a document called "telegram notes.txt" would otherwise switch
+    Mind off in the editor showing it.
+
+    Called once per foreground change rather than per keystroke, so the process
+    lookup stays off the typing path.
+    """
+    if not hwnd or not excluded_apps:
+        return False
+    try:
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return False
+        try:
+            buffer = ctypes.create_unicode_buffer(512)
+            size = wt.DWORD(512)
+            if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                return False
+            image_name = buffer.value.rsplit("\\", 1)[-1].lower()
+        finally:
+            kernel32.CloseHandle(handle)
+        return any(token and token in image_name for token in excluded_apps)
+    except Exception:
+        # Never let window inspection break typing.
+        return False
+
+
 def _process_keystroke_inner(vkey, scan_code):
     global last_fg_hwnd, last_keystroke_time, last_typed_vkey, last_typed_vkey_time
-    global physical_key_serial, last_autocorrect
+    global physical_key_serial, last_autocorrect, fg_excluded
 
     _cancel_autocorrect_timer()
     physical_key_serial += 1
@@ -2491,6 +2555,14 @@ def _process_keystroke_inner(vkey, scan_code):
         keystroke_buffer.clear()
         last_autocorrect = None
         last_fg_hwnd = current_fg
+        fg_excluded = _window_is_excluded(current_fg)
+
+    # Hold no keystrokes at all in an excluded app, so nothing can fire there and
+    # nothing typed there is kept in memory.
+    if fg_excluded:
+        if keystroke_buffer:
+            keystroke_buffer.clear()
+        return
 
     # Clear buffer on idle gap (catches mouse-click field switches within same window)
     now = time.time()
