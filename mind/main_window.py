@@ -881,13 +881,47 @@ class SettingsPage(QWidget):
             self.telegram_notifications,
             "✈",
         )
+        self.telegram_files = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Telegram file access",
+            "Browse folders and fetch files from this PC over Telegram, and save files "
+            "sent to the bot. Anyone holding the bot token can read what you allow here, "
+            "so keep the folder below as narrow as you can.",
+            self.telegram_files,
+            "✈",
+        )
+        self.telegram_files_root = QLineEdit()
+        self.telegram_files_root.setPlaceholderText(str(Path.home()))
+        self.telegram_files_root.setMinimumWidth(220)
+        self._setting_row(
+            appearance_layout,
+            "Browsable folder",
+            "Browsing cannot leave this folder. Leave empty to use your user folder. "
+            "Point it at something narrow, such as a single shared folder.",
+            self.telegram_files_root,
+            "✈",
+        )
+        self.telegram_inbox = QLineEdit()
+        self.telegram_inbox.setPlaceholderText(str(Path.home() / "Mind Inbox"))
+        self.telegram_inbox.setMinimumWidth(220)
+        self._setting_row(
+            appearance_layout,
+            "Save files to",
+            "Where files sent to the bot are stored. Existing files are never overwritten.",
+            self.telegram_inbox,
+            "✈",
+        )
         for widget in (
             self.telegram_token,
             self.telegram_chat_ids,
             self.telegram_default,
             self.telegram_notifications,
+            self.telegram_files,
         ):
             self.telegram_enabled.toggled.connect(widget.setEnabled)
+        for widget in (self.telegram_files_root, self.telegram_inbox):
+            self.telegram_files.toggled.connect(widget.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
             appearance_layout,
@@ -1069,13 +1103,20 @@ class SettingsPage(QWidget):
         )
         self.telegram_default.setText(str(config.get("telegram_default_command", "")))
         self.telegram_notifications.setChecked(bool(config.get("telegram_notifications", False)))
+        files_on = bool(config.get("telegram_files_enabled", False))
+        self.telegram_files.setChecked(files_on)
+        self.telegram_files_root.setText(str(config.get("telegram_files_root", "")))
+        self.telegram_inbox.setText(str(config.get("telegram_inbox", "")))
         for widget in (
             self.telegram_token,
             self.telegram_chat_ids,
             self.telegram_default,
             self.telegram_notifications,
+            self.telegram_files,
         ):
             widget.setEnabled(telegram_on)
+        for widget in (self.telegram_files_root, self.telegram_inbox):
+            widget.setEnabled(telegram_on and files_on)
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
         self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
         self.ghost_text.setChecked(bool(config.get("ghost_text_enabled", True)))
@@ -1116,6 +1157,9 @@ class SettingsPage(QWidget):
                 ),
                 "telegram_default_command": self.telegram_default.text().strip().lstrip("?/"),
                 "telegram_notifications": self.telegram_notifications.isChecked(),
+                "telegram_files_enabled": self.telegram_files.isChecked(),
+                "telegram_files_root": self.telegram_files_root.text().strip(),
+                "telegram_inbox": self.telegram_inbox.text().strip(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
                 "ghost_text_enabled": self.ghost_text.isChecked(),

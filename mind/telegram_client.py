@@ -110,6 +110,61 @@ class TelegramClient:
             # Purely cosmetic feedback; never fail a request over it.
             pass
 
+    def send_document(self, chat_id: int, path: str, caption: str = "") -> None:
+        """Upload a file with a hand-rolled multipart body.
+
+        sendDocument cannot take JSON, and the standard library has no multipart
+        encoder, so the body is assembled here rather than adding a dependency.
+        """
+        from pathlib import Path as _Path
+
+        source = _Path(path)
+        payload = source.read_bytes()
+        boundary = f"----MindBoundary{uuid.uuid4().hex}"
+        line = f"--{boundary}".encode()
+        parts: list[bytes] = [
+            line,
+            b'Content-Disposition: form-data; name="chat_id"',
+            b"",
+            str(chat_id).encode(),
+        ]
+        if caption:
+            parts += [
+                line,
+                b'Content-Disposition: form-data; name="caption"',
+                b"",
+                caption.encode("utf-8"),
+            ]
+        filename = source.name.replace('"', "")
+        parts += [
+            line,
+            f'Content-Disposition: form-data; name="document"; filename="{filename}"'.encode(
+                "utf-8"
+            ),
+            b"Content-Type: application/octet-stream",
+            b"",
+        ]
+        body = b"\r\n".join(parts) + b"\r\n" + payload + f"\r\n--{boundary}--\r\n".encode()
+
+        url = f"{API_ROOT}/bot{self._token}/sendDocument"
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "Mind-Telegram-Bridge",
+            },
+            method="POST",
+        )
+        try:
+            # Uploads are slower than API calls, so they get their own budget.
+            with urllib.request.urlopen(request, timeout=max(self._timeout, 120.0)) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise TelegramError(_redact(f"Could not send the file: {exc}", self._token)) from exc
+        if not isinstance(result, dict) or not result.get("ok"):
+            raise TelegramError(_redact("Telegram rejected the file upload.", self._token))
+
     def get_file_path(self, file_id: str) -> str:
         result = self._call("getFile", {"file_id": file_id})
         if not isinstance(result, dict) or not result.get("file_path"):

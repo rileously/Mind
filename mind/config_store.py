@@ -84,6 +84,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram_allowed_chat_ids": [],
     "telegram_default_command": "fix",
     "telegram_notifications": False,
+    # File browsing and transfer over the bridge. Off by default: a bot token is
+    # a bearer credential, so this must never be something a user ends up with
+    # without choosing it. Browsing is confined to telegram_files_root, which
+    # falls back to the user's profile folder rather than the whole machine.
+    "telegram_files_enabled": False,
+    "telegram_files_root": "",
+    "telegram_inbox": "",
     # Process names Mind's engine stays out of. Telegram is excluded by default
     # because the Telegram bridge answers the same triggers from the chat, so
     # typing "?fix" in Telegram Desktop would be rewritten in the message box

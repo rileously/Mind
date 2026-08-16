@@ -16,6 +16,18 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from .config_store import ConfigStore
 from .telegram_client import TelegramClient, TelegramError, guess_extension, scratch_name
+from .telegram_files import (
+    MAX_SEND_BYTES,
+    PathRefused,
+    entry_at,
+    format_listing,
+    human_size,
+    list_directory,
+    relative_label,
+    resolve_root,
+    resolve_within_root,
+    unique_destination,
+)
 from .telegram_routing import (
     CommandRefused,
     is_authorized,
@@ -50,6 +62,10 @@ class TelegramBridge(QObject):
         self._client: TelegramClient | None = None
         self._clipboard_text = ""
         self._ocr_results: dict[str, str] = {}
+        # Where each chat is currently browsing, and the listing it last saw, so
+        # "/get 3" refers to the same thing the user is looking at.
+        self._browse_dir: dict[int, Path] = {}
+        self._browse_entries: dict[int, list] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -172,6 +188,10 @@ class TelegramBridge(QObject):
         if photos or self._is_image_document(document):
             self._handle_image(client, int(chat_id), message, photos, document)
             return
+        if isinstance(document, dict):
+            # Any other attachment is a file transfer to the PC.
+            self._save_incoming_document(client, int(chat_id), document, config)
+            return
 
         text = str(message.get("text") or message.get("caption") or "")
         if not text.strip():
@@ -205,6 +225,9 @@ class TelegramBridge(QObject):
             return
         if trigger in {"commands", "list"}:
             client.send_message(chat_id, self._command_list(config))
+            return
+        if trigger in {"files", "ls", "cd", "get", "pwd"}:
+            self._handle_files(client, chat_id, trigger, request.text, config)
             return
         if trigger == "save":
             payload = request.text or ""
@@ -256,6 +279,137 @@ class TelegramBridge(QObject):
             client.send_message(chat_id, f"Mind could not transform that: {exc}")
             return
         client.send_message(chat_id, result, reply_to=message_id)
+
+    def _files_root(self, config: dict) -> Path:
+        return resolve_root(str(config.get("telegram_files_root", "")))
+
+    def _inbox(self, config: dict) -> Path:
+        """Where files sent to the bot are saved."""
+        configured = str(config.get("telegram_inbox", "")).strip()
+        folder = Path(configured).expanduser() if configured else Path.home() / "Mind Inbox"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder.resolve()
+
+    def _handle_files(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        trigger: str,
+        argument: str,
+        config: dict,
+    ) -> None:
+        if not bool(config.get("telegram_files_enabled", False)):
+            client.send_message(
+                chat_id,
+                "File browsing is switched off. Turn on 'Telegram file access' in "
+                "Mind's Preferences to use it.",
+            )
+            return
+
+        root = self._files_root(config)
+        current = self._browse_dir.get(chat_id, root)
+        try:
+            # A root that changed in settings must not leave a stale location behind.
+            current = resolve_within_root(root, root, str(current))
+        except PathRefused:
+            current = root
+
+        try:
+            if trigger == "pwd":
+                client.send_message(chat_id, f"📁 {relative_label(root, current)}\n{current}")
+                return
+
+            if trigger == "cd":
+                choice = (argument or "").strip()
+                if not choice:
+                    client.send_message(chat_id, "Send /cd followed by a number, a name, or ..")
+                    return
+                if choice in {"..", "../"}:
+                    target = resolve_within_root(root, current, "..")
+                else:
+                    entry = entry_at(self._browse_entries.get(chat_id, []), choice)
+                    name = entry.name if entry else choice
+                    if entry is not None and not entry.is_dir:
+                        client.send_message(chat_id, f"'{name}' is a file. Use /get to fetch it.")
+                        return
+                    target = resolve_within_root(root, current, name)
+                if not target.is_dir():
+                    client.send_message(chat_id, "That is not a folder.")
+                    return
+                current = target
+
+            if trigger == "get":
+                entry = entry_at(self._browse_entries.get(chat_id, []), (argument or "").strip())
+                name = entry.name if entry else (argument or "").strip()
+                if not name:
+                    client.send_message(chat_id, "Send /get followed by a number from the list.")
+                    return
+                target = resolve_within_root(root, current, name)
+                if not target.is_file():
+                    client.send_message(chat_id, "That is not a file I can send.")
+                    return
+                size = target.stat().st_size
+                if size > MAX_SEND_BYTES:
+                    client.send_message(
+                        chat_id,
+                        f"'{target.name}' is {human_size(size)}. Telegram will not accept "
+                        f"anything over {human_size(MAX_SEND_BYTES)} from a bot.",
+                    )
+                    return
+                client.send_chat_action(chat_id, "upload_document")
+                client.send_document(chat_id, str(target), caption=target.name)
+                self.log.emit(f"Telegram: sent '{target.name}' to chat {chat_id}")
+                return
+
+            entries = list_directory(current)
+        except PathRefused as exc:
+            client.send_message(chat_id, str(exc))
+            return
+        except OSError as exc:
+            client.send_message(chat_id, f"Could not read that: {exc}")
+            return
+
+        self._browse_dir[chat_id] = current
+        self._browse_entries[chat_id] = entries
+        client.send_message(chat_id, format_listing(root, current, entries))
+
+    def _save_incoming_document(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        document: dict,
+        config: dict,
+    ) -> None:
+        if not bool(config.get("telegram_files_enabled", False)):
+            client.send_message(
+                chat_id,
+                "Saving files is switched off. Turn on 'Telegram file access' in "
+                "Mind's Preferences to use it.",
+            )
+            return
+        file_id = str(document.get("file_id", ""))
+        if not file_id:
+            return
+        try:
+            remote_path = client.get_file_path(file_id)
+            data = client.download_file(remote_path)
+        except TelegramError as exc:
+            client.send_message(chat_id, f"Could not download that file: {exc}")
+            return
+
+        inbox = self._inbox(config)
+        # The name comes from Telegram, so it is untrusted; unique_destination
+        # strips any path in it and never overwrites.
+        destination = unique_destination(inbox, str(document.get("file_name") or "file"))
+        try:
+            destination.write_bytes(data)
+        except OSError as exc:
+            client.send_message(chat_id, f"Could not save that file: {exc}")
+            return
+        self.log.emit(f"Telegram: saved '{destination.name}' from chat {chat_id}")
+        client.send_message(
+            chat_id, f"Saved {destination.name} ({human_size(len(data))}) to {destination.parent}"
+        )
 
     def _handle_image(
         self,
@@ -325,9 +479,20 @@ class TelegramBridge(QObject):
             "/clip      send your PC's clipboard here",
             "/save ...  store text in your PC's clipboard history",
             "/commands  list the commands you can use",
-            "",
-            "Shell commands are not available from Telegram.",
         ]
+        if config.get("telegram_files_enabled", False):
+            root = self._files_root(config)
+            lines += [
+                "",
+                f"Files, limited to {root}:",
+                "/files       list the current folder",
+                "/cd <n>      open a folder, /cd .. to go up",
+                "/get <n>     send me that file",
+                "/pwd         where am I",
+                "",
+                "Send any file and Mind saves it to your PC.",
+            ]
+        lines += ["", "Shell commands are not available from Telegram."]
         return "\n".join(lines)
 
     def _command_list(self, config: dict) -> str:
