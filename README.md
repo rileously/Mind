@@ -36,8 +36,15 @@ Build the portable, single-file Windows application with:
 ```
 
 The result is written to `artifacts\Mind.exe`. The destination PC does not need Python;
-copy `Mind.exe` to a permanent folder, double-click it, and complete the setup wizard.
-The executable is currently unsigned, so Windows may show an unknown-publisher warning.
+double-click `Mind.exe` and complete the setup wizard. On its first run Mind offers to
+install itself into `%LOCALAPPDATA%\Programs\Mind` and add a Start Menu entry, so it does
+not have to keep running from the Downloads folder. Declining is remembered and Mind does
+not ask again. The executable is currently unsigned, so Windows may show an
+unknown-publisher warning.
+
+Mind unpacks its bundled Python runtime into `%LOCALAPPDATA%\Mind\Runtime` and removes it
+on exit. Folders stranded by a crash or a forced End Task are cleaned up on the next
+launch; a folder still in use is never touched.
 
 ## Current preview features
 
@@ -64,6 +71,8 @@ The executable is currently unsigned, so Windows may show an unknown-publisher w
 - Teal, blue, purple, rose, and orange accent colors
 - Light, dark, and system themes
 - Per-user Windows startup registration
+- First-run offer to install into the Programs folder with a Start Menu entry
+- Automatic cleanup of runtime folders left behind by a crash or forced shutdown
 - Diagnostics view with no API-key logging
 
 ## Privacy

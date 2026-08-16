@@ -5,11 +5,20 @@ import hashlib
 import runpy
 import sys
 
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
+from mind.app_install import (
+    InstallError,
+    install_to_programs,
+    relaunch_after_exit,
+    should_offer_install,
+    source_description,
+)
 from mind.config_store import ConfigStore
 from mind.main_window import MindWindow
 from mind.paths import data_dir, engine_path
+from mind.runtime_cleanup import prune_in_background
 from mind.setup_wizard import SetupWizard
 from mind.theme import app_icon, stylesheet
 
@@ -73,6 +82,55 @@ def run_engine() -> int:
     return 0
 
 
+def _offer_install(store: ConfigStore, config: dict, minimized: bool) -> bool:
+    """Ask once whether to move a downloaded Mind into its permanent home.
+
+    Returns True when Mind has been installed and a replacement is starting from
+    the new location, in which case this process should exit.
+    """
+    if not should_offer_install(config, minimized=minimized):
+        return False
+
+    box = QMessageBox()
+    box.setWindowIcon(app_icon())
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle("Install Mind")
+    box.setText("Install Mind on this PC?")
+    # Nothing else of Mind's is on screen yet, so an unparented dialog can end up
+    # behind whatever the user was already doing and look like a hung launch.
+    box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    box.setInformativeText(
+        f"Mind is running from {source_description()}. Installing puts it in your "
+        "Programs folder and adds it to the Start Menu, so it survives clearing "
+        "that folder and updates cleanly.\n\nYour settings and commands are kept."
+    )
+    install_button = box.addButton("Install", QMessageBox.AcceptRole)
+    box.addButton("Not now", QMessageBox.RejectRole)
+    box.setDefaultButton(install_button)
+    box.show()
+    box.raise_()
+    box.activateWindow()
+    box.exec()
+
+    if box.clickedButton() is not install_button:
+        store.save({**config, "install_prompt_dismissed": True})
+        return False
+
+    try:
+        target = install_to_programs()
+        relaunch_after_exit(target, minimized=minimized)
+    except InstallError as exc:
+        QMessageBox.warning(
+            None,
+            "Could not install Mind",
+            f"{exc}\n\nMind will keep running from its current location.",
+        )
+        return False
+
+    store.save({**config, "install_prompt_dismissed": True})
+    return True
+
+
 def main() -> int:
     if "--engine" in sys.argv:
         return run_engine()
@@ -97,6 +155,13 @@ def main() -> int:
             app.setStyleSheet(stylesheet(str(config.get("theme", "system")), str(config.get("accent_color", "teal"))))
 
         minimized = "--minimized" in sys.argv
+        if _offer_install(store, config, minimized):
+            return 0
+
+        # Reclaim runtime folders stranded by earlier crashes or forced exits.
+        # Runs on a worker thread because it can be several gigabytes.
+        prune_in_background()
+
         window = MindWindow(store, minimized=minimized)
         if not minimized:
             window.show()

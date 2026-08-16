@@ -38,6 +38,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": CONFIG_SCHEMA_VERSION,
     "bundled_commands_revision": BUNDLED_COMMANDS_REVISION,
     "onboarding_complete": False,
+    # Set once the first-run "install into Programs" offer has been answered,
+    # either way, so a packaged Mind never asks a second time.
+    "install_prompt_dismissed": False,
     "provider": "gemini",
     "provider_profile": "gemini",
     "model": "gemini-3.5-flash-lite",
