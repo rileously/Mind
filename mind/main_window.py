@@ -580,7 +580,7 @@ class SettingsPage(QWidget):
         self._setting_row(
             behavior_layout,
             "Word definitions",
-            "Shows an English definition above single-word selections in other apps. Only the selected word is looked up online.",
+            "Shows an English definition above single-word selections in other apps. Skipped while you are editing a text field. Only the selected word is looked up online.",
             self.word_definitions,
             "Aa",
         )
@@ -1698,7 +1698,11 @@ class MindWindow(QMainWindow):
             return
         config = self.store.load()
         word = normalize_selected_word(session.text)
-        if bool(config.get("word_definitions_enabled", True)) and word is not None:
+        if (
+            bool(config.get("word_definitions_enabled", True))
+            and word is not None
+            and not is_editable_input_target(target_hwnd)
+        ):
             if self.palette and self.palette.isVisible():
                 self.palette.close()
             if self.ask_ai_popup.isVisible():

@@ -50,8 +50,8 @@ The executable is currently unsigned, so Windows may show an unknown-publisher w
 - Visual command editor with duplicate validation and shell warnings
 - Optional Mind Palette (`Ctrl+Alt+M`) for transforming selected text
 - Optional automatic Palette popup after mouse-dragging or double-clicking selected text
-- Automatic English definitions above single-word selections in other apps, with an
-  on/off switch in Preferences
+- Automatic English definitions above single-word selections in other apps, skipped while
+  you are editing a text field, with an on/off switch in Preferences
 - Backspace or Delete dismisses the Palette and erases the original selection
 - Customizable Palette actions, order, columns, width, and text preview
 - Offline Palette tools for spacing cleanup, line-to-bullet conversion, duplicate-line
