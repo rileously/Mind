@@ -326,6 +326,10 @@ max_buffer_len = 128
 MAX_COMMANDS = 100
 MAX_TRIGGER_CHARS = 50
 MAX_REPLACER_OUTPUT_BYTES = 65_536
+# Triggers the engine handles itself. They are never stored in commands.json, so
+# the engine's trigger total is always larger than the command library count
+# shown in the desktop app.
+SYSTEM_COMMANDS = ("undo", "copy", "cut", "paste", "replace")
 last_fg_hwnd = 0  # Track foreground window for buffer clearing
 last_keystroke_time = 0.0  # Timestamp of last keystroke for idle gap detection
 BUFFER_IDLE_TIMEOUT = 2.5  # Seconds of silence before clearing buffer (catches mouse-click field switches)
@@ -690,10 +694,14 @@ def load_config():
         except OSError as e:
             log(f"WARNING: Cannot read commands.json: {e}")
 
-    # System commands
-    for s in ("undo", "copy", "cut", "paste", "replace"):
+    # System commands. These are built in rather than read from commands.json,
+    # so the engine always knows about more triggers than the command library
+    # in the desktop app lists.
+    file_command_count = len(new_commands)
+    for s in SYSTEM_COMMANDS:
         if s not in new_commands:
             new_commands[s] = {"type": "system", "prompt": "", "value": ""}
+    system_command_count = len(new_commands) - file_command_count
 
     # Pre-compute trigger strings and last chars
     new_trigger_strings = {}
@@ -741,7 +749,10 @@ def load_config():
     log(f"Config loaded: model={model}, prefix={prefix}, keys={len(api_keys)}, "
         f"key_delay={key_delay_ms}ms, realtime_spelling={autocorrect_enabled}, "
         f"spelling_strength={autocorrect_strength}")
-    log(f"Commands loaded: {len(commands)}")
+    log(
+        f"Commands loaded: {len(commands)} "
+        f"({file_command_count} from commands.json + {system_command_count} built-in)"
+    )
     return True
 
 # --- Hot reload: watch config files for changes ---

@@ -99,6 +99,10 @@ MIND_PALETTE_HOTKEY_ID = 0x4D49
 MIND_SNIP_HOTKEY_ID = 0x534E
 MIND_CLIPBOARD_HOTKEY_ID = 0x4348
 MIND_GHOST_TEXT_HOTKEY_ID = 0x4754
+# Triggers the engine handles itself, mirroring SYSTEM_COMMANDS in SwiftSlate.pyw.
+# The engine runs as a standalone script and does not import this package, so the
+# two lists are kept in step by hand; update both together.
+SYSTEM_TRIGGERS = ("undo", "copy", "cut", "paste", "replace")
 
 
 class DashboardPage(QWidget):
@@ -409,7 +413,13 @@ class CommandsPage(QWidget):
                 item.setData(Qt.UserRole, source_index)
                 self.table.setItem(row, column, item)
         enabled = sum(1 for command in self.commands if command.get("enabled", True))
-        self.count_label.setText(f"{len(self.commands)} commands · {enabled} enabled")
+        # The engine also handles ?undo, ?copy, ?cut, ?paste, and ?replace, which
+        # are built in rather than stored here. Naming them keeps this total from
+        # contradicting the higher trigger count reported in Diagnostics.
+        self.count_label.setText(
+            f"{len(self.commands)} commands · {enabled} enabled · "
+            f"{len(SYSTEM_TRIGGERS)} built-in triggers always available"
+        )
 
     def _selected_index(self) -> int | None:
         row = self.table.currentRow()
