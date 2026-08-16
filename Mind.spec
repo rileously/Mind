@@ -45,7 +45,11 @@ exe = EXE(
     # the one-file runtime during update extraction.
     upx=False,
     upx_exclude=[],
-    runtime_tmpdir=None,
+    # Extract the one-file runtime to a stable per-user folder instead of the
+    # volatile system temp directory. Storage Sense, Disk Cleanup, and antivirus
+    # products delete %TEMP%\_MEIxxxxxx while Mind is still running, which makes
+    # the next launch fail with "Failed to load Python DLL ... python312.dll".
+    runtime_tmpdir="%LOCALAPPDATA%\\Mind\\Runtime",
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,

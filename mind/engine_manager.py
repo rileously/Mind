@@ -1,11 +1,69 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from .paths import engine_path
+
+
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _descendant_process_ids(process_id: int) -> list[int]:
+    """Return the process ids spawned by ``process_id``, deepest last."""
+    if process_id <= 0:
+        return []
+    query = (
+        "Get-CimInstance Win32_Process | "
+        "Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in completed.stdout.splitlines()[1:]:
+        parts = line.replace('"', "").split(",")
+        if len(parts) != 2:
+            continue
+        try:
+            child, parent = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(parent, []).append(child)
+
+    found: list[int] = []
+    pending = [process_id]
+    while pending:
+        current = pending.pop()
+        for child in children.get(current, []):
+            if child not in found and child != process_id:
+                found.append(child)
+                pending.append(child)
+    return found
+
+
+def _force_kill(process_id: int, tree: bool = False) -> None:
+    if process_id <= 0:
+        return
+    command = ["taskkill.exe", "/PID", str(process_id), "/F"]
+    if tree:
+        command.insert(-1, "/T")
+    try:
+        subprocess.run(
+            command, capture_output=True, timeout=5, creationflags=CREATE_NO_WINDOW
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 class EngineManager(QObject):
@@ -73,12 +131,30 @@ class EngineManager(QObject):
         self.stop()
 
     def shutdown(self) -> None:
+        """Stop the engine and every process it spawned.
+
+        The engine runs as a child interpreter, and in the packaged build as a
+        second one-file bootloader with its own Python child. Terminating only
+        the direct child leaves that grandchild alive holding a lock on
+        Mind.exe, which blocks the updater from replacing the executable and
+        forces the user to end the task by hand.
+
+        Descendants are recorded before the parent is signalled, because once
+        the parent exits the tree relationship is gone and ``taskkill /T`` can
+        no longer reach the orphans.
+        """
         if not self.is_running:
             return
+        process_id = int(self.process.processId())
+        descendants = _descendant_process_ids(process_id)
         self.process.terminate()
         if not self.process.waitForFinished(1500):
-            self.process.kill()
+            # The tree is still intact while the parent lives, so take it down
+            # in one call rather than orphaning the grandchild with kill().
+            _force_kill(process_id, tree=True)
             self.process.waitForFinished(1000)
+        for orphan in descendants:
+            _force_kill(orphan, tree=True)
 
     def _restart_after_finish(self) -> None:
         try:
