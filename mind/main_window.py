@@ -7,7 +7,14 @@ from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -344,35 +351,59 @@ class CommandsPage(QWidget):
         add = QPushButton("＋  New command")
         add.setProperty("primary", True)
         add.clicked.connect(self._add)
-        edit = QPushButton("Edit")
-        edit.clicked.connect(self._edit)
-        duplicate = QPushButton("Duplicate")
-        duplicate.clicked.connect(self._duplicate)
-        remove = QPushButton("Delete")
-        remove.setProperty("danger", True)
-        remove.clicked.connect(self._delete)
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.clicked.connect(self._edit)
+        self.duplicate_button = QPushButton("Duplicate")
+        self.duplicate_button.clicked.connect(self._duplicate)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.setProperty("danger", True)
+        self.delete_button.clicked.connect(self._delete)
         toolbar.addWidget(self.search)
         toolbar.addStretch()
-        toolbar.addWidget(edit)
-        toolbar.addWidget(duplicate)
-        toolbar.addWidget(remove)
+        toolbar.addWidget(self.edit_button)
+        toolbar.addWidget(self.duplicate_button)
+        toolbar.addWidget(self.delete_button)
         toolbar.addWidget(add)
         root.addWidget(toolbar_card)
 
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Trigger", "Type", "Description", "Enabled"])
+        self.table.setHorizontalHeaderLabels(["Trigger", "Type", "Description", "On"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(True)
         header = self.table.horizontalHeader()
+        # Start in the order the commands are stored in. That order is meaningful:
+        # the engine matches triggers in file order and warns when a short trigger
+        # shadows a longer one, so silently re-sorting the view would misrepresent
+        # which command actually fires. Clicking a header still sorts.
+        header.setSortIndicator(-1, Qt.AscendingOrder)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self._on_header_clicked)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.doubleClicked.connect(self._edit)
+        self.table.itemSelectionChanged.connect(self._sync_actions)
+        # Toggling on or off is the most frequent edit by far; going through the
+        # full edit dialog for it was needless friction.
+        self.table.itemChanged.connect(self._on_item_changed)
         root.addWidget(self.table, 1)
+
+        self.empty_label = QLabel()
+        self.empty_label.setObjectName("Muted")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.hide()
+        root.addWidget(self.empty_label)
+
+        delete_shortcut = QShortcut(QKeySequence.Delete, self.table)
+        delete_shortcut.activated.connect(self._delete)
+        for sequence in (QKeySequence(Qt.Key_Return), QKeySequence(Qt.Key_Enter)):
+            QShortcut(sequence, self.table).activated.connect(self._edit)
 
         bottom = QHBoxLayout()
         self.count_label = QLabel()
@@ -397,21 +428,53 @@ class CommandsPage(QWidget):
             searchable = " ".join(str(value) for value in command.values()).lower()
             if not query or query in searchable:
                 shown.append((index, command))
+
+        # Sorting and the enabled checkbox both emit signals while rows are being
+        # rebuilt; suspend them so a redraw is not mistaken for a user edit.
+        self.table.setSortingEnabled(False)
+        self._loading = True
         self.table.setRowCount(len(shown))
         labels = {"ai": "AI", "replacer-text": "Snippet", "replacer-shell": "Shell"}
+        prefix = str(self.store.load().get("prefix", "?"))
         for row, (source_index, command) in enumerate(shown):
             kind = str(command.get("type", "ai"))
             description = str(command.get("prompt", command.get("value", ""))).replace("\n", " ")
-            values = [
-                str(command.get("trigger", "")),
-                labels.get(kind, kind),
-                description,
-                "Yes" if command.get("enabled", True) else "No",
-            ]
+            is_enabled = bool(command.get("enabled", True))
+            trigger = str(command.get("trigger", ""))
+            # Show what the user actually types. The bare trigger left people
+            # guessing whether the prefix was part of it.
+            values = [f"{prefix}{trigger}", labels.get(kind, kind), description, ""]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, source_index)
+                if column == 3:
+                    item.setFlags(
+                        (item.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                    )
+                    item.setCheckState(Qt.Checked if is_enabled else Qt.Unchecked)
+                    item.setToolTip(
+                        "Disable this command without deleting it"
+                        if is_enabled
+                        else "Enable this command"
+                    )
+                elif column == 2 and description:
+                    # The column truncates long prompts, so keep the full text
+                    # reachable without opening the editor.
+                    item.setToolTip(description)
+                if not is_enabled:
+                    font = item.font()
+                    font.setStrikeOut(column == 0)
+                    item.setFont(font)
+                    item.setForeground(QColor(150, 150, 150))
                 self.table.setItem(row, column, item)
+        self._loading = False
+        self.table.setSortingEnabled(True)
+        if not getattr(self, "_user_sorted", False):
+            header = self.table.horizontalHeader()
+            header.setSortIndicator(-1, Qt.AscendingOrder)
+            header.setSortIndicatorShown(False)
+        self._update_empty_state(len(shown), bool(query))
+        self._sync_actions()
         enabled = sum(1 for command in self.commands if command.get("enabled", True))
         # The engine also handles ?undo, ?copy, ?cut, ?paste, and ?replace, which
         # are built in rather than stored here. Naming them keeps this total from
@@ -420,6 +483,48 @@ class CommandsPage(QWidget):
             f"{len(self.commands)} commands · {enabled} enabled · "
             f"{len(SYSTEM_TRIGGERS)} built-in triggers always available"
         )
+
+    def _on_header_clicked(self, _section: int) -> None:
+        """Sort only once the user asks for it, then keep their choice."""
+        self._user_sorted = True
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+
+    def _update_empty_state(self, shown: int, filtered: bool) -> None:
+        if shown:
+            self.empty_label.hide()
+            self.table.show()
+            return
+        self.table.hide()
+        self.empty_label.setText(
+            "No command matches your search. Try a different word, or clear the box "
+            "to see the whole library."
+            if filtered
+            else "You have no commands yet. Select New command to create one, or "
+            "Restore bundled commands to start from the defaults."
+        )
+        self.empty_label.show()
+
+    def _sync_actions(self) -> None:
+        """Only offer actions that can actually be carried out right now."""
+        has_selection = self._selected_index() is not None
+        self.edit_button.setEnabled(has_selection)
+        self.duplicate_button.setEnabled(has_selection)
+        self.delete_button.setEnabled(has_selection)
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if getattr(self, "_loading", False) or item.column() != 3:
+            return
+        index = item.data(Qt.UserRole)
+        if index is None:
+            return
+        index = int(index)
+        if not 0 <= index < len(self.commands):
+            return
+        enabled = item.checkState() == Qt.Checked
+        if bool(self.commands[index].get("enabled", True)) == enabled:
+            return
+        self.commands[index] = {**self.commands[index], "enabled": enabled}
+        self._save()
 
     def _selected_index(self) -> int | None:
         row = self.table.currentRow()

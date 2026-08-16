@@ -462,6 +462,9 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QPushButton[primary="true"]:hover {{ border-color: {p['accent_hover']}; }}
     QPushButton[danger="true"] {{ color: {p['danger']}; }}
+    /* Declared after the danger colour so a disabled destructive button reads as
+       unavailable instead of staying alarm-red and looking clickable. */
+    QPushButton[danger="true"]:disabled {{ color: {p['muted']}; }}
     QPushButton#NavButton {{
         text-align: left; padding-left: 13px; border: 0; border-left: 3px solid transparent;
         background: transparent; color: {p['muted']}; min-height: 40px; border-radius: 6px;
