@@ -84,6 +84,18 @@ from .transform_client import TransformError, transform_text
 
 
 POLL_TIMEOUT_SECONDS = 25
+# Panel kinds. A message is a panel when only its newest copy is useful; two of
+# them in the chat is a scrolling problem, never extra information.
+PANEL_MENU = "menu"
+PANEL_FILES = "files"
+PANEL_SEARCH = "search"
+PANEL_CLIPBOARD = "clipboard"
+PANEL_STATUS = "status"
+PANEL_SCREEN = "screen"
+PANEL_MEDIA = "media"
+PANEL_COMMANDS = "commands"
+PANEL_HINT = "hint"
+MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
 CB_POWER = "w"
@@ -127,9 +139,12 @@ class TelegramBridge(QObject):
         # What was last published to Telegram's command menu, so it is only
         # re-sent when the settings behind it actually change.
         self._published_commands = ""
-        # The menu message currently in each chat, so a new one can replace it
-        # rather than joining it.
-        self._menu_message: dict[int, int] = {}
+        # Panels: messages that show the current state of something rather than
+        # carrying content, keyed by chat and kind. Only the newest of each is
+        # worth keeping, so sending one takes the previous away. A file the user
+        # asked for, a transform, or text read from a photo is content and is
+        # never tracked here.
+        self._panels: dict[tuple[int, str], int] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -309,15 +324,25 @@ class TelegramBridge(QObject):
             self._send_menu(client, chat_id, config)
             return
         if trigger == "help":
-            client.send_message(
-                chat_id, self._help_text(config), reply_markup=build_main_menu(config)
+            self._send_panel(
+                client,
+                chat_id,
+                PANEL_MENU,
+                self._help_text(config),
+                build_main_menu(config),
             )
             return
         if trigger == "clip":
             self.clipboard_requested.emit(chat_id)
             return
         if trigger in {"commands", "list"}:
-            client.send_message(chat_id, self._command_list(config))
+            self._send_panel(
+                client,
+                chat_id,
+                PANEL_COMMANDS,
+                self._command_list(config),
+                build_menu_keyboard(),
+            )
             return
         if trigger in {
             "status",
@@ -545,54 +570,91 @@ class TelegramBridge(QObject):
         self._browse_entries[chat_id] = entries
         places = quick_places(root) if current == root else None
         client.answer_callback_query(callback_id)
-        client.edit_message_text(
+        # Through _replace_panel so a message that was the menu, or a search, is
+        # tracked as the listing it has become.
+        self._replace_panel(
+            client,
             chat_id,
             int(message_id),
+            PANEL_FILES,
             format_header(root, current, entries, page),
             build_keyboard(entries, page, current == root, places),
         )
 
-    def _send_menu(self, client: TelegramClient, chat_id: int, config: dict) -> None:
-        """Show the menu, taking away the one already in the chat.
+    def _forget_panel(self, chat_id: int, message_id: int) -> None:
+        """Stop treating a message as a panel of whatever kind it used to be.
 
-        Only one is kept per chat. A second copy carries the same buttons as the
-        first, so the older one is no longer worth anything and only makes the
-        conversation longer to scroll.
+        Called before a message is given a new role. Without it, a listing that
+        was once the menu would still be deleted the next time a menu opens,
+        taking away what the user is looking at.
         """
-        previous = self._menu_message.pop(chat_id, None)
+        for key, tracked in list(self._panels.items()):
+            if key[0] == chat_id and tracked == message_id:
+                self._panels.pop(key, None)
+
+    def _send_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        kind: str,
+        text: str,
+        reply_markup: dict | None = None,
+        html: bool = False,
+    ) -> None:
+        """Send a panel, taking away the previous one of the same kind.
+
+        Asking twice for the clipboard, or the menu, or the status of the PC
+        should leave one answer in the chat rather than a column of them: the
+        older copies are already out of date, or identical, and either way they
+        are only something to scroll past.
+        """
+        key = (chat_id, kind)
+        previous = self._panels.get(key)
+        # Sent before the old one is removed, so a send that fails leaves the
+        # stale panel rather than leaving the chat with nothing at all.
+        sent = client.send_message(chat_id, text, reply_markup=reply_markup, html=html)
         if previous is not None:
             client.delete_message(chat_id, previous)
-        sent = client.send_message(
-            chat_id,
-            menu_text(config, _host_name()),
-            reply_markup=build_main_menu(config),
-            html=True,
-        )
-        if sent is not None:
-            self._menu_message[chat_id] = sent
+        if sent is None:
+            self._panels.pop(key, None)
+        else:
+            self._panels[key] = sent
 
-    def _replace_menu(
+    def _replace_panel(
         self,
         client: TelegramClient,
         chat_id: int,
         message_id: object,
+        kind: str,
         text: str,
         reply_markup: dict | None,
+        html: bool = False,
     ) -> bool:
-        """Turn the tapped menu into what it opened, in place.
+        """Turn a panel into a different one, in place.
 
-        The menu has served its purpose the moment something is picked from it,
-        so the reply takes its place instead of being added below it. Returns
-        whether the message could be reused; a tap on a message too old to edit
-        falls back to sending.
+        A menu is spent the moment something is picked from it, so the reply
+        takes its place instead of being added below it. Returns whether the
+        message could be reused; a tap on a message too old to edit falls back
+        to sending.
         """
         if not isinstance(message_id, int):
             return False
-        # This message is no longer a menu, so it must not be deleted as one.
-        if self._menu_message.get(chat_id) == message_id:
-            self._menu_message.pop(chat_id, None)
-        client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+        self._forget_panel(chat_id, message_id)
+        client.edit_message_text(
+            chat_id, message_id, text, reply_markup=reply_markup, html=html
+        )
+        self._panels[(chat_id, kind)] = message_id
         return True
+
+    def _send_menu(self, client: TelegramClient, chat_id: int, config: dict) -> None:
+        self._send_panel(
+            client,
+            chat_id,
+            PANEL_MENU,
+            menu_text(config, _host_name()),
+            reply_markup=build_main_menu(config),
+            html=True,
+        )
 
     def _show_menu(
         self,
@@ -611,18 +673,16 @@ class TelegramBridge(QObject):
         action = menu_action_at(index)
         if action is None:
             client.answer_callback_query(callback_id)
-            if isinstance(message_id, int):
-                # A listing or a keyboard becoming the menu again: reuse it, and
-                # remember it as the menu now in the chat.
-                client.edit_message_text(
-                    chat_id,
-                    message_id,
-                    menu_text(config, _host_name()),
-                    reply_markup=build_main_menu(config),
-                    html=True,
-                )
-                self._menu_message[chat_id] = message_id
-            else:
+            # A listing or a keyboard becoming the menu again: reuse it.
+            if not self._replace_panel(
+                client,
+                chat_id,
+                message_id,
+                PANEL_MENU,
+                menu_text(config, _host_name()),
+                build_main_menu(config),
+                html=True,
+            ):
                 self._send_menu(client, chat_id, config)
             return
 
@@ -635,20 +695,30 @@ class TelegramBridge(QObject):
 
         client.answer_callback_query(callback_id)
         if action.key == "commands":
-            if not self._replace_menu(
-                client, chat_id, message_id, self._command_list(config), build_menu_keyboard()
+            listing = self._command_list(config)
+            if not self._replace_panel(
+                client, chat_id, message_id, PANEL_COMMANDS, listing, build_menu_keyboard()
             ):
-                client.send_message(chat_id, self._command_list(config))
+                self._send_panel(
+                    client, chat_id, PANEL_COMMANDS, listing, build_menu_keyboard()
+                )
         elif action.key == "find":
             hint = "Send /find followed by part of a name, for example:\n/find invoice"
-            if not self._replace_menu(client, chat_id, message_id, hint, build_menu_keyboard()):
-                client.send_message(chat_id, hint)
-        elif action.key == "media":
-            if not self._replace_menu(
-                client, chat_id, message_id, "🎵  Media keys for this PC.", build_media_keyboard()
+            if not self._replace_panel(
+                client, chat_id, message_id, PANEL_HINT, hint, build_menu_keyboard()
             ):
-                client.send_message(
-                    chat_id, "🎵  Media keys for this PC.", reply_markup=build_media_keyboard()
+                self._send_panel(client, chat_id, PANEL_HINT, hint, build_menu_keyboard())
+        elif action.key == "media":
+            if not self._replace_panel(
+                client,
+                chat_id,
+                message_id,
+                PANEL_MEDIA,
+                MEDIA_PROMPT,
+                build_media_keyboard(),
+            ):
+                self._send_panel(
+                    client, chat_id, PANEL_MEDIA, MEDIA_PROMPT, build_media_keyboard()
                 )
         elif action.key == "files":
             # The listing takes the menu's place, which is also how the browsing
@@ -708,7 +778,13 @@ class TelegramBridge(QObject):
 
         try:
             if trigger == "status":
-                client.send_message(chat_id, format_status(read_status(), _host_name()))
+                self._send_panel(
+                    client,
+                    chat_id,
+                    PANEL_STATUS,
+                    format_status(read_status(), _host_name()),
+                    build_menu_keyboard(),
+                )
                 return
 
             if trigger == "screen":
@@ -721,17 +797,17 @@ class TelegramBridge(QObject):
                 if not (argument or "").strip():
                     # No argument is not a mistake to correct but a request for
                     # the controls themselves.
-                    client.send_message(
-                        chat_id,
-                        "🎵  Media keys for this PC.",
-                        reply_markup=build_media_keyboard(),
+                    self._send_panel(
+                        client, chat_id, PANEL_MEDIA, MEDIA_PROMPT, build_media_keyboard()
                     )
                     return
                 press_media_key(argument)
-                client.send_message(
+                self._send_panel(
+                    client,
                     chat_id,
+                    PANEL_MEDIA,
                     f"Sent {argument.strip().lower()}.",
-                    reply_markup=build_media_keyboard(),
+                    build_media_keyboard(),
                 )
                 return
 
@@ -802,10 +878,14 @@ class TelegramBridge(QObject):
         )
         self._search_hits[chat_id] = hits
         self.log.emit(f"Telegram: searched '{needle}', {len(hits)} match(es)")
-        client.send_message(
+        # Only the newest search matters: the buttons on an older one index into
+        # results that have already been replaced.
+        self._send_panel(
+            client,
             chat_id,
+            PANEL_SEARCH,
             format_search_header(needle, hits, truncated),
-            reply_markup=build_search_keyboard(hits) if hits else None,
+            build_search_keyboard(hits) if hits else build_menu_keyboard(),
         )
 
     def _send_file(
@@ -900,7 +980,13 @@ class TelegramBridge(QObject):
 
         try:
             if trigger == "pwd":
-                client.send_message(chat_id, f"📂 {relative_label(root, current)}\n{current}")
+                self._send_panel(
+                    client,
+                    chat_id,
+                    PANEL_HINT,
+                    f"📂 {relative_label(root, current)}\n{current}",
+                    build_menu_keyboard(),
+                )
                 return
 
             if trigger == "cd":
@@ -975,9 +1061,11 @@ class TelegramBridge(QObject):
         places = quick_places(root) if current == root else None
         header = format_header(root, current, entries, page)
         keyboard = build_keyboard(entries, page, current == root, places)
-        if self._replace_menu(client, chat_id, replace_message, header, keyboard):
+        if self._replace_panel(
+            client, chat_id, replace_message, PANEL_FILES, header, keyboard
+        ):
             return
-        client.send_message(chat_id, header, reply_markup=keyboard)
+        self._send_panel(client, chat_id, PANEL_FILES, header, keyboard)
 
     def _save_incoming_document(
         self,
@@ -1067,15 +1155,33 @@ class TelegramBridge(QObject):
         except TelegramError as exc:
             self.log.emit(f"Telegram: could not send a file ({exc})")
 
-    def send_image(self, chat_id: int, path, caption: str = "") -> None:
-        """Send an image so it shows in the chat instead of arriving as a file."""
+    def send_image(self, chat_id: int, path, caption: str = "", panel: str = "") -> None:
+        """Send an image so it shows in the chat instead of arriving as a file.
+
+        ``panel`` marks it as a view of something rather than content, which for
+        a screenshot it is: the previous one is a picture of a screen that has
+        since changed, so it goes when a fresh one arrives.
+        """
         client = self._client
         if client is None:
             return
+        chat_id = int(chat_id)
+        key = (chat_id, panel) if panel else None
+        previous = self._panels.get(key) if key else None
         try:
-            client.send_photo(int(chat_id), str(path), caption=caption)
+            sent = client.send_photo(chat_id, str(path), caption=caption)
         except TelegramError as exc:
+            # Nothing has been touched yet, so the previous screenshot is still
+            # there and still tracked.
             self.log.emit(f"Telegram: could not send an image ({exc})")
+            return
+        if previous is not None:
+            client.delete_message(chat_id, previous)
+        if key is not None:
+            if sent is None:
+                self._panels.pop(key, None)
+            else:
+                self._panels[key] = sent
 
     def send_text(self, chat_id: int, text: str) -> None:
         client = self._client
@@ -1097,8 +1203,14 @@ class TelegramBridge(QObject):
             return
         body = text if text.strip() else "Your PC clipboard is empty."
         try:
-            client.send_message(
-                int(chat_id), body, reply_markup=build_copy_keyboard(text)
+            # A panel: asking for the clipboard again replaces the answer rather
+            # than adding another copy of it below.
+            self._send_panel(
+                client,
+                int(chat_id),
+                PANEL_CLIPBOARD,
+                body,
+                build_copy_keyboard(text),
             )
         except TelegramError as exc:
             self.log.emit(f"Telegram: could not send the clipboard ({exc})")

@@ -84,7 +84,7 @@ from .selection import (
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
-from .telegram_bridge import TelegramBridge
+from .telegram_bridge import PANEL_SCREEN, TelegramBridge
 from .telegram_routing import CommandRefused, parse_allowed_chat_ids, parse_message, select_command
 from .transform_client import TransformError, transform_text
 from .startup import is_start_with_windows_enabled, set_start_with_windows
@@ -1831,8 +1831,11 @@ class MindWindow(QMainWindow):
                 self.telegram.send_text(target, "Could not save the screenshot.")
                 return
             # As a photo: a screenshot asked for from a phone is meant to be
-            # looked at, not downloaded first.
-            self.telegram.send_image(target, destination, caption="Screen")
+            # looked at, not downloaded first. As a panel, because the previous
+            # one shows a screen that has since changed.
+            self.telegram.send_image(
+                target, destination, caption="Screen", panel=PANEL_SCREEN
+            )
         finally:
             # A screenshot can hold anything that was on screen; do not leave it
             # sitting in temp once it has been sent.

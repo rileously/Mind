@@ -276,8 +276,10 @@ class TelegramClient:
         path: str,
         caption: str = "",
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
-        self._upload("sendDocument", "document", chat_id, path, caption, reply_markup)
+    ) -> int | None:
+        return self._upload(
+            "sendDocument", "document", chat_id, path, caption, reply_markup
+        )
 
     def send_photo(
         self,
@@ -285,13 +287,13 @@ class TelegramClient:
         path: str,
         caption: str = "",
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int | None:
         """Send an image as a photo, which shows in the chat rather than as a file.
 
         Worth the separate call for screenshots: the whole point of asking for one
         from a phone is to look at it, not to download it first.
         """
-        self._upload("sendPhoto", "photo", chat_id, path, caption, reply_markup)
+        return self._upload("sendPhoto", "photo", chat_id, path, caption, reply_markup)
 
     def _upload(
         self,
@@ -301,7 +303,7 @@ class TelegramClient:
         path: str,
         caption: str,
         reply_markup: dict[str, Any] | None,
-    ) -> None:
+    ) -> int | None:
         """Upload a file with a hand-rolled multipart body.
 
         The upload methods cannot take JSON, and the standard library has no
@@ -363,6 +365,10 @@ class TelegramClient:
             raise TelegramError(_redact(f"Could not send the file: {exc}", self._token)) from exc
         if not isinstance(result, dict) or not result.get("ok"):
             raise TelegramError(_redact("Telegram rejected the file upload.", self._token))
+        message = result.get("result")
+        if isinstance(message, dict) and isinstance(message.get("message_id"), int):
+            return int(message["message_id"])
+        return None
 
     def get_file_path(self, file_id: str) -> str:
         result = self._call("getFile", {"file_id": file_id})
