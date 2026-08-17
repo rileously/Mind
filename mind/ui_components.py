@@ -150,6 +150,11 @@ class ToggleSwitch(QCheckBox):
 class SegmentedControl(QWidget):
     """Small exclusive choice control matching the Fluent segmented-button pattern."""
 
+    # Emitted with the chosen value when a person picks a segment. Deliberately
+    # not emitted by setCurrentIndex: loading a saved value into the control is
+    # not a change, and a settings page that saves on change would write it back.
+    changed = Signal(str)
+
     def __init__(self, options: Iterable[tuple[str, str]], parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SegmentedControl")
@@ -177,6 +182,10 @@ class SegmentedControl(QWidget):
             layout.addWidget(button)
         if self._buttons:
             self._buttons[0].setChecked(True)
+        # idClicked fires only for a click, so programmatic changes stay silent.
+        self._group.idClicked.connect(
+            lambda _id: self.changed.emit(self.currentData() or "")
+        )
 
     def currentData(self) -> str | None:
         button = self._group.checkedButton()

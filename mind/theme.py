@@ -154,6 +154,25 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     QFrame#SettingRow:hover {{
         background: {p['surface_hover']}; border-color: {p['border']};
     }}
+    /* Preferences tabs, styled from the same tokens as the rows they hold so the
+       bar reads as part of the page rather than a control borrowed from Qt. */
+    QTabWidget#SettingsTabs::pane {{
+        border: none; background: transparent; top: -1px;
+    }}
+    QTabWidget#SettingsTabs > QTabBar {{ qproperty-drawBase: 0; }}
+    QTabWidget#SettingsTabs > QTabBar::tab {{
+        background: transparent; color: {p['muted']};
+        border: 1px solid transparent; border-radius: 8px;
+        padding: 6px 13px; margin-right: 4px;
+        font-size: 12px; font-weight: 600;
+    }}
+    QTabWidget#SettingsTabs > QTabBar::tab:hover {{
+        background: {p['surface_hover']}; color: {p['text']};
+    }}
+    QTabWidget#SettingsTabs > QTabBar::tab:selected {{
+        background: {p['surface_alt']}; color: {p['accent']};
+        border-color: {p['border']};
+    }}
     QWidget#PaletteShell {{
         background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px;
     }}
@@ -389,6 +408,25 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QFrame#SettingRow:hover {{
         background: {p['surface_hover']}; border-color: {p['border']};
+    }}
+    /* Preferences tabs, styled from the same tokens as the rows they hold so the
+       bar reads as part of the page rather than a control borrowed from Qt. */
+    QTabWidget#SettingsTabs::pane {{
+        border: none; background: transparent; top: -1px;
+    }}
+    QTabWidget#SettingsTabs > QTabBar {{ qproperty-drawBase: 0; }}
+    QTabWidget#SettingsTabs > QTabBar::tab {{
+        background: transparent; color: {p['muted']};
+        border: 1px solid transparent; border-radius: 8px;
+        padding: 6px 13px; margin-right: 4px;
+        font-size: 12px; font-weight: 600;
+    }}
+    QTabWidget#SettingsTabs > QTabBar::tab:hover {{
+        background: {p['surface_hover']}; color: {p['text']};
+    }}
+    QTabWidget#SettingsTabs > QTabBar::tab:selected {{
+        background: {p['surface_alt']}; color: {p['accent']};
+        border-color: {p['border']};
     }}
     QWidget#PaletteShell {{
         background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px;

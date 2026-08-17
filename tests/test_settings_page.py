@@ -11,7 +11,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QCheckBox, QLineEdit
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QWidget,
+)
 
 from mind.config_store import ConfigStore
 from mind.main_window import SettingsPage
@@ -75,6 +83,126 @@ class SettingsPageTests(unittest.TestCase):
         page = SettingsPage(self.store)
         self.addCleanup(page.deleteLater)
         self.assertFalse(page.telegram_print.isEnabled())
+
+
+class TabTests(unittest.TestCase):
+    """Thirty-odd settings, grouped, so the one being looked for is findable."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        self.page = SettingsPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    def titles(self) -> list[str]:
+        return [self.page.tabs.tabText(i) for i in range(self.page.tabs.count())]
+
+    def test_the_settings_are_split_into_named_tabs(self):
+        self.assertEqual(
+            self.titles(),
+            ["Writing", "Assistance", "Shortcuts", "Telegram", "Appearance", "System"],
+        )
+
+    def test_every_setting_row_landed_in_a_tab(self):
+        # A row added to no layout would simply not appear, silently.
+        rows = 0
+        for index in range(self.page.tabs.count()):
+            page = self.page.tabs.widget(index).widget()
+            rows += len(page.findChildren(QFrame, options=Qt.FindChildrenRecursively))
+        self.assertGreater(rows, 25)
+
+    def test_no_tab_is_left_empty(self):
+        for index in range(self.page.tabs.count()):
+            page = self.page.tabs.widget(index).widget()
+            self.assertTrue(
+                page.findChildren(QWidget), self.page.tabs.tabText(index)
+            )
+
+    def test_each_tab_scrolls_on_its_own(self):
+        # The Telegram tab is long; a page-wide scroll would push the tab bar off.
+        for index in range(self.page.tabs.count()):
+            self.assertIsInstance(self.page.tabs.widget(index), QScrollArea)
+
+
+class AutoSaveTests(unittest.TestCase):
+    """No Save button: a change is the instruction to save it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        self.page = SettingsPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    def test_there_is_no_save_button_left(self):
+        labels = [b.text().lower() for b in self.page.findChildren(QPushButton)]
+        self.assertNotIn("save settings", labels)
+
+    def test_a_toggle_writes_immediately(self):
+        self.page.quick_paste.setChecked(not self.page.quick_paste.isChecked())
+        self.assertEqual(
+            bool(self.store.load().get("quick_paste_enabled")),
+            self.page.quick_paste.isChecked(),
+        )
+
+    def test_the_page_says_it_saved(self):
+        self.page.url_peek.setChecked(not self.page.url_peek.isChecked())
+        self.assertIn("saved", self.page.save_status.text().lower())
+
+    def test_loading_saved_values_does_not_write_them_back(self):
+        # The trap this guards: refresh() setting controls looks exactly like the
+        # user changing them, and on first launch would save defaults over
+        # settings still being read.
+        self.store.save({**self.store.load(), "url_peek_enabled": False})
+        page = SettingsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        self.assertFalse(bool(self.store.load().get("url_peek_enabled")))
+        self.assertEqual(page.save_status.text(), "")
+
+    def test_typing_is_not_written_on_every_keystroke(self):
+        # Held briefly so a half-typed prefix is not saved letter by letter.
+        self.page.prefix.setText("!")
+        self.page._changed_soon()
+        self.assertIn("saving", self.page.save_status.text().lower())
+        self.assertEqual(str(self.store.load().get("prefix", "?")), "?")
+        self.page._persist()
+        self.assertEqual(str(self.store.load().get("prefix")), "!")
+
+    def test_an_unusable_prefix_is_refused_and_said_so(self):
+        self.page.prefix.setText("")
+        self.page._persist()
+        self.assertIn("not saved", self.page.save_status.text().lower())
+        self.assertEqual(str(self.store.load().get("prefix", "?")), "?")
+
+    def test_dependent_controls_follow_the_toggle_that_governs_them(self):
+        self.page.telegram_enabled.setChecked(True)
+        self.page.telegram_files.setChecked(False)
+        self.assertTrue(self.page.telegram_files.isEnabled())
+        self.assertFalse(self.page.telegram_print.isEnabled())
+        self.page.telegram_files.setChecked(True)
+        self.assertTrue(self.page.telegram_print.isEnabled())
+
+    def test_switching_the_bridge_on_without_a_chat_id_says_what_is_missing(self):
+        # It used to be a modal; on a page that saves as you go, a dialog on every
+        # toggle would be unusable.
+        self.page.telegram_enabled.setChecked(True)
+        self.assertIn("chat id", self.page.save_status.text().lower())
+
+    def test_a_segmented_control_change_is_saved(self):
+        self.page.spinner.setCurrentIndex(self.page.spinner.findData("off"))
+        # setCurrentIndex is loading, not choosing, so it must not have saved.
+        self.assertNotEqual(str(self.store.load().get("spinner", "animated")), "off")
+        self.page.spinner.changed.emit("off")
+        self.assertEqual(str(self.store.load().get("spinner")), "off")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QStackedWidget,
     QSystemTrayIcon,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -635,22 +636,44 @@ class SettingsPage(QWidget):
         self.latest_release: ReleaseInfo | None = None
         self._update_worker: UpdateCheckWorker | None = None
         self._download_worker: UpdateDownloadWorker | None = None
+        self._tab_layouts: list[QVBoxLayout] = []
+        # True while refresh() is putting saved values into the controls. Their
+        # change signals fire all the same, and without this each one would write
+        # the config straight back - and the first launch would save defaults over
+        # settings it had not finished loading.
+        self._loading = True
+        # Typing and dragging a slider produce a change per keystroke and per
+        # pixel, so writes are coalesced rather than made on each one.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(450)
+        self._save_timer.timeout.connect(self._persist)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(18)
         root.addWidget(page_header(
             "Preferences",
-            "Shape how Mind listens, responds, looks, and starts with Windows.",
+            "Everything is saved the moment you change it.",
             "",
         ))
 
-        behavior = QWidget()
-        behavior_layout = QVBoxLayout(behavior)
-        behavior_layout.setContentsMargins(0, 0, 0, 0)
-        behavior_layout.setSpacing(7)
-        behavior_layout.addWidget(self._group_title("Behavior"))
+        # Tabs rather than one long column. There are thirty-odd settings, and a
+        # third of them are Telegram's; on one page the thing being looked for is
+        # always somewhere off screen.
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("SettingsTabs")
+        root.addWidget(self.tabs, 1)
+
+        writing_layout = self._tab("Writing")
+        assist_layout = self._tab("Assistance")
+        shortcuts_layout = self._tab("Shortcuts")
+        telegram_layout = self._tab("Telegram")
+        appearance_layout = self._tab("Appearance")
+        system_layout = self._tab("System")
+        # Kept so the rows below can be read in the order they are built.
+        # Every row is assigned to a tab below; nothing is left ungrouped.
         self.prefix = self._setting_row(
-            behavior_layout,
+            writing_layout,
             "Command prefix",
             "The characters before each command to trigger text execution.",
             QLineEdit(),
@@ -664,7 +687,7 @@ class SettingsPage(QWidget):
             (("Animated", "animated"), ("Static", "static"), ("Off", "off"))
         )
         self._setting_row(
-            behavior_layout,
+            writing_layout,
             "Processing indicator",
             "Feedback shown while Mind is generating or replacing text.",
             self.spinner,
@@ -685,7 +708,7 @@ class SettingsPage(QWidget):
         delay_layout.addWidget(self.delay)
         delay_layout.addWidget(self.delay_value)
         self._setting_row(
-            behavior_layout,
+            writing_layout,
             "Keyboard delay",
             "Increase this if replacement glitches on a slow computer.",
             delay_holder,
@@ -693,7 +716,7 @@ class SettingsPage(QWidget):
         )
         self.autocorrect = ToggleSwitch()
         self._setting_row(
-            behavior_layout,
+            writing_layout,
             "Realtime spelling",
             "Corrects clear English misspellings locally after Space. Press Backspace immediately to undo.",
             self.autocorrect,
@@ -701,7 +724,7 @@ class SettingsPage(QWidget):
         )
         self.word_definitions = ToggleSwitch()
         self._setting_row(
-            behavior_layout,
+            assist_layout,
             "Word definitions",
             "Shows an English definition above single-word selections in other apps. Skipped while you are editing a text field. Only the selected word is looked up online.",
             self.word_definitions,
@@ -709,7 +732,7 @@ class SettingsPage(QWidget):
         )
         self.quick_paste = ToggleSwitch()
         self._setting_row(
-            behavior_layout,
+            assist_layout,
             "Quick paste tooltip",
             "Shows a floating Paste button when clicking into an editable field after copying text.",
             self.quick_paste,
@@ -717,7 +740,7 @@ class SettingsPage(QWidget):
         )
         self.converter_tooltips = ToggleSwitch()
         self._setting_row(
-            behavior_layout,
+            assist_layout,
             "Instant converter",
             "Shows real-time currency, unit, and timezone conversions above selected values.",
             self.converter_tooltips,
@@ -729,20 +752,13 @@ class SettingsPage(QWidget):
         self.autocorrect_strength.addItem("Strong", "strong")
         self.autocorrect_strength.setMinimumWidth(190)
         self._setting_row(
-            behavior_layout,
+            writing_layout,
             "Correction strength",
             "Balanced catches everyday typing slips. Strong also tries harder two-letter errors.",
             self.autocorrect_strength,
             "≋",
         )
         self.autocorrect.toggled.connect(self.autocorrect_strength.setEnabled)
-        root.addWidget(behavior)
-
-        appearance = QWidget()
-        appearance_layout = QVBoxLayout(appearance)
-        appearance_layout.setContentsMargins(0, 0, 0, 0)
-        appearance_layout.setSpacing(7)
-        appearance_layout.addWidget(self._group_title("Appearance and startup"))
         self.theme = QComboBox()
         self.theme.addItem("Use Windows setting", "system")
         self.theme.addItem("Light", "light")
@@ -756,7 +772,7 @@ class SettingsPage(QWidget):
         self._setting_row(appearance_layout, "Accent color", "Changes buttons, highlights, and status colors.", self.accent, "●")
         self.startup = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            system_layout,
             "Start Mind with Windows",
             "Automatically launch in the system tray when you sign in.",
             self.startup,
@@ -764,7 +780,7 @@ class SettingsPage(QWidget):
         )
         self.mind_palette = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Mind Palette",
             "Transform selected text with a shortcut or optional automatic popup.",
             self.mind_palette,
@@ -772,7 +788,7 @@ class SettingsPage(QWidget):
         )
         self.palette_auto_show = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Automatic Palette",
             "Opens when text is selected inside a text input field. Mind restores your clipboard after checking the selection.",
             self.palette_auto_show,
@@ -783,7 +799,7 @@ class SettingsPage(QWidget):
             self.palette_shortcut.addItem(shortcut, shortcut)
         self.palette_shortcut.setMinimumWidth(150)
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Palette shortcut",
             "Mind automatically uses the next option if another app owns this shortcut.",
             self.palette_shortcut,
@@ -793,7 +809,7 @@ class SettingsPage(QWidget):
         self.mind_palette.toggled.connect(self.palette_auto_show.setEnabled)
         self.screen_snip = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Screen Snip (OCR & AI)",
             "Select any area of your screen with a crosshair to extract text or ask AI to explain.",
             self.screen_snip,
@@ -804,7 +820,7 @@ class SettingsPage(QWidget):
             self.snip_shortcut.addItem(shortcut, shortcut)
         self.snip_shortcut.setMinimumWidth(150)
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Snip shortcut",
             "Shortcut to start on-screen rectangular snipping.",
             self.snip_shortcut,
@@ -813,7 +829,7 @@ class SettingsPage(QWidget):
         self.screen_snip.toggled.connect(self.snip_shortcut.setEnabled)
         self.clipboard_history = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Clipboard History",
             "Keep a searchable history of copied items with instant paste and AI actions.",
             self.clipboard_history,
@@ -824,7 +840,7 @@ class SettingsPage(QWidget):
             self.clipboard_shortcut.addItem(shortcut, shortcut)
         self.clipboard_shortcut.setMinimumWidth(150)
         self._setting_row(
-            appearance_layout,
+            shortcuts_layout,
             "Clipboard history shortcut",
             "Shortcut to open the floating clipboard history search modal.",
             self.clipboard_shortcut,
@@ -834,7 +850,7 @@ class SettingsPage(QWidget):
 
         self.telegram_enabled = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Telegram bridge",
             "Use Mind commands from your phone. Send text or a photo to your bot and "
             "Mind replies with the result. Shell commands are never available remotely.",
@@ -846,7 +862,7 @@ class SettingsPage(QWidget):
         self.telegram_token.setPlaceholderText("Bot token from @BotFather")
         self.telegram_token.setMinimumWidth(220)
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Bot token",
             "Created by @BotFather in Telegram. Stored encrypted with Windows DPAPI, "
             "the same as your API keys.",
@@ -857,7 +873,7 @@ class SettingsPage(QWidget):
         self.telegram_chat_ids.setPlaceholderText("e.g. 123456789")
         self.telegram_chat_ids.setMinimumWidth(220)
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Allowed chat IDs",
             "Only these chats may use the bot. Anyone can message a Telegram bot, so "
             "the bridge stays off until at least one ID is listed. Message @userinfobot "
@@ -869,7 +885,7 @@ class SettingsPage(QWidget):
         self.telegram_default.setPlaceholderText("fix")
         self.telegram_default.setMaximumWidth(150)
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Default command",
             "Applied to plain messages sent without a command. Leave empty to require "
             "a command every time.",
@@ -878,7 +894,7 @@ class SettingsPage(QWidget):
         )
         self.telegram_notifications = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Telegram notifications",
             "Send Mind alerts, such as an available update, to your allowed chats.",
             self.telegram_notifications,
@@ -886,7 +902,7 @@ class SettingsPage(QWidget):
         )
         self.telegram_files = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Telegram file access",
             "Browse folders and fetch files from this PC over Telegram, and save files "
             "sent to the bot. Anyone holding the bot token can read what you allow here, "
@@ -898,7 +914,7 @@ class SettingsPage(QWidget):
         self.telegram_files_root.setPlaceholderText(str(Path.home()))
         self.telegram_files_root.setMinimumWidth(220)
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Browsable folder",
             "Browsing cannot leave this folder. Leave empty to use your user folder. "
             "Point it at something narrow, such as a single shared folder.",
@@ -909,7 +925,7 @@ class SettingsPage(QWidget):
         self.telegram_inbox.setPlaceholderText(str(Path.home() / "Mind Inbox"))
         self.telegram_inbox.setMinimumWidth(220)
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Save files to",
             "Where files sent to the bot are stored. Existing files are never overwritten.",
             self.telegram_inbox,
@@ -917,7 +933,7 @@ class SettingsPage(QWidget):
         )
         self.telegram_print = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Telegram printing",
             "Adds a Print button to files sent to the bot, which asks for the printer, "
             "the paper size, and colour or black and white. Printing spends paper and "
@@ -928,7 +944,7 @@ class SettingsPage(QWidget):
 
         self.telegram_control = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Telegram PC controls",
             "Check battery, memory and disk space, take a screenshot, lock or sleep "
             "this PC, and use the media keys from your phone.",
@@ -937,7 +953,7 @@ class SettingsPage(QWidget):
         )
         self.telegram_power = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Allow shutdown from Telegram",
             "Adds /shutdown and /restart. Both ask first and wait a minute, and /abort "
             "stops them, but they can still close apps with unsaved work.",
@@ -957,7 +973,7 @@ class SettingsPage(QWidget):
             self.telegram_files.toggled.connect(widget.setEnabled)
         self.telegram_send_menu = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            telegram_layout,
             "Right-click Send to Telegram",
             "Adds 'Send to Telegram' to the Windows right-click menu for any file or "
             "image. Windows 11 keeps unsigned entries under 'Show more options'.",
@@ -968,7 +984,7 @@ class SettingsPage(QWidget):
         self.telegram_enabled.toggled.connect(self.telegram_send_menu.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            assist_layout,
             "Secret & Privacy Shield",
             "Alert and offer 1-click redaction when copying API keys, tokens, or credentials.",
             self.secret_shield,
@@ -976,7 +992,7 @@ class SettingsPage(QWidget):
         )
         self.url_peek = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            assist_layout,
             "URL & Media Quick Peek",
             "Show floating clean link, summary, and preview when selecting or copying links.",
             self.url_peek,
@@ -984,7 +1000,7 @@ class SettingsPage(QWidget):
         )
         self.ghost_text = ToggleSwitch()
         self._setting_row(
-            appearance_layout,
+            assist_layout,
             "Ghost Text & Sentence Finisher",
             "Suggest smart sentence continuations inline as you type.",
             self.ghost_text,
@@ -995,7 +1011,7 @@ class SettingsPage(QWidget):
             self.ghost_shortcut.addItem(shortcut, shortcut)
         self.ghost_shortcut.setMinimumWidth(150)
         self._setting_row(
-            appearance_layout,
+            assist_layout,
             "Ghost Text shortcut",
             "Shortcut to trigger smart sentence continuation near cursor.",
             self.ghost_shortcut,
@@ -1011,13 +1027,7 @@ class SettingsPage(QWidget):
             self.customize_palette,
             "▦",
         )
-        root.addWidget(appearance)
-
-        updates = QWidget()
-        updates_layout = QVBoxLayout(updates)
-        updates_layout.setContentsMargins(0, 0, 0, 0)
-        updates_layout.setSpacing(7)
-        updates_layout.addWidget(self._group_title("Updates"))
+        updates_layout = system_layout
         update_row = QFrame()
         update_row.setObjectName("SettingRow")
         update_layout = QHBoxLayout(update_row)
@@ -1049,20 +1059,115 @@ class SettingsPage(QWidget):
         update_layout.addWidget(self.update_action)
         update_layout.addWidget(self.check_update_button)
         updates_layout.addWidget(update_row)
-        root.addWidget(updates)
 
-        save_row = QHBoxLayout()
         about = QLabel(f"Mind {__version__} · Derived from SwiftSlate Desktop under the MIT License")
         about.setObjectName("Muted")
         about.setWordWrap(True)
-        save = QPushButton("Save settings")
-        save.setProperty("primary", True)
-        save.clicked.connect(self.save)
-        save_row.addWidget(about, 1)
-        save_row.addWidget(save)
-        root.addLayout(save_row)
-        root.addStretch()
+        system_layout.addWidget(about)
+
+        # No Save button: every control writes as it changes. What replaces it is
+        # a line that says so, because a setting that saves silently and a setting
+        # that quietly failed look identical.
+        status_row = QHBoxLayout()
+        self.save_status = QLabel("")
+        self.save_status.setObjectName("Muted")
+        status_row.addWidget(self.save_status, 1)
+        root.addLayout(status_row)
+        # Rows sit at the top of their tab rather than spreading down it.
+        for layout in self._tab_layouts:
+            layout.addStretch()
         self.refresh()
+        self._connect_auto_save()
+
+    def _connect_auto_save(self) -> None:
+        """Have every control write the settings as it changes.
+
+        Connected after the first refresh, so loading saved values cannot look
+        like the user changing them. Each kind of control has its own signal, and
+        they all go through the same debounced write.
+        """
+        for toggle in (
+            self.autocorrect,
+            self.word_definitions,
+            self.quick_paste,
+            self.converter_tooltips,
+            self.startup,
+            self.mind_palette,
+            self.palette_auto_show,
+            self.screen_snip,
+            self.clipboard_history,
+            self.telegram_enabled,
+            self.telegram_notifications,
+            self.telegram_files,
+            self.telegram_print,
+            self.telegram_control,
+            self.telegram_power,
+            self.telegram_send_menu,
+            self.secret_shield,
+            self.url_peek,
+            self.ghost_text,
+        ):
+            # A toggle is a deliberate act with nothing to finish typing, so it
+            # writes immediately rather than through the timer.
+            toggle.toggled.connect(self._changed_now)
+        # Its own signal, because a segmented control is buttons rather than a
+        # combo box.
+        self.spinner.changed.connect(self._changed_now)
+        for combo in (
+            self.autocorrect_strength,
+            self.theme,
+            self.accent,
+            self.palette_shortcut,
+            self.snip_shortcut,
+            self.clipboard_shortcut,
+            self.ghost_shortcut,
+        ):
+            combo.currentIndexChanged.connect(self._changed_now)
+        for field in (
+            self.prefix,
+            self.telegram_token,
+            self.telegram_chat_ids,
+            self.telegram_default,
+            self.telegram_files_root,
+            self.telegram_inbox,
+        ):
+            field.textEdited.connect(self._changed_soon)
+            # Leaving the field commits it at once, so a half-typed value is not
+            # left waiting on a timer.
+            field.editingFinished.connect(self._changed_now)
+        self.delay.valueChanged.connect(self._changed_soon)
+
+    def _changed_now(self) -> None:
+        if self._loading:
+            return
+        self._save_timer.stop()
+        self._persist()
+
+    def _changed_soon(self) -> None:
+        if self._loading:
+            return
+        self.save_status.setText("Saving…")
+        self._save_timer.start()
+
+    def _tab(self, title: str) -> QVBoxLayout:
+        """Add a tab and return the layout its rows go into.
+
+        Each one scrolls on its own, so a long tab cannot push the others out of
+        reach on a small window.
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(7)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
+        # Rows sit at the top; the stretch is added once the tab is built.
+        self._tab_layouts.append(layout)
+        return layout
 
     def _group_title(self, title: str) -> QLabel:
         label = QLabel(title.upper())
@@ -1104,6 +1209,16 @@ class SettingsPage(QWidget):
         return control
 
     def refresh(self) -> None:
+        # Putting saved values into the controls fires their change signals, which
+        # would write straight back - and on first launch would save defaults over
+        # settings that had not finished loading.
+        self._loading = True
+        try:
+            self._load_into_controls()
+        finally:
+            self._loading = False
+
+    def _load_into_controls(self) -> None:
         config = self.store.load()
         self.prefix.setText(str(config.get("prefix", "?")))
         spinner_index = self.spinner.findData(config.get("spinner", "animated"))
@@ -1180,9 +1295,23 @@ class SettingsPage(QWidget):
         self.ghost_shortcut.setEnabled(self.ghost_text.isChecked())
 
     def save(self) -> None:
+        """Kept as the name other code calls; the writing is in _persist."""
+        self._persist()
+
+    def _persist(self) -> None:
+        """Write the settings as they stand, saying so on the page.
+
+        Nothing here opens a dialog. This runs on a toggle, so a modal would
+        interrupt someone halfway through changing three things - every message
+        that used to be a dialog is now a line under the controls, which also
+        means it stays readable instead of being dismissed and forgotten.
+        """
+        self._save_timer.stop()
         prefix = self.prefix.text().strip()
         if not prefix or any(character.isspace() for character in prefix):
-            QMessageBox.warning(self, "Invalid prefix", "Enter a short prefix without spaces.")
+            # Refused rather than saved: an empty or spaced prefix would stop
+            # every command from triggering.
+            self._report("Not saved: the command prefix cannot be empty or contain spaces.")
             return
         config = self.store.load()
         config.update(
@@ -1230,13 +1359,6 @@ class SettingsPage(QWidget):
         typed_token = self.telegram_token.text().strip()
         if typed_token != "•" * 12:
             config = self.store.set_telegram_token(config, typed_token)
-        if config.get("telegram_enabled") and not config.get("telegram_allowed_chat_ids"):
-            QMessageBox.warning(
-                self,
-                "Telegram needs an allowed chat",
-                "Anyone can message a Telegram bot, so Mind will not connect until you "
-                "list at least one chat ID that is allowed to use it.",
-            )
         want_shell_menu = self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
         try:
             self.store.save(config)
@@ -1245,24 +1367,60 @@ class SettingsPage(QWidget):
             # first-run installer has since moved it.
             shell_menu_added = shell_menu_apply(want_shell_menu)
         except OSError as exc:
+            # The one case still worth a dialog: nothing was written, and the
+            # user's changes are about to be lost without them knowing.
             QMessageBox.critical(self, "Could not save settings", str(exc))
+            self._report("Not saved.")
             return
+
+        notes: list[str] = []
+        if config.get("telegram_enabled") and not config.get("telegram_allowed_chat_ids"):
+            # Anyone can message a bot, so the bridge refuses to connect without
+            # an allowlist. Said here because switching the bridge on is exactly
+            # when the missing piece matters.
+            notes.append("Telegram needs at least one allowed chat ID before it will connect.")
         if want_shell_menu and not shell_menu_added:
-            # Otherwise the switch looks on while nothing was added, and the user
-            # is left searching a menu that was never going to contain it.
-            QMessageBox.information(
-                self,
-                "Right-click entry not added",
-                "The setting is saved, but 'Send to Telegram' was not added to the "
-                f"right-click menu. {shell_menu_describe()}",
-            )
+            notes.append(f"'Send to Telegram' was not added. {shell_menu_describe()}")
+        self._refresh_dependent_controls()
         self.updated.emit(
             str(self.theme.currentData()),
             self.mind_palette.isChecked(),
             str(self.palette_shortcut.currentData()),
             str(self.accent.currentData()),
         )
-        QMessageBox.information(self, "Settings saved", "Your Mind settings have been updated.")
+        self._report("Saved." if not notes else "Saved. " + " ".join(notes))
+
+    def _report(self, message: str) -> None:
+        self.save_status.setText(message)
+
+    def _refresh_dependent_controls(self) -> None:
+        """Enable and disable the controls that depend on another setting.
+
+        Kept apart from refresh() so it can run after every write without
+        replacing what is in the fields while someone is typing in them.
+        """
+        telegram_on = self.telegram_enabled.isChecked()
+        files_on = self.telegram_files.isChecked()
+        for widget in (
+            self.telegram_token,
+            self.telegram_chat_ids,
+            self.telegram_default,
+            self.telegram_notifications,
+            self.telegram_files,
+            self.telegram_control,
+            self.telegram_send_menu,
+        ):
+            widget.setEnabled(telegram_on)
+        for widget in (self.telegram_files_root, self.telegram_inbox):
+            widget.setEnabled(telegram_on and files_on)
+        self.telegram_print.setEnabled(telegram_on and files_on)
+        self.telegram_power.setEnabled(telegram_on and self.telegram_control.isChecked())
+        self.palette_auto_show.setEnabled(self.mind_palette.isChecked())
+        self.palette_shortcut.setEnabled(self.mind_palette.isChecked())
+        self.snip_shortcut.setEnabled(self.screen_snip.isChecked())
+        self.clipboard_shortcut.setEnabled(self.clipboard_history.isChecked())
+        self.ghost_shortcut.setEnabled(self.ghost_text.isChecked())
+        self.autocorrect_strength.setEnabled(self.autocorrect.isChecked())
 
     def _customize_palette(self) -> None:
         dialog = PaletteCustomizeDialog(self.store, self)
