@@ -679,9 +679,16 @@ class TelegramBridge(QObject):
         if not isinstance(message_id, int):
             return False
         self._forget_panel(chat_id, message_id)
+        # A panel of this kind may already exist somewhere else in the chat -
+        # tapping Menu on a listing while a menu is still up is the everyday way
+        # in. Without this the older one is only forgotten, not removed, and the
+        # chat keeps both.
+        displaced = self._panels.get((chat_id, kind))
         client.edit_message_text(
             chat_id, message_id, text, reply_markup=reply_markup, html=html
         )
+        if displaced is not None and displaced != message_id:
+            client.delete_message(chat_id, displaced)
         self._panels[(chat_id, kind)] = message_id
         return True
 

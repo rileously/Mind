@@ -279,6 +279,36 @@ class PanelReplacementTests(BridgeHarness, unittest.TestCase):
         self.bridge._handle_text(self.client, 7, "/commands", 2, self.config)
         self.assertEqual(self.client.deleted, [first])
 
+    def test_turning_a_message_into_the_menu_removes_the_menu_already_up(self):
+        # The reported duplicate. A menu is sent, then Menu is tapped on some
+        # other panel: that message becomes the menu, and the first one has to go
+        # or the chat keeps two identical menus.
+        self.bridge._send_menu(self.client, 7, self.config)
+        first = self.client.sent[0]["id"]
+        self.bridge._handle_system(self.client, 7, "status", "", self.config)
+        status = self.client.sent[-1]["id"]
+        self.tap(None, message_id=status)
+        self.assertEqual(self.client.deleted, [first])
+        self.assertEqual(self.bridge._panels[(7, PANEL_MENU)], status)
+
+    def test_the_menu_is_not_deleted_when_it_is_the_message_being_reused(self):
+        # Tapping Menu on the menu itself must not delete what it is redrawing.
+        self.bridge._send_menu(self.client, 7, self.config)
+        menu = self.client.sent[0]["id"]
+        self.tap(None, message_id=menu)
+        self.assertEqual(self.client.deleted, [])
+        self.assertEqual(self.bridge._panels[(7, PANEL_MENU)], menu)
+
+    def test_only_one_listing_survives_when_a_second_one_takes_over(self):
+        # Same rule for every kind, not just the menu.
+        self.bridge._handle_files(self.client, 7, "files", "", self.config)
+        first = self.client.sent[0]["id"]
+        self.bridge._send_menu(self.client, 7, self.config)
+        menu = self.client.sent[-1]["id"]
+        self.tap("files", message_id=menu)
+        self.assertIn(first, self.client.deleted)
+        self.assertEqual(self.bridge._panels[(7, PANEL_FILES)], menu)
+
     def test_a_send_that_fails_does_not_take_the_previous_one_away(self):
         # Leaving the chat with neither would be worse than leaving a stale one.
         self.bridge._client = self.client
