@@ -73,7 +73,18 @@ try {
         # failing the update and making the user end the task manually.
         Write-UpdateLog "Stopping $($runningMindProcesses.Count) leftover Mind process(es) before the swap."
         foreach ($leftover in $runningMindProcesses) {
-            & taskkill.exe /PID $leftover.Id /T /F 2>&1 | Out-Null
+            # /T takes the child processes with it, so a later id in this list is
+            # often already gone by the time its turn comes. taskkill reports that
+            # on stderr, which this script's "Stop" preference turns into a
+            # terminating error - and the update would then abort with Mind closed
+            # and the old executable still in place. Neither case is a failure:
+            # the process being gone is the outcome that was wanted.
+            if ($leftover.HasExited) { continue }
+            try {
+                $null = & taskkill.exe /PID $leftover.Id /T /F 2>&1
+            } catch {
+                Write-UpdateLog "taskkill for $($leftover.Id) reported: $($_.Exception.Message)"
+            }
         }
         Start-Sleep -Milliseconds 800
         $runningMindProcesses = Get-MindProcesses $targetPath $knownIds
