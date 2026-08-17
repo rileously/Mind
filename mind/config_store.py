@@ -95,6 +95,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # all application data, and several of them (.ssh, .aws, .gnupg) hold
     # credentials that should not be reachable through a chat bot.
     "telegram_show_hidden": False,
+    # Status, screenshot, lock, sleep and media keys. Off by default, like every
+    # other remote capability.
+    "telegram_control_enabled": False,
+    # Shutdown and restart, kept behind their own switch because they are the
+    # only controls that can lose unsaved work.
+    "telegram_power_enabled": False,
     # Process names Mind's engine stays out of. Telegram is excluded by default
     # because the Telegram bridge answers the same triggers from the chat, so
     # typing "?fix" in Telegram Desktop would be rewritten in the message box

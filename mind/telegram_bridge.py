@@ -42,6 +42,17 @@ from .telegram_files import (
     search_files,
     unique_destination,
 )
+from .telegram_system import (
+    SystemActionError,
+    abort_shutdown,
+    format_status,
+    lock_workstation,
+    press_media_key,
+    read_status,
+    restart,
+    shutdown,
+    sleep_pc,
+)
 from .telegram_routing import (
     CommandRefused,
     is_authorized,
@@ -54,8 +65,20 @@ from .transform_client import TransformError, transform_text
 
 
 POLL_TIMEOUT_SECONDS = 25
+# Long enough to call off from a phone after a mis-tap.
+POWER_DELAY_SECONDS = 60
+CB_POWER = "w"
 ERROR_BACKOFF_SECONDS = 15
 MAX_INPUT_CHARS = 8000
+
+
+def _host_name() -> str:
+    import socket
+
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
 
 
 class TelegramBridge(QObject):
@@ -66,6 +89,7 @@ class TelegramBridge(QObject):
     clipboard_requested = Signal(object)
     clipboard_received = Signal(str)
     image_received = Signal(object, object)
+    screenshot_requested = Signal(object)
 
     def __init__(self, store: ConfigStore, parent: QObject | None = None):
         super().__init__(parent)
@@ -245,6 +269,18 @@ class TelegramBridge(QObject):
         if trigger in {"commands", "list"}:
             client.send_message(chat_id, self._command_list(config))
             return
+        if trigger in {
+            "status",
+            "screen",
+            "lock",
+            "sleep",
+            "media",
+            "shutdown",
+            "restart",
+            "abort",
+        }:
+            self._handle_system(client, chat_id, trigger, request.text, config)
+            return
         if trigger in {"find", "search"}:
             self._handle_search(client, chat_id, request.text, config)
             return
@@ -331,7 +367,33 @@ class TelegramBridge(QObject):
         entries = self._browse_entries.get(chat_id, [])
 
         if action == CB_NOOP:
-            client.answer_callback_query(callback_id)
+            client.answer_callback_query(callback_id, "Cancelled.")
+            return
+
+        if action == CB_POWER:
+            if not bool(config.get("telegram_power_enabled", False)):
+                client.answer_callback_query(callback_id, "Shutdown is switched off.")
+                return
+            try:
+                if index == 1:
+                    shutdown(POWER_DELAY_SECONDS)
+                    label = "Shutting down"
+                elif index == 2:
+                    restart(POWER_DELAY_SECONDS)
+                    label = "Restarting"
+                else:
+                    client.answer_callback_query(callback_id)
+                    return
+            except SystemActionError as exc:
+                client.answer_callback_query(callback_id, str(exc)[:190])
+                return
+            self.log.emit(f"Telegram: {label.lower()} requested by chat {chat_id}")
+            client.answer_callback_query(callback_id, label)
+            client.edit_message_text(
+                chat_id,
+                int(message_id),
+                f"{label} in {POWER_DELAY_SECONDS} seconds. Send /abort to stop it.",
+            )
             return
 
         try:
@@ -398,6 +460,85 @@ class TelegramBridge(QObject):
             format_header(root, current, entries, page),
             build_keyboard(entries, page, current == root, places),
         )
+
+    def _handle_system(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        trigger: str,
+        argument: str,
+        config: dict,
+    ) -> None:
+        if not bool(config.get("telegram_control_enabled", False)):
+            client.send_message(
+                chat_id,
+                "PC controls are switched off. Turn on 'Telegram PC controls' in "
+                "Mind's Preferences to use them.",
+            )
+            return
+
+        try:
+            if trigger == "status":
+                client.send_message(chat_id, format_status(read_status(), _host_name()))
+                return
+
+            if trigger == "screen":
+                # Grabbing the screen needs the GUI thread, so the main window
+                # takes it and calls back.
+                self.screenshot_requested.emit(chat_id)
+                return
+
+            if trigger == "media":
+                press_media_key(argument)
+                client.send_message(chat_id, f"Sent {argument.strip().lower()}.")
+                return
+
+            if trigger == "lock":
+                lock_workstation()
+                self.log.emit(f"Telegram: locked the session for chat {chat_id}")
+                client.send_message(chat_id, "🔒 Locked.")
+                return
+
+            if trigger == "sleep":
+                client.send_message(chat_id, "😴 Going to sleep. I will stop replying until it wakes.")
+                sleep_pc()
+                return
+
+            if trigger == "abort":
+                abort_shutdown()
+                client.send_message(chat_id, "Cancelled. The PC will stay on.")
+                return
+
+            if trigger in {"shutdown", "restart"}:
+                if not bool(config.get("telegram_power_enabled", False)):
+                    client.send_message(
+                        chat_id,
+                        "Shutdown and restart are switched off. Turn on 'Allow shutdown "
+                        "from Telegram' in Mind's Preferences if you want them.",
+                    )
+                    return
+                # Unsaved work is the reason this asks rather than acting: the
+                # request arrives from a phone, where a mis-tap is easy.
+                verb = "Shut down" if trigger == "shutdown" else "Restart"
+                client.send_message(
+                    chat_id,
+                    f"{verb} this PC?\n\nIt will happen after {POWER_DELAY_SECONDS} seconds, "
+                    "and /abort stops it until then.",
+                    reply_markup={
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": f"Yes, {verb.lower()}",
+                                    "callback_data": f"{CB_POWER}:{1 if trigger == 'shutdown' else 2}",
+                                },
+                                {"text": "Cancel", "callback_data": CB_NOOP},
+                            ]
+                        ]
+                    },
+                )
+                return
+        except SystemActionError as exc:
+            client.send_message(chat_id, str(exc))
 
     def _handle_search(
         self,
@@ -677,6 +818,15 @@ class TelegramBridge(QObject):
 
     # -- replies ---------------------------------------------------------
 
+    def send_file(self, chat_id: int, path, caption: str = "") -> None:
+        client = self._client
+        if client is None:
+            return
+        try:
+            client.send_document(int(chat_id), str(path), caption=caption)
+        except TelegramError as exc:
+            self.log.emit(f"Telegram: could not send a file ({exc})")
+
     def send_text(self, chat_id: int, text: str) -> None:
         client = self._client
         if client is None:
@@ -718,6 +868,18 @@ class TelegramBridge(QObject):
                 "",
                 "Send any file and Mind saves it to your PC.",
             ]
+        if config.get("telegram_control_enabled", False):
+            lines += [
+                "",
+                "This PC:",
+                "/status       battery, memory, uptime, disk space",
+                "/screen       send a screenshot",
+                "/lock         lock the session",
+                "/sleep        put it to sleep",
+                "/media next   play, pause, next, prev, mute, volup, voldown",
+            ]
+            if config.get("telegram_power_enabled", False):
+                lines += ["/shutdown, /restart, /abort"]
         lines += ["", "Shell commands are not available from Telegram."]
         return "\n".join(lines)
 

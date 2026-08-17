@@ -4,6 +4,8 @@ import ctypes
 import os
 import time
 from ctypes import wintypes
+import tempfile
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Signal
@@ -912,16 +914,36 @@ class SettingsPage(QWidget):
             self.telegram_inbox,
             "✈",
         )
+        self.telegram_control = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Telegram PC controls",
+            "Check battery, memory and disk space, take a screenshot, lock or sleep "
+            "this PC, and use the media keys from your phone.",
+            self.telegram_control,
+            "✈",
+        )
+        self.telegram_power = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Allow shutdown from Telegram",
+            "Adds /shutdown and /restart. Both ask first and wait a minute, and /abort "
+            "stops them, but they can still close apps with unsaved work.",
+            self.telegram_power,
+            "✈",
+        )
         for widget in (
             self.telegram_token,
             self.telegram_chat_ids,
             self.telegram_default,
             self.telegram_notifications,
             self.telegram_files,
+            self.telegram_control,
         ):
             self.telegram_enabled.toggled.connect(widget.setEnabled)
         for widget in (self.telegram_files_root, self.telegram_inbox):
             self.telegram_files.toggled.connect(widget.setEnabled)
+        self.telegram_control.toggled.connect(self.telegram_power.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
             appearance_layout,
@@ -1115,8 +1137,13 @@ class SettingsPage(QWidget):
             self.telegram_files,
         ):
             widget.setEnabled(telegram_on)
+        control_on = bool(config.get("telegram_control_enabled", False))
+        self.telegram_control.setChecked(control_on)
+        self.telegram_power.setChecked(bool(config.get("telegram_power_enabled", False)))
         for widget in (self.telegram_files_root, self.telegram_inbox):
             widget.setEnabled(telegram_on and files_on)
+        self.telegram_control.setEnabled(telegram_on)
+        self.telegram_power.setEnabled(telegram_on and control_on)
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
         self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
         self.ghost_text.setChecked(bool(config.get("ghost_text_enabled", True)))
@@ -1160,6 +1187,8 @@ class SettingsPage(QWidget):
                 "telegram_files_enabled": self.telegram_files.isChecked(),
                 "telegram_files_root": self.telegram_files_root.text().strip(),
                 "telegram_inbox": self.telegram_inbox.text().strip(),
+                "telegram_control_enabled": self.telegram_control.isChecked(),
+                "telegram_power_enabled": self.telegram_power.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
                 "ghost_text_enabled": self.ghost_text.isChecked(),
@@ -1356,6 +1385,7 @@ class MindWindow(QMainWindow):
         self.telegram.clipboard_requested.connect(self._on_telegram_clipboard_requested)
         self.telegram.clipboard_received.connect(self._on_telegram_clipboard_received)
         self.telegram.image_received.connect(self._on_telegram_image_received)
+        self.telegram.screenshot_requested.connect(self._on_telegram_screenshot_requested)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -1750,6 +1780,35 @@ class MindWindow(QMainWindow):
             # The download is scratch data; do not leave images in temp.
             try:
                 source.unlink()
+            except OSError:
+                pass
+
+    def _on_telegram_screenshot_requested(self, chat_id: object) -> None:
+        """Capture the screen and send it back.
+
+        Grabbing a screen has to happen on the GUI thread, so the bridge asks
+        rather than doing it on its worker.
+        """
+        target = int(chat_id)
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.telegram.send_text(target, "No screen is available to capture.")
+            return
+        shot = screen.grabWindow(0)
+        if shot.isNull():
+            self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
+            return
+        destination = Path(tempfile.gettempdir()) / f"mind-screen-{uuid.uuid4().hex[:10]}.png"
+        try:
+            if not shot.save(str(destination), "PNG"):
+                self.telegram.send_text(target, "Could not save the screenshot.")
+                return
+            self.telegram.send_file(target, destination, caption="Screen")
+        finally:
+            # A screenshot can hold anything that was on screen; do not leave it
+            # sitting in temp once it has been sent.
+            try:
+                destination.unlink()
             except OSError:
                 pass
 
