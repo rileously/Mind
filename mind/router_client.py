@@ -22,6 +22,7 @@ import base64
 import http.cookiejar
 import json
 import re
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -154,33 +155,71 @@ class RouterSession:
     """A signed-in conversation with the router, and nothing more."""
 
     def __init__(self, address: str, timeout: float = DEFAULT_TIMEOUT):
-        self.base = self._normalise_address(address)
+        self.candidates = self._candidates(address)
+        self.base = self.candidates[0]
         self.timeout = timeout
         self._jar = http.cookiejar.CookieJar()
+        # The certificate is the router's own, on a numbered address on the local
+        # network. No authority can vouch for that, and there is nothing to be
+        # gained by refusing to talk to the box in the hallway: this only ever
+        # speaks to the address the user typed.
+        self._context = ssl._create_unverified_context()
         self._opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self._jar)
+            urllib.request.HTTPCookieProcessor(self._jar),
+            urllib.request.HTTPSHandler(context=self._context),
         )
         self.notes: list[str] = []
 
     @staticmethod
-    def _normalise_address(address: str) -> str:
+    def _candidates(address: str) -> list[str]:
+        """The addresses to try, in the order that works.
+
+        These models serve a page over plain HTTP whose only content is a script
+        redirecting to HTTPS - on port 80, which reads like a mistake and is not.
+        Talking HTTP to them therefore returns that same shell for every path,
+        which looks exactly like being signed out. HTTPS is tried first for that
+        reason.
+        """
         cleaned = (address or "").strip().rstrip("/")
         if not cleaned:
             raise RouterError("Enter the router's address, for example 192.168.18.1.")
-        if not cleaned.startswith(("http://", "https://")):
-            cleaned = f"http://{cleaned}"
-        return cleaned
+        if cleaned.startswith(("http://", "https://")):
+            return [cleaned]
+        return [f"https://{cleaned}:80", f"https://{cleaned}", f"http://{cleaned}"]
 
-    def _open(self, path: str, data: bytes | None = None) -> tuple[int, str]:
+    def choose_base(self) -> None:
+        """Settle on the address that answers with something other than the shell."""
+        for candidate in self.candidates:
+            self.base = candidate
+            try:
+                status, body = self._open("/")
+            except RouterError:
+                continue
+            if status == 200 and not self.looks_like_login(body):
+                return
+            if status == 200 and len(body) > 20_000:
+                return
+        self.base = self.candidates[0]
+
+    def _open(
+        self, path: str, data: bytes | None = None, cookie: str = ""
+    ) -> tuple[int, str]:
+        headers = {
+            # The login page's script is checked by some firmwares against a
+            # browser-shaped agent, and there is nothing to gain by being coy
+            # with the box in the hallway.
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mind",
+            "Referer": self.base + "/",
+        }
+        if data is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        if cookie:
+            headers["Cookie"] = cookie
         request = urllib.request.Request(
             self.base + path,
             data=data,
-            headers={
-                "User-Agent": "Mind",
-                "Referer": self.base + "/",
-                **({"Content-Type": "application/x-www-form-urlencoded"} if data else {}),
-            },
-            method="POST" if data else "GET",
+            headers=headers,
+            method="POST" if data is not None else "GET",
         )
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
@@ -193,43 +232,50 @@ class RouterSession:
             raise RouterError(f"Could not reach the router: {exc}") from exc
 
     def _token(self) -> str:
-        """The one-shot value the login form carries, when the model uses one."""
-        for page in LOGIN_PAGES:
-            _status, body = self._open(page)
-            match = re.search(
-                r'name=["\'](?:x\.X_HW_Token|csrf_token|token)["\'][^>]*value=["\']([^"\']+)',
-                body,
-            )
-            if match:
-                return match.group(1)
-            match = re.search(r'getElementById\("hwonttoken"\)\.value\s*=\s*"([^"]+)"', body)
-            if match:
-                return match.group(1)
+        """The one-shot value the login form posts with the password.
+
+        Fetched the way the page's own script does: a POST to GetRandCount.asp,
+        whose entire body is the token. Scraping it out of the HTML finds
+        nothing, because it is not in the HTML.
+        """
+        status, body = self._open("/asp/GetRandCount.asp", data=b"")
+        token = body.strip().lstrip("﻿").strip()
+        if status == 200 and token and len(token) < 128 and "<" not in token:
+            return token
         return ""
 
     def sign_in(self, username: str, password: str) -> None:
-        """Sign in, saying which step failed rather than only that one did."""
+        """Sign in the way the login page does, step by step.
+
+        Read out of the page's own Submit(): clear the old cookie, ask for a
+        random count, set the cookie the form expects, then post the username
+        with the password base64 encoded and the token alongside.
+        """
         if not username or not password:
             raise RouterError("Enter the router's username and password.")
+        self.choose_base()
         token = self._token()
         if not token:
-            self.notes.append("no login token was offered; sent the form without one")
-        # Huawei's web UI sends the password base64 encoded rather than plain.
+            self.notes.append("the router offered no login token")
         encoded = base64.b64encode(password.encode("utf-8")).decode("ascii")
         form = {"UserName": username, "PassWord": encoded, "Language": "english"}
         if token:
             form["x.X_HW_Token"] = token
-        status, body = self._open("/login.cgi", urllib.parse.urlencode(form).encode())
+        status, body = self._open(
+            "/login.cgi",
+            urllib.parse.urlencode(form).encode(),
+            # The page sets this itself before submitting, and the form is
+            # rejected without it.
+            cookie="Cookie=body:Language:english:id=-1",
+        )
         if status >= 400:
             raise RouterError(
                 f"The router refused the sign-in request ({status}). This model may use a "
                 "different login page."
             )
         lowered = body.lower()
-        if "errorcode" in lowered or "password" in lowered and "incorrect" in lowered:
+        if "errorcode" in lowered or ("password" in lowered and "incorrect" in lowered):
             raise RouterError("The router rejected that username or password.")
-        if not self._jar and "location" not in lowered:
-            self.notes.append("the router returned no session cookie")
 
     @staticmethod
     def looks_like_login(body: str) -> bool:

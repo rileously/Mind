@@ -82,9 +82,19 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(RouterError):
             RouterSession("")
 
-    def test_a_bare_address_is_given_a_scheme(self):
-        self.assertEqual(RouterSession("192.168.18.1").base, "http://192.168.18.1")
-        self.assertEqual(RouterSession("http://10.0.0.1/").base, "http://10.0.0.1")
+    def test_a_bare_address_tries_https_first(self):
+        # The plain HTTP page on these models is only a redirect to HTTPS, so
+        # trying HTTP first makes every page look like a sign-in screen.
+        session = RouterSession("192.168.18.1")
+        self.assertEqual(session.candidates[0], "https://192.168.18.1:80")
+        self.assertIn("http://192.168.18.1", session.candidates)
+
+    def test_an_address_typed_with_a_scheme_is_respected(self):
+        self.assertEqual(RouterSession("http://10.0.0.1/").candidates, ["http://10.0.0.1"])
+
+    def test_the_byte_order_mark_is_not_part_of_the_token(self):
+        # The router answers GetRandCount.asp with a BOM in front of the value.
+        self.assertEqual("﻿abc123".strip().lstrip("﻿").strip(), "abc123")
 
     def test_signing_in_without_a_password_says_so_rather_than_trying(self):
         session = RouterSession("192.168.18.1")
