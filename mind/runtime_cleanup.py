@@ -28,8 +28,19 @@ from .paths import runtime_dir
 # Skip folders younger than this. A sibling Mind process - notably the engine,
 # which is a second one-file launch - may still be unpacking into a folder whose
 # files are not open yet, and would be broken by deleting it mid-extraction.
-MIN_AGE_SECONDS = 600
+MIN_AGE_SECONDS = 1800
 CLAIM_SUFFIX = ".pruning"
+
+# Wait this long after launch before pruning anything.
+#
+# An in-place update is the busiest moment this folder ever sees: the old
+# processes have just been killed without running their own cleanup, a new
+# executable is starting, and the engine follows it a moment later. A failure
+# with "Failed to load Python DLL" was seen once immediately after an update and
+# could not be reproduced afterwards, so the cause is not settled. Deleting
+# nothing until that flurry is over removes this code from the list of
+# suspects at no real cost: the folders are simply reclaimed on a later run.
+STARTUP_DELAY_SECONDS = 120
 
 
 def current_runtime_dir() -> Path | None:
@@ -121,12 +132,15 @@ def prune_runtime_dirs(
 def prune_in_background(
     root: Path | None = None,
     on_finished=None,
+    delay_seconds: float = STARTUP_DELAY_SECONDS,
 ) -> threading.Thread | None:
-    """Prune off the UI thread; deleting gigabytes must not delay startup."""
+    """Prune off the UI thread, and not until well after startup."""
     if not getattr(sys, "frozen", False) and root is None:
         return None
 
     def _worker() -> None:
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
         try:
             removed, freed = prune_runtime_dirs(root=root)
         except Exception:
