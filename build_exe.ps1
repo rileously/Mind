@@ -18,6 +18,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installing build requirements failed." }
     & $pythonExe (Join-Path $projectDir "tools\export_app_icon.py") (Join-Path $artifactDir "Mind.ico")
     if ($LASTEXITCODE -ne 0) { throw "Creating the Mind icon failed." }
+
+    # Built here rather than left to be remembered: the package version comes
+    # from mind\__init__.py, and shell_menu.py works out the package name it
+    # expects from the same place. A stale package would carry the previous
+    # version and be re-registered on every launch without ever matching.
+    # Not fatal when it cannot be built - the machine may have no MSVC or
+    # Windows SDK - because Mind falls back to the classic-menu registry entry.
+    try {
+        & (Join-Path $projectDir "shell\build_shell_menu.ps1") | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "build_shell_menu.ps1 reported failure." }
+        Write-Host "Context menu handler rebuilt." -ForegroundColor Green
+    } catch {
+        Write-Host "Skipping the Windows 11 context menu handler: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "Mind will use the 'Show more options' entry instead." -ForegroundColor Yellow
+        Remove-Item -LiteralPath (Join-Path $artifactDir "shell\MindShellMenu.msix") -Force -ErrorAction SilentlyContinue
+    }
     & $pythonExe -m PyInstaller --noconfirm --clean (Join-Path $projectDir "Mind.spec")
     if ($LASTEXITCODE -ne 0) { throw "Building Mind.exe failed." }
 
