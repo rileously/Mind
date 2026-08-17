@@ -37,6 +37,8 @@ MDNS_PORT = 5353
 SWEEP_WORKERS = 64
 PING_TIMEOUT_MS = 400
 UNKNOWN = "Unknown"
+# What a device with a made-up address is called in the vendor column.
+RANDOMISED = "Randomised"
 
 # Address prefixes, three bytes of the MAC, for the makers most likely to be on
 # a home network. A full IEEE list is 35,000 entries and about 1.5 MB; this is
@@ -84,7 +86,22 @@ class Device:
 
     @property
     def display_name(self) -> str:
-        return self.custom_name or self.hostname or self.vendor or UNKNOWN
+        """The best name to show, and never a shrug where a label would do.
+
+        "Randomised" is a fact about the address, not a name, and a list of nine
+        devices all called it is unreadable. Where nothing has identified itself,
+        the address it holds is at least distinct and recognisable - the phone on
+        .15 is the one you can point at.
+        """
+        if self.custom_name:
+            return self.custom_name
+        if self.hostname:
+            return self.hostname
+        if self.vendor and self.vendor != RANDOMISED:
+            return self.vendor
+        if self.ip:
+            return f"Device {self.ip.rsplit('.', 1)[-1]}"
+        return UNKNOWN
 
     def seen_label(self, now: float) -> str:
         """How long ago, in words, because a timestamp reads as noise in a list."""
@@ -132,7 +149,7 @@ def vendor_for(mac: str) -> str:
     known = OUI_VENDORS.get((mac or "").lower()[:8], "")
     if known:
         return known
-    return "Randomised" if is_randomised(mac) else ""
+    return RANDOMISED if is_randomised(mac) else ""
 
 
 # -- reading the network ---------------------------------------------------
@@ -322,12 +339,13 @@ def mdns_names(local_ip: str, targets: list[str], listen_seconds: float = 3.5) -
                 sock.sendto(_dns_question(reverse), (MDNS_GROUP, MDNS_PORT))
             except OSError:
                 continue
-        try:
-            sock.sendto(
-                _dns_question("_services._dns-sd._udp.local"), (MDNS_GROUP, MDNS_PORT)
-            )
-        except OSError:
-            pass
+        for service in MDNS_SERVICES:
+            # Asked by service as well as by address: devices answer these far
+            # more readily, and it is where the friendly names live.
+            try:
+                sock.sendto(_dns_question(service), (MDNS_GROUP, MDNS_PORT))
+            except OSError:
+                continue
 
         deadline = time.monotonic() + listen_seconds
         while time.monotonic() < deadline:
@@ -337,12 +355,152 @@ def mdns_names(local_ip: str, targets: list[str], listen_seconds: float = 3.5) -
                 continue
             except OSError:
                 break
-            name = _first_local_name(data)
-            if name and sender[0] not in names:
+            name = name_from_packet(data)
+            # A later reply may carry a better name than the first - a friendly
+            # name where the first had only a host name - so the fuller answer
+            # wins rather than the earliest one.
+            if name and len(name) > len(names.get(sender[0], "")):
                 names[sender[0]] = name
     finally:
         sock.close()
     return names
+
+
+# Service types worth asking about by name. Devices answer these far more
+# reliably than the reverse record for their address: a cast device may publish
+# nothing about 192.168.18.15 while happily announcing that it casts.
+MDNS_SERVICES = (
+    "_services._dns-sd._udp.local",
+    "_googlecast._tcp.local",
+    "_airplay._tcp.local",
+    "_raop._tcp.local",
+    "_companion-link._tcp.local",
+    "_workstation._tcp.local",
+    "_smb._tcp.local",
+    "_ipp._tcp.local",
+    "_printer._tcp.local",
+    "_spotify-connect._tcp.local",
+)
+
+# The NetBIOS wildcard name, which every node of that kind answers for. The
+# encoding is the protocol's own: each nibble written as a letter from "A".
+NBSTAT_QUERY = (
+    struct.pack(">HHHHHH", 0x4E4D, 0x0000, 1, 0, 0, 0)
+    + b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00"
+    + struct.pack(">HH", 0x21, 1)
+)
+
+
+def _records(data: bytes):
+    """Walk every record in a reply, yielding owner, type, data and position."""
+    if len(data) < 12:
+        return
+    questions, answers, authority, additional = struct.unpack(">HHHH", data[4:12])
+    offset = 12
+    try:
+        for _ in range(questions):
+            _, offset = _read_name(data, offset)
+            offset += 4
+        for _ in range(min(answers + authority + additional, 48)):
+            owner, offset = _read_name(data, offset)
+            if offset + 10 > len(data):
+                return
+            rtype, _rclass, _ttl, length = struct.unpack(">HHIH", data[offset : offset + 10])
+            offset += 10
+            yield owner, rtype, data[offset : offset + length], offset
+            offset += length
+    except (struct.error, IndexError):
+        return
+
+
+def _txt_value(rdata: bytes, key: str) -> str:
+    """Pull one key out of a TXT record, which is a run of counted strings."""
+    prefix = f"{key}=".encode()
+    offset = 0
+    while offset < len(rdata):
+        length = rdata[offset]
+        chunk = rdata[offset + 1 : offset + 1 + length]
+        offset += 1 + length
+        if chunk[: len(prefix)].lower() == prefix:
+            return chunk[len(prefix) :].decode("utf-8", "replace").strip()
+    return ""
+
+
+def name_from_packet(data: bytes) -> str:
+    """The friendliest name an mDNS reply carries.
+
+    A cast device puts what its owner called it into a TXT record as
+    "fn=Living Room TV", and that is the best answer there is. Failing that, the
+    instance name a service was published under, and failing that a plain .local
+    host name. Read from the records rather than guessed at from the bytes,
+    because this is going to be shown to someone as a fact about their network.
+    """
+    friendly = instance = host = ""
+    for owner, rtype, rdata, offset in _records(data):
+        if rtype == 16:  # TXT
+            friendly = friendly or _txt_value(rdata, "fn")
+        elif rtype == 12:  # PTR
+            target, _ = _read_name(data, offset)
+            instance = instance or _clean_mdns_name(target)
+        elif rtype == 33:  # SRV
+            instance = instance or _clean_mdns_name(owner)
+        elif rtype in (1, 28):  # A and AAAA
+            host = host or _clean_mdns_name(owner)
+    return friendly or instance or host
+
+
+def netbios_name(ip: str, timeout: float = 1.0) -> str:
+    """Ask a Windows-style machine what it calls itself.
+
+    One packet, no session, no credentials. Answers nothing on a network of
+    phones, and names every PC on a network of PCs.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    try:
+        sock.sendto(NBSTAT_QUERY, (ip, 137))
+        data, _sender = sock.recvfrom(2048)
+    except OSError:
+        return ""
+    finally:
+        sock.close()
+    if len(data) < 57:
+        return ""
+    offset = 57
+    for _ in range(data[56]):
+        if offset + 18 > len(data):
+            break
+        name = data[offset : offset + 15].decode("latin-1", "replace").strip()
+        flags = data[offset + 16]
+        offset += 18
+        # The group entries are the workgroup's name, not the machine's.
+        if name and not flags & 0x80:
+            return name
+    return ""
+
+
+def netbios_names(ips: list[str], budget: float = 2.0) -> dict[str, str]:
+    """Ask them all at once, and stop waiting when the budget is spent."""
+    if not ips:
+        return {}
+    found: dict[str, str] = {}
+    pool = ThreadPoolExecutor(max_workers=min(24, len(ips)))
+    try:
+        pending = {pool.submit(netbios_name, ip): ip for ip in ips}
+        deadline = time.monotonic() + budget
+        for future, ip in pending.items():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                name = future.result(timeout=remaining)
+            except Exception:
+                continue
+            if name:
+                found[ip] = name
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return found
 
 
 def _first_local_name(data: bytes) -> str:
@@ -420,7 +578,10 @@ def scan(
 
     if resolve_names:
         missing = [ip for mac, ip in table.items() if ip and ip not in names]
-        names.update({ip: name for ip, name in reverse_dns_all(missing).items()})
+        # In order of how good the answer tends to be: a machine's own NetBIOS
+        # name beats whatever the router happens to have written down.
+        names.update(netbios_names(missing))
+        names.update(reverse_dns_all([ip for ip in missing if ip not in names]))
 
     observations: list[Observation] = []
     for mac, ip in table.items():
