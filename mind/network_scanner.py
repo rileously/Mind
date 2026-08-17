@@ -99,10 +99,13 @@ class RouterTest(QObject):
         if not (address and username and password):
             self.done.emit("Fill in the address, username and password first.")
             return
+        probe = self.store.root / "router-probe.txt"
         try:
-            devices, notes = fetch_devices(address, username, password)
+            devices, notes = fetch_devices(
+                address, username, password, probe_into=probe
+            )
         except RouterError as exc:
-            self.done.emit(str(exc))
+            self.done.emit(f"{exc} What it returned was saved to {probe}")
             return
         except Exception as exc:
             self.done.emit(f"The router could not be read: {exc}")

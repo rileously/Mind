@@ -26,17 +26,28 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 
 DEFAULT_TIMEOUT = 8.0
-# Where the device list lives on the models that publish one. Tried in turn.
+# Where the device list lives on the models that publish one, tried in turn.
+# Huawei's ONT firmwares disagree about this more than about anything else.
 DEVICE_PAGES = (
     "/html/bbsp/common/GetLanUserDevInfo.asp",
     "/html/amp/lanuserinfo/lanuserinfo.asp",
     "/html/bbsp/dhcp/dhcp.asp",
+    "/html/ntwk/lancfg.asp",
+    "/html/bbsp/lanuserinfo/lanuserinfo.asp",
+    "/html/network/lanuserinfo.asp",
+    "/html/status/lanstatus.asp",
     "/api/system/HostInfo",
+    "/api/ntwk/lan_user_dev",
+    "/api/ntwk/wlanuser",
 )
 LOGIN_PAGES = ("/asp/GetRandCount.asp", "/index.asp", "/")
+# A response of about this size that still looks like the login page means the
+# session did not take, whatever the status code said.
+LOGIN_MARKERS = ("SSLHostIp", "IsMaintWan", "loginpage", "UserName")
 
 
 class RouterError(RuntimeError):
@@ -220,27 +231,73 @@ class RouterSession:
         if not self._jar and "location" not in lowered:
             self.notes.append("the router returned no session cookie")
 
-    def devices(self) -> list[RouterDevice]:
-        """Fetch the connected list, trying the pages these models publish."""
+    @staticmethod
+    def looks_like_login(body: str) -> bool:
+        """Whether this is the sign-in shell rather than a page of content.
+
+        These models answer 200 with their login page for every path until a
+        session exists, so a status code proves nothing. Recognising the shell is
+        the difference between "the list is somewhere else" and "the sign-in did
+        not take", which need opposite responses.
+        """
+        if len(body) > 20_000:
+            return False
+        return sum(1 for marker in LOGIN_MARKERS if marker in body) >= 2
+
+    def devices(self, probe_into: Path | None = None) -> list[RouterDevice]:
+        """Fetch the connected list, trying the pages these models publish.
+
+        ``probe_into`` writes what each page actually returned to a file. The
+        endpoints cannot be discovered from outside a session, so when this
+        fails, what the router said is the only thing that moves it forward -
+        and it can be shared without sharing a password.
+        """
         tried: list[str] = []
+        collected: list[str] = []
+        blocked = 0
         for page in DEVICE_PAGES:
             status, body = self._open(page)
+            if probe_into is not None:
+                collected.append(
+                    f"===== {page} -> {status}, {len(body)} bytes =====\n{body[:4000]}\n"
+                )
             if status != 200 or len(body) < 200:
                 tried.append(f"{page} ({status})")
+                continue
+            if self.looks_like_login(body):
+                blocked += 1
+                tried.append(f"{page} (still the sign-in page)")
                 continue
             found = parse_devices(body)
             if found:
                 return found
-            tried.append(f"{page} (nothing to read)")
+            tried.append(f"{page} (no addresses in it)")
+
+        if probe_into is not None and collected:
+            try:
+                probe_into.parent.mkdir(parents=True, exist_ok=True)
+                probe_into.write_text("\n".join(collected), encoding="utf-8")
+                self.notes.append(f"What the router returned was written to {probe_into}")
+            except OSError:
+                pass
+        if blocked and blocked >= len(tried) - 1:
+            raise RouterError(
+                "The sign-in did not take: every page still came back as the router's "
+                "own login screen. This firmware wants a different login request."
+            )
         raise RouterError(
             "Signed in, but no device list could be read from: " + ", ".join(tried)
         )
 
 
 def fetch_devices(
-    address: str, username: str, password: str, timeout: float = DEFAULT_TIMEOUT
+    address: str,
+    username: str,
+    password: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    probe_into: Path | None = None,
 ) -> tuple[list[RouterDevice], list[str]]:
     """Sign in, take the list, and report anything odd along the way."""
     session = RouterSession(address, timeout)
     session.sign_in(username, password)
-    return session.devices(), list(session.notes)
+    return session.devices(probe_into), list(session.notes)
