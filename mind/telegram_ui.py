@@ -62,6 +62,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("media", "🎵  Media", "telegram_control_enabled"),
     MenuAction("lock", "🔒  Lock", "telegram_control_enabled"),
     MenuAction("commands", "✨  Commands"),
+    MenuAction("apps", "🧩  Apps", "telegram_control_enabled"),
 )
 
 # Label, and the argument press_media_key already understands.
@@ -300,8 +301,89 @@ def build_print_summary(job, max_copies: int) -> dict:
     return {"inline_keyboard": rows}
 
 
-# Watchers. "v:3" pauses or resumes the fourth one in the list shown.
+# Watchers. "v:3" pauses or resumes the fourth one in the list shown, and "z:1"
+# sends the second file named in an alert.
 CB_WATCH = "v"
+CB_WATCH_FILE = "z"
+# "q" closes the app an alert is about.
+CB_APP_CLOSE = "q"
+# "j:2" closes the third app in the list /apps last showed.
+CB_APP_KILL = "j"
+
+
+def build_apps_keyboard(apps) -> dict:
+    """One button per running app, plus a way to look again.
+
+    The name is on the button and closing is one tap: this is the list you reach
+    for when something is stuck and you are not at the machine.
+    """
+    rows = [
+        [
+            {
+                "text": f"✕  {name}"[:38],
+                "callback_data": f"{CB_APP_KILL}:{index}",
+            }
+        ]
+        for index, (name, _title) in enumerate(apps[:12])
+    ]
+    rows.append(
+        [
+            {"text": "⟳  Refresh", "callback_data": f"{CB_APP_KILL}:-1"},
+            {"text": "☰  Menu", "callback_data": callback(CB_MENU, None)},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def apps_text(apps, enabled: bool) -> str:
+    """What the /apps panel says above its buttons."""
+    if not enabled:
+        return (
+            "🧩  PC controls are switched off.\n\n"
+            "Turn on 'Telegram PC controls' in Mind's Preferences to see and close "
+            "what is running."
+        )
+    if not apps:
+        return "🧩  Nothing with a window is open."
+    lines = ["🧩  Open on this PC", ""]
+    for name, title in apps[:12]:
+        lines.append(f"• {name} — {title[:40]}" if title else f"• {name}")
+    lines += ["", "Tap one to close it."]
+    return "\n".join(lines)
+
+
+def build_app_alert_keyboard(app: str) -> dict:
+    """Offer to close the app the alert just announced.
+
+    One tap, with the name on the button: being told the game is running is
+    only half of what someone away from the machine wants.
+    """
+    return {
+        "inline_keyboard": [
+            [{"text": f"✕  Close {app}"[:40], "callback_data": CB_APP_CLOSE}]
+        ]
+    }
+
+
+def build_watcher_files_keyboard(names) -> dict:
+    """Offer the files an alert just named, so seeing one is a tap.
+
+    Being told a file arrived and then having to go and find it is most of the
+    work left undone. The name is on the button rather than a bare "Send",
+    because an alert can carry several.
+    """
+    single = len(names) == 1
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": ("👁  View" if single else f"📥  {name}")[:40],
+                    "callback_data": f"{CB_WATCH_FILE}:{index}",
+                }
+            ]
+            for index, name in enumerate(names[:5])
+        ]
+    }
 
 
 def build_watcher_keyboard(watchers) -> dict:
@@ -370,6 +452,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("clip", "Send this PC's clipboard here", None),
     ("save", "Store text in the clipboard history", None),
     ("commands", "List Mind's text commands", None),
+    ("apps", "See and close what is running", "telegram_control_enabled"),
     ("watch", "Alerts about this PC", "watchers_enabled"),
     ("files", "Browse this PC's files", "telegram_files_enabled"),
     ("find", "Search for a file by name", "telegram_files_enabled"),

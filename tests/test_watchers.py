@@ -340,3 +340,144 @@ class BridgeIntegrationTests(unittest.TestCase):
         self.save(Watcher(id="w1", kind=BATTERY_LOW, threshold=20))
         self.bridge._send_watcher_panel(self.client, 7, {"watchers_enabled": False})
         self.assertIn("switched off", self.client.sent[-1]["text"])
+
+
+class NotificationsPageTests(unittest.TestCase):
+    """The switch sits with the watchers, not two pages away."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from mind.config_store import ConfigStore
+        from mind.main_window import NotificationsPage
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        self.store.save({**self.store.load(), "telegram_enabled": True})
+        self.page = NotificationsPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    def test_the_switch_starts_off_and_says_so(self):
+        self.assertFalse(self.page.enabled_switch.isChecked())
+        self.assertIn("off", self.page.state_label.text().lower())
+
+    def test_flicking_the_switch_starts_watching(self):
+        # The failure this fixes: watchers created, the feature built, and
+        # nothing happening because the switch was on another page.
+        self.page.enabled_switch.setChecked(True)
+        self.assertTrue(bool(self.store.load().get("watchers_enabled")))
+        self.assertIn("watch", self.page.state_label.text().lower())
+
+    def test_it_can_be_switched_off_again(self):
+        self.page.enabled_switch.setChecked(True)
+        self.page.enabled_switch.setChecked(False)
+        self.assertFalse(bool(self.store.load().get("watchers_enabled")))
+
+    def test_loading_the_saved_value_does_not_write_it_back(self):
+        from mind.main_window import NotificationsPage
+
+        self.store.save({**self.store.load(), "watchers_enabled": True})
+        page = NotificationsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        self.assertTrue(page.enabled_switch.isChecked())
+        self.assertTrue(bool(self.store.load().get("watchers_enabled")))
+
+    def test_the_switch_is_unavailable_without_the_bridge(self):
+        from mind.main_window import NotificationsPage
+
+        self.store.save({**self.store.load(), "telegram_enabled": False})
+        page = NotificationsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        self.assertFalse(page.enabled_switch.isEnabled())
+        self.assertIn("bridge is off", page.state_label.text().lower())
+
+    def test_being_on_with_nothing_to_watch_is_said_plainly(self):
+        self.page.enabled_switch.setChecked(True)
+        self.assertIn("nothing to watch", self.page.state_label.text().lower())
+
+    def test_a_watcher_added_on_the_page_is_stored(self):
+        self.page.watchers.append(new_watcher(IDLE, 15))
+        self.page._save()
+        self.assertEqual(len(self.store.load_watchers()), 1)
+        self.assertEqual(self.page.table.rowCount(), 1)
+
+
+class AlertFileButtonTests(unittest.TestCase):
+    """An alert about a new file offers the file."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from mind.config_store import ConfigStore
+        from mind.telegram_bridge import TelegramBridge
+        from tests.test_telegram_menu_flow import FakeClient
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.folder = self.root / "watched"
+        self.folder.mkdir()
+        self.store = ConfigStore(root=self.root / "config")
+        self.store.save_watchers(
+            [to_dict(Watcher(id="f1", kind=FOLDER_NEW, target=str(self.folder)))]
+        )
+        self.bridge = TelegramBridge(self.store)
+        self.client = FakeClient()
+        self.config = {"watchers_enabled": True, "telegram_allowed_chat_ids": [7]}
+
+    def arrive(self, name: str, data: bytes = b"x") -> None:
+        self.bridge._check_watchers(self.client, self.config)  # first look
+        (self.folder / name).write_bytes(data)
+        self.bridge._check_watchers(self.client, self.config)
+
+    def test_the_alert_carries_a_button_for_the_file(self):
+        self.arrive("photo.jpg")
+        self.assertIsNotNone(self.client.sent[-1]["markup"])
+        self.assertIn("View", str(self.client.sent[-1]["markup"]))
+
+    def test_tapping_it_sends_an_image_as_a_photo(self):
+        self.arrive("photo.jpg")
+        message = self.client.sent[-1]["id"]
+        self.bridge._handle_watched_file_tap(self.client, 7, "cb", message, 0, self.config)
+        self.assertEqual(self.client.photos[-1]["caption"], "photo.jpg")
+
+    def test_anything_else_arrives_as_a_file(self):
+        self.arrive("notes.pdf")
+        message = self.client.sent[-1]["id"]
+        self.bridge._handle_watched_file_tap(self.client, 7, "cb", message, 0, self.config)
+        self.assertEqual(self.client.documents[-1]["caption"], "notes.pdf")
+
+    def test_a_file_deleted_before_the_tap_says_so(self):
+        self.arrive("gone.txt")
+        (self.folder / "gone.txt").unlink()
+        message = self.client.sent[-1]["id"]
+        self.bridge._handle_watched_file_tap(self.client, 7, "cb", message, 0, self.config)
+        self.assertTrue(any("gone" in text.lower() for text in self.client.answered))
+        self.assertEqual(self.client.documents, [])
+
+    def test_an_alert_from_before_a_restart_cannot_fetch(self):
+        self.bridge._handle_watched_file_tap(self.client, 7, "cb", 999, 0, self.config)
+        self.assertTrue(any("too old" in text.lower() for text in self.client.answered))
+
+    def test_a_button_only_ever_means_a_file_in_the_watched_folder(self):
+        # The name is remembered, not a path, and it is resolved inside the
+        # folder that was being watched.
+        self.arrive("safe.txt")
+        message = self.client.sent[-1]["id"]
+        self.bridge._watched_files[(7, message)] = (str(self.folder), ("..\..\secret.txt",))
+        self.bridge._handle_watched_file_tap(self.client, 7, "cb", message, 0, self.config)
+        self.assertEqual(self.client.documents, [])
+        self.assertEqual(self.client.photos, [])
+
+    def test_alerts_that_name_nothing_carry_no_buttons(self):
+        self.store.save_watchers([to_dict(Watcher(id="m", kind=MEMORY_HIGH, threshold=0))])
+        bridge_client = self.client
+        self.bridge._check_watchers(bridge_client, self.config)
+        self.assertIsNone(bridge_client.sent[-1]["markup"])

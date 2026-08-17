@@ -236,3 +236,240 @@ def read_idle_minutes() -> float:
     except (AttributeError, OSError):
         return 0.0
     return elapsed / (1000 * 60)
+
+
+TH32CS_SNAPPROCESS = 0x00000002
+CREATE_NO_WINDOW = 0x08000000
+# Killing any of these takes the session or the machine down with it, so they are
+# refused however they are asked for. Mind is on the list because closing the app
+# that runs the bridge would also close whatever was asking.
+PROTECTED_PROCESSES = frozenset(
+    {
+        "mind.exe",
+        "system",
+        "registry",
+        "smss.exe",
+        "csrss.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "svchost.exe",
+        "dwm.exe",
+    }
+)
+
+
+class _ProcessEntry(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wt.DWORD),
+        ("cntUsage", wt.DWORD),
+        ("th32ProcessID", wt.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", wt.DWORD),
+        ("cntThreads", wt.DWORD),
+        ("th32ParentProcessID", wt.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wt.DWORD),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+def _process_entries() -> list[tuple[str, int]]:
+    """Every running process as (lowercase name, pid).
+
+    A snapshot through ToolHelp rather than running tasklist: this is checked on
+    every poll, and spawning a console process every twenty-five seconds to read
+    a list the API already has would be waste with a flicker attached.
+    """
+    kernel32 = ctypes.windll.kernel32
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1:
+        return []
+    found: list[tuple[str, int]] = []
+    try:
+        entry = _ProcessEntry()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry)
+        if not kernel32.Process32First(snapshot, ctypes.byref(entry)):
+            return []
+        while True:
+            name = entry.szExeFile.decode("latin-1", "replace").lower()
+            found.append((name, int(entry.th32ProcessID)))
+            if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return found
+
+
+def read_running_apps() -> frozenset[str]:
+    return frozenset(name for name, _pid in _process_entries())
+
+
+def normalise_app(name: str) -> str:
+    """The name as the process list has it, so "Game" and "game.exe" both match."""
+    cleaned = (name or "").strip().strip('"').lower()
+    cleaned = cleaned.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    return cleaned if cleaned.endswith(".exe") else f"{cleaned}.exe"
+
+
+def close_app(name: str, force_after_seconds: float = 4.0) -> str:
+    """Close an application, asking politely before insisting.
+
+    A window is asked to close first, which is what pressing X does and gives
+    the program its chance to save. Anything still running after that is ended,
+    because a game that ignores the request is exactly the case this is for.
+    Returns a sentence describing what happened.
+    """
+    import subprocess
+    import time as _time
+
+    target = normalise_app(name)
+    if target in PROTECTED_PROCESSES:
+        raise SystemActionError(f"{target} keeps Windows running and cannot be closed.")
+    pids = [pid for process, pid in _process_entries() if process == target]
+    if not pids:
+        raise SystemActionError(f"{target} is not running.")
+
+    def kill(arguments: list[str]) -> None:
+        for pid in pids:
+            try:
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(pid), *arguments],
+                    capture_output=True,
+                    creationflags=CREATE_NO_WINDOW,
+                    timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+
+    kill([])
+    deadline = _time.monotonic() + max(0.0, force_after_seconds)
+    while _time.monotonic() < deadline:
+        if target not in read_running_apps():
+            return f"{target} closed."
+        _time.sleep(0.4)
+
+    kill(["/T", "/F"])
+    _time.sleep(0.6)
+    if target in read_running_apps():
+        raise SystemActionError(f"{target} would not close.")
+    return f"{target} was forced to close."
+
+
+# Windows plumbing that owns a titled window without being an application
+# anyone means. Explorer is here because closing it takes the taskbar and the
+# desktop with it, which is not what "close that app" means from a phone.
+SHELL_PROCESSES = frozenset(
+    {
+        "explorer.exe",
+        "textinputhost.exe",
+        "applicationframehost.exe",
+        "shellexperiencehost.exe",
+        "searchhost.exe",
+        "startmenuexperiencehost.exe",
+        "lockapp.exe",
+    }
+)
+
+
+def read_visible_apps(limit: int = 14) -> list[tuple[str, str]]:
+    """The applications a person would say are open, as (process, window title).
+
+    Filtered by having a visible top-level window with a title, because "what is
+    running" to someone holding a phone means Chrome and the game - not the
+    hundred service processes that also happen to be running. One entry per
+    program: a browser with nine windows is still one thing to close.
+    """
+    user32 = ctypes.windll.user32
+    processes = {pid: name for name, pid in _process_entries()}
+    found: dict[str, str] = {}
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    def visit(handle, _param):
+        if not user32.IsWindowVisible(handle):
+            return True
+        length = user32.GetWindowTextLengthW(handle)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(handle, buffer, length + 1)
+        title = buffer.value.strip()
+        if not title:
+            return True
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(handle, ctypes.byref(pid))
+        name = processes.get(int(pid.value), "")
+        if not name or name in PROTECTED_PROCESSES or name in SHELL_PROCESSES:
+            # Nothing that cannot be closed, or that is the desktop itself, is
+            # worth offering.
+            return True
+        # The first window seen for a program gives it its title, which is
+        # usually the one in front.
+        found.setdefault(name, title)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return sorted(found.items())[:limit]
+
+
+DRIVE_REMOVABLE = 2
+DRIVE_CDROM = 5
+
+
+def read_removable_drives() -> frozenset[str]:
+    """Drive letters Windows calls removable, which is what a USB stick becomes.
+
+    Read from the drive table rather than the device tree: it is instant, needs
+    no elevation, and covers the case a person means by "my USB drive appeared".
+    A phone connected over MTP has no drive letter and will not show here.
+    """
+    kernel32 = ctypes.windll.kernel32
+    mask = kernel32.GetLogicalDrives()
+    found = set()
+    for index in range(26):
+        if not mask & (1 << index):
+            continue
+        letter = f"{chr(65 + index)}:\\"
+        if kernel32.GetDriveTypeW(letter) in (DRIVE_REMOVABLE, DRIVE_CDROM):
+            found.add(letter)
+    return frozenset(found)
+
+
+def drive_label(letter: str) -> str:
+    """The name Explorer shows for a drive, when it has one."""
+    name = ctypes.create_unicode_buffer(261)
+    try:
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(letter), name, 261, None, None, None, None, 0
+        )
+    except (AttributeError, OSError):
+        return ""
+    return name.value.strip() if ok else ""
+
+
+def read_wifi_networks(timeout: float = 15.0) -> frozenset[str]:
+    """The Wi-Fi networks in range, by name.
+
+    netsh is the only way to this without the WLAN API, so it costs a process
+    each time and is read only when something is actually watching for networks.
+    """
+    import re
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["netsh", "wlan", "show", "networks"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    if completed.returncode != 0:
+        # No wireless adapter, or the service is off. Nothing to report rather
+        # than an error every twenty-five seconds.
+        return frozenset()
+    names = re.findall(r"^\s*SSID \d+\s*:\s*(.+?)\s*$", completed.stdout, re.MULTILINE)
+    return frozenset(name for name in names if name)

@@ -29,6 +29,10 @@ DISK_LOW = "disk_low"
 MEMORY_HIGH = "memory_high"
 IDLE = "idle"
 FOLDER_NEW = "folder_new"
+APP_OPENED = "app_opened"
+APP_CLOSED = "app_closed"
+DEVICE_NEW = "device_new"
+WIFI_NEW = "wifi_new"
 
 
 @dataclass(frozen=True)
@@ -51,7 +55,18 @@ KINDS: tuple[Kind, ...] = (
     Kind(MEMORY_HIGH, "Memory used rises above", "%", 5, 90),
     Kind(IDLE, "The PC sits idle for", "minutes", 1, 30),
     Kind(FOLDER_NEW, "A file appears in", "", 0, 0, needs_target=True),
+    Kind(APP_OPENED, "An app opens", "", 0, 0, needs_target=True),
+    Kind(APP_CLOSED, "An app closes", "", 0, 0, needs_target=True),
+    Kind(DEVICE_NEW, "A USB drive is plugged in", "", 0, 0),
+    Kind(WIFI_NEW, "A new Wi-Fi network appears", "", 0, 0),
 )
+
+# The kinds that watch a program rather than a number or a folder.
+APP_KINDS = (APP_OPENED, APP_CLOSED)
+# The kinds that compare a set of names against the set seen last time. They
+# share their whole mechanism: first sight is never news, and what is new is
+# whatever was not there before.
+SET_KINDS = (DEVICE_NEW, WIFI_NEW)
 
 MAX_NAMES_IN_MESSAGE = 5
 DEFAULT_COOLDOWN_MINUTES = 60
@@ -82,8 +97,17 @@ class Watcher:
             return "Unknown watcher"
         if self.kind == FOLDER_NEW:
             return f"{kind.label} {self.target or 'a folder'}"
+        if self.kind in APP_KINDS:
+            return f"{kind.label}: {self.target or 'an app'}"
+        if not kind.unit:
+            # Nothing is measured, so there is no number to read out. Without
+            # this the label ends in a bare "0".
+            return kind.label
+        # "20%" but "20 GB" and "30 minutes": a percent sign reads as part of
+        # the number, a word does not.
+        gap = "" if kind.unit == "%" else " "
         where = f" on {self.target}" if kind.needs_target and self.target else ""
-        return f"{kind.label} {_number(self.threshold)}{kind.unit}{where}"
+        return f"{kind.label} {_number(self.threshold)}{gap}{kind.unit}{where}"
 
 
 @dataclass(frozen=True)
@@ -98,12 +122,25 @@ class Reading:
     free_gb: dict[str, float] = field(default_factory=dict)
     # Folder path -> the file names currently in it.
     folder_files: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Lowercase names of everything running, or None when it was not read
+    # because nothing asked about an app.
+    running_apps: frozenset[str] | None = None
+    # Removable drive letters, and Wi-Fi network names in range. None means the
+    # same thing: nothing asked, so nothing was read.
+    removable_drives: frozenset[str] | None = None
+    wifi_networks: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
 class Firing:
     watcher_id: str
     message: str
+    # For a folder, the files that just appeared, so the alert can offer to send
+    # them. Empty for every other kind, which has nothing to hand over.
+    names: tuple[str, ...] = ()
+    folder: str = ""
+    # The app this alert is about, so the message can offer to close it.
+    app: str = ""
 
 
 def _number(value: float) -> str:
@@ -172,6 +209,10 @@ def evaluate(
 
         if watcher.kind == FOLDER_NEW:
             firing, memory = _evaluate_folder(watcher, reading, memory, now)
+        elif watcher.kind in APP_KINDS:
+            firing, memory = _evaluate_app(watcher, reading, memory, now)
+        elif watcher.kind in SET_KINDS:
+            firing, memory = _evaluate_set(watcher, reading, memory, now)
         else:
             firing, memory = _evaluate_threshold(watcher, reading, memory, now)
         if firing is not None:
@@ -242,7 +283,103 @@ def _evaluate_folder(
     if not added:
         return None, memory
     memory["last_fired"] = now
-    return Firing(watcher.id, describe_folder(watcher, added)), memory
+    return (
+        Firing(
+            watcher.id,
+            describe_folder(watcher, added),
+            names=tuple(added[:MAX_NAMES_IN_MESSAGE]),
+            folder=watcher.target,
+        ),
+        memory,
+    )
+
+
+def _evaluate_set(
+    watcher: Watcher,
+    reading: Reading,
+    memory: dict[str, Any],
+    now: float,
+) -> tuple[Firing | None, dict[str, Any]]:
+    """Report names that were not there last time - a drive, or a network.
+
+    Both work the same way as a folder: the first look only records what is
+    already present, or plugging the watcher in would announce the drive that
+    was plugged in yesterday and every network in the street.
+    """
+    if watcher.kind == DEVICE_NEW:
+        current = reading.removable_drives
+        label, icon = "drive", "🔌"
+    else:
+        current = reading.wifi_networks
+        label, icon = "Wi-Fi network", "📶"
+    if current is None:
+        return None, memory
+    if "seen" not in memory:
+        memory["seen"] = sorted(current)
+        return None, memory
+
+    seen = set(memory.get("seen") or [])
+    added = sorted(set(current) - seen)
+    # A drive unplugged or a network out of range is forgotten, so plugging the
+    # same stick in tomorrow is news again.
+    memory["seen"] = sorted(current)
+    if not added:
+        return None, memory
+    memory["last_fired"] = now
+    shown = ", ".join(added[:MAX_NAMES_IN_MESSAGE])
+    if len(added) > MAX_NAMES_IN_MESSAGE:
+        shown += f", and {len(added) - MAX_NAMES_IN_MESSAGE} more"
+    plural = label if len(added) == 1 else f"{label}s"
+    return Firing(watcher.id, f"{icon}  New {plural}: {shown}"), memory
+
+
+def app_name(watcher: Watcher) -> str:
+    """The process name as Windows lists it, so "Game" and "game.exe" agree."""
+    cleaned = (watcher.target or "").strip().strip('"').lower()
+    cleaned = cleaned.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    if not cleaned:
+        return ""
+    return cleaned if cleaned.endswith(".exe") else f"{cleaned}.exe"
+
+
+def _evaluate_app(
+    watcher: Watcher,
+    reading: Reading,
+    memory: dict[str, Any],
+    now: float,
+) -> tuple[Firing | None, dict[str, Any]]:
+    """Fire on the moment an app starts or stops, not on it being up or down."""
+    target = app_name(watcher)
+    if reading.running_apps is None or not target:
+        return None, memory
+    running = target in reading.running_apps
+    if "running" not in memory:
+        # First look only records the state. Otherwise a watcher for an app that
+        # is already open would announce it the moment it is created.
+        memory["running"] = running
+        return None, memory
+    if bool(memory.get("running")) == running:
+        return None, memory
+
+    memory["running"] = running
+    started = running and watcher.kind == APP_OPENED
+    stopped = not running and watcher.kind == APP_CLOSED
+    if not (started or stopped):
+        # The change is real but not the one this watcher was asked about.
+        return None, memory
+    memory["last_fired"] = now
+    verb = "opened" if started else "closed"
+    icon = "▶" if started else "⏹"
+    return (
+        Firing(
+            watcher.id,
+            f"{icon}  {target} {verb}.",
+            # Only an app that is up can be closed, so the button goes on the
+            # message about it opening.
+            app=target if started else "",
+        ),
+        memory,
+    )
 
 
 def describe(watcher: Watcher, value: float, reading: Reading) -> str:
@@ -320,6 +457,20 @@ def from_dict(payload: Any) -> Watcher | None:
 
 def toggled(watcher: Watcher, enabled: bool) -> Watcher:
     return replace(watcher, enabled=enabled)
+
+
+def watches_apps(watchers: list[Watcher]) -> bool:
+    """Whether anything needs the process list, which is only read if so."""
+    return any(w.enabled and w.kind in APP_KINDS for w in watchers)
+
+
+def watches_devices(watchers: list[Watcher]) -> bool:
+    return any(w.enabled and w.kind == DEVICE_NEW for w in watchers)
+
+
+def watches_wifi(watchers: list[Watcher]) -> bool:
+    """Whether to scan for networks, which costs a process and is not free."""
+    return any(w.enabled and w.kind == WIFI_NEW for w in watchers)
 
 
 def watched_folders(watchers: list[Watcher]) -> list[str]:

@@ -90,6 +90,7 @@ from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
 from .watchers import (
+    APP_KINDS as WATCHER_APP_KINDS,
     FOLDER_NEW as WATCHER_FOLDER_NEW,
     KINDS as WATCHER_KINDS,
     Watcher,
@@ -707,16 +708,21 @@ class WatcherDialog(QDialog):
         kind = watcher_kind_by_key(str(self.kind.currentData()))
         if kind is None:
             return
-        wants_number = kind.key != WATCHER_FOLDER_NEW
+        # A kind has a number only if it has a unit to measure it in. Folders,
+        # apps, drives appearing and networks appearing have nothing to compare.
+        wants_number = bool(kind.unit)
         self.threshold.setVisible(wants_number)
         self.threshold_label.setVisible(wants_number)
         self.threshold_label.setText(kind.unit)
         self.target.setVisible(kind.needs_target)
         self.target_label.setVisible(kind.needs_target)
         self.browse.setVisible(kind.key == WATCHER_FOLDER_NEW)
-        self.target_label.setText(
-            "Folder to watch" if kind.key == WATCHER_FOLDER_NEW else "Drive, for example C:\\"
-        )
+        if kind.key == WATCHER_FOLDER_NEW:
+            self.target_label.setText("Folder to watch")
+        elif kind.key in WATCHER_APP_KINDS:
+            self.target_label.setText("Application, for example game.exe")
+        else:
+            self.target_label.setText("Drive, for example C:\\")
         if wants_number and not self.threshold.value():
             self.threshold.setValue(int(kind.default_threshold))
 
@@ -757,6 +763,11 @@ class NotificationsPage(QWidget):
         toolbar = QHBoxLayout(toolbar_card)
         toolbar.setContentsMargins(14, 12, 14, 12)
         toolbar.setSpacing(10)
+        # The switch lives here, beside the things it governs. Buried in
+        # Preferences it was the third feature in a row to sit built, configured
+        # and silently switched off.
+        self.enabled_switch = ToggleSwitch()
+        self.enabled_switch.toggled.connect(self._set_enabled)
         self.state_label = QLabel("")
         self.state_label.setObjectName("Muted")
         self.state_label.setWordWrap(True)
@@ -768,6 +779,7 @@ class NotificationsPage(QWidget):
         self.delete_button = QPushButton("Delete")
         self.delete_button.setProperty("danger", True)
         self.delete_button.clicked.connect(self._delete)
+        toolbar.addWidget(self.enabled_switch)
         toolbar.addWidget(self.state_label, 1)
         toolbar.addWidget(self.edit_button)
         toolbar.addWidget(self.delete_button)
@@ -812,10 +824,21 @@ class NotificationsPage(QWidget):
         config = self.store.load()
         on = bool(config.get("watchers_enabled", False))
         telegram_on = bool(config.get("telegram_enabled", False))
+        self._loading = True
+        try:
+            self.enabled_switch.setChecked(on)
+        finally:
+            self._loading = False
+        self.enabled_switch.setEnabled(telegram_on)
         if not telegram_on:
-            self.state_label.setText("Watchers need the Telegram bridge, which is off.")
+            self.state_label.setText(
+                "Watchers send to Telegram, and the bridge is off. Turn it on in "
+                "Preferences → Telegram."
+            )
         elif not on:
-            self.state_label.setText("Watchers are off. Turn them on in Preferences → Telegram.")
+            self.state_label.setText("Watchers are off. Use the switch to start them.")
+        elif not self.watchers:
+            self.state_label.setText("On, but there is nothing to watch yet.")
         else:
             self.state_label.setText("Watching. Alerts go to your allowed chats.")
         self._loading = True
@@ -846,6 +869,22 @@ class NotificationsPage(QWidget):
         chosen = self.table.currentRow() >= 0 and bool(self.watchers)
         self.edit_button.setEnabled(chosen)
         self.delete_button.setEnabled(chosen)
+
+    def _set_enabled(self, on: bool) -> None:
+        """Start or stop watching, from the page the watchers live on.
+
+        Writes the same setting Preferences shows, so the two can never disagree
+        about whether anything is being watched.
+        """
+        if self._loading:
+            return
+        config = self.store.load()
+        if bool(config.get("watchers_enabled", False)) == on:
+            return
+        config["watchers_enabled"] = on
+        self.store.save(config)
+        self.refresh()
+        self.updated.emit()
 
     def _save(self) -> None:
         self.store.save_watchers([watcher_to_dict(w) for w in self.watchers])
@@ -2043,6 +2082,7 @@ class MindWindow(QMainWindow):
         self.dashboard.open_page.connect(self.select_page)
         self.providers.updated.connect(self._config_updated)
         self.commands.updated.connect(self._config_updated)
+        self.notifications.updated.connect(self._config_updated)
         self.settings.updated.connect(self._settings_updated)
         self.settings.update_available.connect(self._notify_update_available)
         self.settings.install_requested.connect(self._install_update)
@@ -2183,6 +2223,8 @@ class MindWindow(QMainWindow):
 
     def _config_updated(self) -> None:
         self.dashboard.refresh()
+        # The watchers switch appears on two pages; neither may show a stale one.
+        self.notifications.refresh()
         self.configure_telegram()
         if self.engine.is_running:
             self._log("Configuration changed. The engine will hot-reload it.")
@@ -2277,32 +2319,48 @@ class MindWindow(QMainWindow):
         rather than doing it on its worker.
         """
         target = int(chat_id)
-        screen = QApplication.primaryScreen()
-        if screen is None:
+        screens = QApplication.screens()
+        if not screens:
             self.telegram.send_text(target, "No screen is available to capture.")
             return
-        shot = screen.grabWindow(0)
-        if shot.isNull():
-            self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
-            return
-        destination = Path(tempfile.gettempdir()) / f"mind-screen-{uuid.uuid4().hex[:10]}.png"
-        try:
-            if not shot.save(str(destination), "PNG"):
-                self.telegram.send_text(target, "Could not save the screenshot.")
-                return
-            # As a photo: a screenshot asked for from a phone is meant to be
-            # looked at, not downloaded first. As a panel, because the previous
-            # one shows a screen that has since changed.
-            self.telegram.send_image(
-                target, destination, caption="Screen", panel=PANEL_SCREEN
+        # Every monitor, not just the primary one. Asking a PC with two screens
+        # for "the screen" and being shown one of them, with no way to see the
+        # other, is the wrong answer to the question.
+        sent_any = False
+        for index, screen in enumerate(screens):
+            shot = screen.grabWindow(0)
+            if shot.isNull():
+                continue
+            destination = (
+                Path(tempfile.gettempdir()) / f"mind-screen-{uuid.uuid4().hex[:10]}.png"
             )
-        finally:
-            # A screenshot can hold anything that was on screen; do not leave it
-            # sitting in temp once it has been sent.
             try:
-                destination.unlink()
-            except OSError:
-                pass
+                if not shot.save(str(destination), "PNG"):
+                    continue
+                size = shot.size()
+                caption = screen.name() or f"Screen {index + 1}"
+                if len(screens) > 1:
+                    caption = f"{caption}  ({index + 1} of {len(screens)})"
+                # As a photo: a screenshot asked for from a phone is meant to be
+                # looked at, not downloaded first. Each monitor is its own panel,
+                # so asking again replaces both pictures rather than stacking
+                # four in the chat.
+                self.telegram.send_image(
+                    target,
+                    destination,
+                    caption=f"{caption}  ·  {size.width()}×{size.height()}",
+                    panel=f"{PANEL_SCREEN}:{index}",
+                )
+                sent_any = True
+            finally:
+                # A screenshot can hold anything that was on screen; do not leave
+                # it sitting in temp once it has been sent.
+                try:
+                    destination.unlink()
+                except OSError:
+                    pass
+        if not sent_any:
+            self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
 
     def notify_telegram(self, message: str) -> None:
         """Push an alert to every allowed chat, when the user asked for that."""
@@ -2314,6 +2372,7 @@ class MindWindow(QMainWindow):
 
     def _settings_updated(self, theme: str, palette_enabled: bool, shortcut: str, accent: str) -> None:
         self.apply_theme(theme, accent)
+        self.notifications.refresh()
         self.configure_palette(palette_enabled, shortcut)
         config = self.store.load()
         self.configure_snip(

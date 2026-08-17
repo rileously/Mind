@@ -44,6 +44,7 @@ from .telegram_files import (
     unique_destination,
 )
 from .telegram_print import (
+    IMAGE_SUFFIXES,
     MAX_COPIES,
     PAPERS,
     SIDES_BOTH,
@@ -64,6 +65,9 @@ from .telegram_ui import (
     CB_PRINT,
     CB_REFRESH,
     CB_WATCH,
+    CB_WATCH_FILE,
+    CB_APP_CLOSE,
+    CB_APP_KILL,
     PRINT_CANCEL,
     PRINT_PAPER,
     PRINT_PRINTER,
@@ -78,6 +82,10 @@ from .telegram_ui import (
     build_colour_keyboard,
     build_print_summary,
     build_watcher_keyboard,
+    build_watcher_files_keyboard,
+    build_app_alert_keyboard,
+    build_apps_keyboard,
+    apps_text,
     watcher_list_text,
     parse_print_callback,
     REACTION_SAVED,
@@ -96,6 +104,9 @@ from .telegram_ui import (
 )
 from .watchers import (
     Reading as WatcherReading,
+    watches_apps,
+    watches_devices,
+    watches_wifi,
     to_dict as watcher_to_dict,
     toggled as watcher_toggled,
     evaluate as evaluate_watchers,
@@ -108,8 +119,13 @@ from .telegram_system import (
     abort_shutdown,
     format_status,
     lock_workstation,
+    close_app,
     press_media_key,
     read_idle_minutes,
+    read_removable_drives,
+    read_running_apps,
+    read_visible_apps,
+    read_wifi_networks,
     read_status,
     restart,
     shutdown,
@@ -139,6 +155,7 @@ PANEL_MEDIA = "media"
 PANEL_COMMANDS = "commands"
 PANEL_HINT = "hint"
 PANEL_WATCH = "watch"
+PANEL_APPS = "apps"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
@@ -196,6 +213,13 @@ class TelegramBridge(QObject):
         # What each watcher knew last time it was checked: whether it is armed,
         # when it last spoke, and for a folder the names already seen.
         self._watcher_state: dict[str, dict] = {}
+        # The files each alert named, so its buttons can hand them over later.
+        self._watched_files: dict[tuple[int, int], tuple[str, tuple[str, ...]]] = {}
+        # The app each alert is about, so its button closes the right one.
+        self._alert_apps: dict[tuple[int, int], str] = {}
+        # The apps /apps last listed per chat, so a button means the one whose
+        # name was written on it.
+        self._listed_apps: dict[int, tuple[str, ...]] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -315,6 +339,149 @@ class TelegramBridge(QObject):
         self._published_commands = signature
         self.log.emit("Telegram: updated the command menu.")
 
+    def _handle_app_close_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        config: dict,
+    ) -> None:
+        """Close the app an alert is about.
+
+        Behind the PC controls switch, because closing a program can lose
+        unsaved work in the same way the power controls can.
+        """
+        if not bool(config.get("telegram_control_enabled", False)):
+            client.answer_callback_query(
+                callback_id,
+                "PC controls are switched off. Turn them on in Mind's Preferences.",
+                alert=True,
+            )
+            return
+        app = self._alert_apps.get((chat_id, message_id if isinstance(message_id, int) else -1))
+        if not app:
+            client.answer_callback_query(
+                callback_id, "That alert is too old to close from.", alert=True
+            )
+            return
+        client.answer_callback_query(callback_id, f"Closing {app}…")
+        try:
+            outcome = close_app(app)
+        except SystemActionError as exc:
+            client.edit_message_text(chat_id, int(message_id), f"{app}: {exc}")
+            return
+        self.log.emit(f"Telegram: {outcome}")
+        client.edit_message_text(chat_id, int(message_id), f"✅  {outcome}")
+
+    def _forget_stale_watched_files(self, chat_id: int, keep: int = 20) -> None:
+        keys = [key for key in self._watched_files if key[0] == chat_id]
+        for key in keys[:-keep]:
+            self._watched_files.pop(key, None)
+
+    def _handle_watched_file_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Send the file an alert named, when its button is tapped."""
+        remembered = self._watched_files.get((chat_id, message_id if isinstance(message_id, int) else -1))
+        if remembered is None or index is None:
+            client.answer_callback_query(
+                callback_id, "That alert is too old to fetch from.", alert=True
+            )
+            return
+        folder, names = remembered
+        if not 0 <= index < len(names):
+            client.answer_callback_query(callback_id)
+            return
+        try:
+            # Resolved inside the watched folder, so a name can only ever mean a
+            # file in the folder that was being watched.
+            target = resolve_within_root(Path(folder), Path(folder), names[index])
+        except PathRefused as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+            return
+        if not target.is_file():
+            client.answer_callback_query(callback_id, "That file has gone.", alert=True)
+            return
+        size = target.stat().st_size
+        if size > MAX_SEND_BYTES:
+            client.answer_callback_query(
+                callback_id,
+                f"{human_size(size)} is over Telegram's {human_size(MAX_SEND_BYTES)} limit.",
+                alert=True,
+            )
+            return
+        client.answer_callback_query(callback_id, f"Sending {target.name}…")
+        try:
+            if target.suffix.lower() in IMAGE_SUFFIXES:
+                # A picture is meant to be looked at, which is what "view" asked
+                # for; anything else arrives as a file.
+                client.send_chat_action(chat_id, "upload_photo")
+                client.send_photo(chat_id, str(target), caption=target.name)
+            else:
+                client.send_chat_action(chat_id, "upload_document")
+                client.send_document(chat_id, str(target), caption=target.name)
+            self.log.emit(f"Telegram: sent '{target.name}' from a watcher alert")
+        except TelegramError as exc:
+            client.send_message(chat_id, f"Could not send that file: {exc}")
+
+    def _send_apps_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        """Show what is open, with a button to close each one."""
+        enabled = bool(config.get("telegram_control_enabled", False))
+        apps = read_visible_apps() if enabled else []
+        self._listed_apps[chat_id] = tuple(name for name, _title in apps)
+        text = apps_text(apps, enabled)
+        keyboard = build_apps_keyboard(apps) if apps else build_menu_keyboard()
+        if self._replace_panel(client, chat_id, message_id, PANEL_APPS, text, keyboard):
+            return
+        self._send_panel(client, chat_id, PANEL_APPS, text, keyboard)
+
+    def _handle_apps_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Close the app that was tapped, then show the list as it now stands."""
+        if not bool(config.get("telegram_control_enabled", False)):
+            client.answer_callback_query(
+                callback_id, "PC controls are switched off.", alert=True
+            )
+            return
+        if index is not None and index < 0:
+            # The refresh button, which is the same list drawn again.
+            client.answer_callback_query(callback_id)
+            self._send_apps_panel(client, chat_id, config, message_id)
+            return
+        listed = self._listed_apps.get(chat_id, ())
+        if index is None or not 0 <= index < len(listed):
+            client.answer_callback_query(callback_id, "Send /apps again.", alert=True)
+            return
+        app = listed[index]
+        client.answer_callback_query(callback_id, f"Closing {app}…")
+        try:
+            outcome = close_app(app)
+            self.log.emit(f"Telegram: {outcome}")
+        except SystemActionError as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+        # Redrawn either way, so the list shows what is actually still running.
+        self._send_apps_panel(client, chat_id, config, message_id)
+
     def _load_watchers(self) -> list:
         return [w for w in (watcher_from_dict(i) for i in self.store.load_watchers()) if w]
 
@@ -378,6 +545,10 @@ class TelegramBridge(QObject):
                 # the reading, which the evaluation treats as nothing to say.
                 continue
         return WatcherReading(
+            running_apps=read_running_apps() if watches_apps(watchers) else None,
+            removable_drives=read_removable_drives() if watches_devices(watchers) else None,
+            # A network scan costs a process, so it only runs when asked for.
+            wifi_networks=read_wifi_networks() if watches_wifi(watchers) else None,
             battery_percent=status.battery_percent,
             on_mains=status.on_mains,
             memory_used_percent=status.memory_used_percent,
@@ -406,13 +577,31 @@ class TelegramBridge(QObject):
         allowed = parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids"))
         for firing in firings:
             self.log.emit(f"Telegram: watcher fired - {firing.message}")
+            keyboard = None
+            if firing.names:
+                keyboard = build_watcher_files_keyboard(list(firing.names))
+            elif firing.app:
+                keyboard = build_app_alert_keyboard(firing.app)
             for chat_id in allowed:
                 try:
                     # Content, not a panel: an alert is the reason the chat
                     # exists, and must not be taken away by the next one.
-                    client.send_message(int(chat_id), firing.message)
+                    sent = client.send_message(
+                        int(chat_id), firing.message, reply_markup=keyboard
+                    )
                 except TelegramError as exc:
                     self.log.emit(f"Telegram: could not send an alert ({exc})")
+                    continue
+                if firing.app and sent is not None:
+                    self._alert_apps[(int(chat_id), sent)] = firing.app
+                if firing.names and sent is not None:
+                    # Remembered against the message, so a button always means
+                    # the file whose name is written on it.
+                    self._watched_files[(int(chat_id), sent)] = (
+                        firing.folder,
+                        tuple(firing.names),
+                    )
+                    self._forget_stale_watched_files(int(chat_id))
 
     # -- dispatch --------------------------------------------------------
 
@@ -487,6 +676,9 @@ class TelegramBridge(QObject):
             return
         if trigger == "clip":
             self.clipboard_requested.emit(chat_id)
+            return
+        if trigger in {"apps", "running", "tasks"}:
+            self._send_apps_panel(client, chat_id, config)
             return
         if trigger in {"watch", "watchers", "alerts"}:
             self._send_watcher_panel(client, chat_id, config)
@@ -609,6 +801,20 @@ class TelegramBridge(QObject):
 
         if action == CB_MEDIA:
             self._handle_media_tap(client, chat_id, callback_id, index, config)
+            return
+
+        if action == CB_APP_KILL:
+            self._handle_apps_tap(client, chat_id, callback_id, message_id, index, config)
+            return
+
+        if action == CB_APP_CLOSE:
+            self._handle_app_close_tap(client, chat_id, callback_id, message_id, config)
+            return
+
+        if action == CB_WATCH_FILE:
+            self._handle_watched_file_tap(
+                client, chat_id, callback_id, message_id, index, config
+            )
             return
 
         if action == CB_WATCH:
@@ -893,6 +1099,8 @@ class TelegramBridge(QObject):
                 self._send_panel(
                     client, chat_id, PANEL_MEDIA, MEDIA_PROMPT, build_media_keyboard()
                 )
+        elif action.key == "apps":
+            self._send_apps_panel(client, chat_id, config, message_id)
         elif action.key == "files":
             # The listing takes the menu's place, which is also how the browsing
             # buttons already behave once you are inside a folder.

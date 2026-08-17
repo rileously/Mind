@@ -35,6 +35,8 @@ class FakeClient:
         self.edited: list[dict] = []
         self.deleted: list[int] = []
         self.answered: list[str] = []
+        self.photos: list[dict] = []
+        self.documents: list[dict] = []
         self._next_id = 100
 
     def send_message(self, chat_id, text, reply_to=None, reply_markup=None, html=False):
@@ -56,6 +58,13 @@ class FakeClient:
 
     def send_photo(self, chat_id, path, caption="", reply_markup=None):
         self._next_id += 1
+        self.photos.append({"path": str(path), "caption": caption})
+        self.sent.append({"id": self._next_id, "text": caption, "markup": reply_markup})
+        return self._next_id
+
+    def send_document(self, chat_id, path, caption="", reply_markup=None):
+        self._next_id += 1
+        self.documents.append({"path": str(path), "caption": caption})
         self.sent.append({"id": self._next_id, "text": caption, "markup": reply_markup})
         return self._next_id
 
