@@ -106,11 +106,13 @@ def parse_devices(payload: str) -> list[RouterDevice]:
             if devices:
                 return sorted(devices.values(), key=lambda device: device.ip)
 
-    # The JavaScript rows: quoted fields, in which a MAC is recognisable on
-    # sight and an address likewise.
-    for row in re.findall(r"new\s+st\w*DevInfo\s*\((.*?)\)", payload or "", re.S) or re.findall(
-        r"\[([^\[\]]*\"[0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[^\[\]]*)\]", payload or ""
-    ):
+    # The JavaScript rows. Every value in them is hex escaped - "192\x2e168"
+    # rather than "192.168" - so nothing matches until that is undone.
+    unescaped = _unescape_hex(payload or "")
+    # Any constructor, because the name differs by firmware: this model uses
+    # USERDeviceNew where others use stLanUserDevInfo.
+    rows = re.findall(r"new\s+\w*(?:Device|DevInfo)\w*\s*\(([^)]*)\)", unescaped, re.S)
+    for row in rows:
         fields = [field.strip().strip("\"'") for field in row.split(",")]
         mac = next((normalise_mac(field) for field in fields if normalise_mac(field)), "")
         if not mac:
@@ -118,9 +120,59 @@ def parse_devices(payload: str) -> list[RouterDevice]:
         ip = next(
             (field for field in fields if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", field)), ""
         )
-        hostname = next((field for field in fields if _looks_like_a_name(field)), "")
-        devices[mac] = RouterDevice(mac=mac, ip=ip, hostname=hostname)
+        devices[mac] = RouterDevice(mac=mac, ip=ip, hostname=_best_name(fields))
     return sorted(devices.values(), key=lambda device: device.ip)
+
+
+def _unescape_hex(text: str) -> str:
+    r"""Turn the router's "\x2e" escapes back into the characters they stand for."""
+    return re.sub(
+        r"\\x([0-9a-fA-F]{2})", lambda match: chr(int(match.group(1), 16)), text
+    )
+
+
+# The row also carries the state of things - which radio, which protocol,
+# whether it is online - and every one of those reads like a word. None of them
+# is anybody's phone.
+ROW_VOCABULARY = frozenset(
+    {
+        "dhcp",
+        "static",
+        "wifi",
+        "wired",
+        "lan",
+        "ethernet",
+        "online",
+        "offline",
+        "true",
+        "false",
+        "unknown",
+        "localhost",
+        "none",
+    }
+)
+# What a device calls itself when nobody has given it a better name: the DHCP
+# client's own boilerplate.
+BORING_NAMES = re.compile(r"(?i)^(android-dhcp|msft\b|dhcp\b|ssid\d*$|eth\d*$|lan\d*$)")
+
+
+def _best_name(fields: list[str]) -> str:
+    """The most useful name in a row, of the several it may carry.
+
+    These rows hold both the name the DHCP client sent - "android-dhcp-13",
+    which says nothing - and the name the device actually goes by, like
+    "Redmi-Note-11". Anything recognisable beats the boilerplate, and the
+    boilerplate is still better than nothing.
+    """
+    candidates = [
+        field
+        for field in fields
+        if _looks_like_a_name(field) and field.strip().lower() not in ROW_VOCABULARY
+    ]
+    if not candidates:
+        return ""
+    useful = [name for name in candidates if not BORING_NAMES.match(name)]
+    return (useful or candidates)[0]
 
 
 def _looks_like_a_name(field: str) -> bool:

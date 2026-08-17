@@ -192,5 +192,51 @@ class PageCredentialTests(unittest.TestCase):
         self.assertEqual(config["router_address"], "192.168.18.1")
         self.assertEqual(config["router_username"], "Epuser")
 
+# A row exactly as an OptiXstar returns it: every value hex escaped, the
+# constructor named USERDeviceNew, and two names in the row - the DHCP client's
+# boilerplate and the one the device actually goes by.
+OPTIXSTAR_BODY = (
+    'var UserDevinfo = new Array('
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.3",'
+    '"192\x2e168\x2e18\x2e12","a2\x3a27\x3aec\x3a61\x3a6a\x3aa6","SSID1","DHCP",'
+    '"android\x2ddhcp\x2d13","Online","WIFI","0\x3a10","Redmi\x2dNote\x2d11",'
+    '"1","1","0","Owner","1","2967","a2\x3a27\x3aec\x3a61\x3a6a\x3aa6"),'
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.4",'
+    '"192\x2e168\x2e18\x2e7","90\x3ade\x3a80\x3a77\x3a53\x3a37","SSID5","DHCP",'
+    '"MSFT\x205\x2e0","Online","WIFI","7\x3a45","DESKTOP\x2d2KVG8KH",'
+    '"1","1","0","","0","2676","90\x3ade\x3a80\x3a77\x3a53\x3a37"));'
+)
+
+
+class OptiXstarTests(unittest.TestCase):
+    """The shape this router actually returns, which three things hid at first."""
+
+    def setUp(self):
+        self.devices = {device.ip: device for device in parse_devices(OPTIXSTAR_BODY)}
+
+    def test_both_rows_are_read(self):
+        self.assertEqual(len(self.devices), 2)
+
+    def test_the_hex_escapes_are_undone(self):
+        # Nothing matches while an address reads "192.168.18.12".
+        self.assertIn("192.168.18.12", self.devices)
+        self.assertEqual(self.devices["192.168.18.12"].mac, "a2-27-ec-61-6a-a6")
+
+    def test_the_constructor_name_is_not_assumed(self):
+        # This firmware says USERDeviceNew where others say stLanUserDevInfo.
+        self.assertTrue(self.devices)
+
+    def test_the_name_a_device_goes_by_beats_the_dhcp_boilerplate(self):
+        # The row carries both "android-dhcp-13" and "Redmi-Note-11".
+        self.assertEqual(self.devices["192.168.18.12"].hostname, "Redmi-Note-11")
+
+    def test_a_windows_pc_is_named_rather_than_called_msft(self):
+        self.assertEqual(self.devices["192.168.18.7"].hostname, "DESKTOP-2KVG8KH")
+
+    def test_the_object_path_is_never_mistaken_for_a_name(self):
+        for device in self.devices.values():
+            self.assertNotIn("InternetGatewayDevice", device.hostname)
+
+
 if __name__ == "__main__":
     unittest.main()
