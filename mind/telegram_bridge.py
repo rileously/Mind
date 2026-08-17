@@ -22,7 +22,9 @@ from .telegram_files import (
     entry_at,
     format_listing,
     human_size,
+    is_hidden,
     list_directory,
+    quick_places,
     relative_label,
     resolve_root,
     resolve_within_root,
@@ -307,6 +309,7 @@ class TelegramBridge(QObject):
             return
 
         root = self._files_root(config)
+        show_hidden = bool(config.get("telegram_show_hidden", False))
         current = self._browse_dir.get(chat_id, root)
         try:
             # A root that changed in settings must not leave a stale location behind.
@@ -314,9 +317,32 @@ class TelegramBridge(QObject):
         except PathRefused:
             current = root
 
+        def reachable(target: Path) -> bool:
+            """Hidden entries are off limits unless the user opted in.
+
+            Checked on the resolved path rather than the typed name, so naming a
+            hidden folder outright does not get around the listing filter. This
+            is what keeps .ssh, .aws and .gnupg out of reach of the bot.
+            """
+            if show_hidden:
+                return True
+            probe = target
+            while True:
+                if probe == root:
+                    return True
+                if is_hidden(probe):
+                    return False
+                if probe.parent == probe:
+                    return True
+                probe = probe.parent
+
+        page = 1
+        if trigger in {"files", "ls"} and (argument or "").strip().isdigit():
+            page = max(1, int(argument.strip()))
+
         try:
             if trigger == "pwd":
-                client.send_message(chat_id, f"📁 {relative_label(root, current)}\n{current}")
+                client.send_message(chat_id, f"📂 {relative_label(root, current)}\n{current}")
                 return
 
             if trigger == "cd":
@@ -336,7 +362,15 @@ class TelegramBridge(QObject):
                 if not target.is_dir():
                     client.send_message(chat_id, "That is not a folder.")
                     return
+                if not reachable(target):
+                    client.send_message(
+                        chat_id,
+                        "That is a hidden system folder. Mind keeps those out of "
+                        "Telegram because they often hold credentials.",
+                    )
+                    return
                 current = target
+                page = 1
 
             if trigger == "get":
                 entry = entry_at(self._browse_entries.get(chat_id, []), (argument or "").strip())
@@ -347,6 +381,13 @@ class TelegramBridge(QObject):
                 target = resolve_within_root(root, current, name)
                 if not target.is_file():
                     client.send_message(chat_id, "That is not a file I can send.")
+                    return
+                if not reachable(target):
+                    client.send_message(
+                        chat_id,
+                        "That is a hidden system file. Mind keeps those out of "
+                        "Telegram because they often hold credentials.",
+                    )
                     return
                 size = target.stat().st_size
                 if size > MAX_SEND_BYTES:
@@ -361,7 +402,7 @@ class TelegramBridge(QObject):
                 self.log.emit(f"Telegram: sent '{target.name}' to chat {chat_id}")
                 return
 
-            entries = list_directory(current)
+            entries = list_directory(current, include_hidden=show_hidden)
         except PathRefused as exc:
             client.send_message(chat_id, str(exc))
             return
@@ -371,7 +412,12 @@ class TelegramBridge(QObject):
 
         self._browse_dir[chat_id] = current
         self._browse_entries[chat_id] = entries
-        client.send_message(chat_id, format_listing(root, current, entries))
+        # Offer the everyday folders only at the top level, where the alternative
+        # is a long list of application data.
+        places = quick_places(root) if current == root else None
+        client.send_message(
+            chat_id, format_listing(root, current, entries, page=page, places=places)
+        )
 
     def _save_incoming_document(
         self,

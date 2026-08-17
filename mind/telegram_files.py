@@ -10,13 +10,18 @@ checked, which also defeats symlinks pointing out of the root and the usual
 from __future__ import annotations
 
 import os
+import stat as stat_module
 from dataclasses import dataclass
 from pathlib import Path
 
 
 # Telegram refuses documents larger than 50 MB from a bot.
 MAX_SEND_BYTES = 45 * 1024 * 1024
-MAX_ENTRIES = 60
+PAGE_SIZE = 25
+
+# The folders people actually want from a phone, offered first so the top level
+# is not a wall of application data.
+QUICK_PLACES = ("Desktop", "Documents", "Downloads", "Pictures", "Videos", "Music")
 
 
 class PathRefused(RuntimeError):
@@ -71,13 +76,35 @@ def resolve_within_root(root: Path, current: Path, target: str) -> Path:
     return resolved
 
 
-def list_directory(path: Path) -> list[Entry]:
+def is_hidden(entry_path: Path, name: str | None = None) -> bool:
+    """Whether an entry is application data rather than something a person filed.
+
+    Covers both conventions: a leading dot, which is how tools like .ssh, .aws
+    and .gnupg name themselves, and the Windows hidden and system attributes.
+    These are excluded by default, which keeps credential folders out of a
+    listing that travels over a chat bot as much as it reduces the clutter.
+    """
+    label = name if name is not None else entry_path.name
+    if label.startswith("."):
+        return True
+    try:
+        attributes = entry_path.stat().st_file_attributes  # Windows only
+    except (OSError, AttributeError):
+        return False
+    hidden = getattr(stat_module, "FILE_ATTRIBUTE_HIDDEN", 0x2)
+    system = getattr(stat_module, "FILE_ATTRIBUTE_SYSTEM", 0x4)
+    return bool(attributes & (hidden | system))
+
+
+def list_directory(path: Path, include_hidden: bool = False) -> list[Entry]:
     """Directories first, then files, both alphabetical."""
     entries: list[Entry] = []
     try:
         for item in os.scandir(path):
             try:
                 is_dir = item.is_dir()
+                if not include_hidden and is_hidden(Path(item.path), item.name):
+                    continue
                 size = 0 if is_dir else item.stat().st_size
             except OSError:
                 continue
@@ -86,6 +113,16 @@ def list_directory(path: Path) -> list[Entry]:
         raise PathRefused(f"Could not read that folder: {exc}") from exc
     entries.sort(key=lambda e: (not e.is_dir, e.name.lower()))
     return entries
+
+
+def quick_places(root: Path) -> list[Entry]:
+    """The common folders that actually exist directly under the root."""
+    found: list[Entry] = []
+    for name in QUICK_PLACES:
+        candidate = root / name
+        if candidate.is_dir():
+            found.append(Entry(name=name, is_dir=True, size=0))
+    return found
 
 
 def human_size(size: int) -> str:
@@ -105,26 +142,71 @@ def relative_label(root: Path, path: Path) -> str:
     return str(relative) if str(relative) != "." else "(top)"
 
 
-def format_listing(root: Path, path: Path, entries: list[Entry]) -> str:
-    """A numbered listing, so navigation needs only a number rather than typing names."""
-    header = f"📁 {relative_label(root, path)}"
-    if not entries:
-        return f"{header}\n\n(empty)"
+def breadcrumb(root: Path, path: Path) -> str:
+    label = relative_label(root, path)
+    if label == "(top)":
+        return "Home"
+    return "Home / " + label.replace(os.sep, " / ")
 
-    lines = [header, ""]
-    shown = entries[:MAX_ENTRIES]
-    for index, entry in enumerate(shown, start=1):
+
+def page_count(total: int) -> int:
+    return max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+
+def format_listing(
+    root: Path,
+    path: Path,
+    entries: list[Entry],
+    page: int = 1,
+    places: list[Entry] | None = None,
+) -> str:
+    """A numbered listing. Numbering runs over the whole folder, not the page, so
+    a number keeps meaning the same entry after paging."""
+    lines = [f"📂  {breadcrumb(root, path)}"]
+
+    if places:
+        lines += ["", "Jump to:", "   " + "   ".join(f"/cd {p.name}" for p in places)]
+
+    if not entries:
+        lines += ["", "This folder is empty."]
+        if path != root:
+            lines += ["", "/cd ..  go up"]
+        return "\n".join(lines)
+
+    folders = [e for e in entries if e.is_dir]
+    files = [e for e in entries if not e.is_dir]
+    total_pages = page_count(len(entries))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PAGE_SIZE
+    window = entries[start : start + PAGE_SIZE]
+
+    summary = []
+    if folders:
+        summary.append(f"{len(folders)} folder{'s' if len(folders) != 1 else ''}")
+    if files:
+        summary.append(f"{len(files)} file{'s' if len(files) != 1 else ''}")
+    lines.append("     " + " · ".join(summary))
+
+    width = len(str(start + len(window)))
+    section = None
+    for offset, entry in enumerate(window):
+        number = str(start + offset + 1).rjust(width)
+        label = "FOLDERS" if entry.is_dir else "FILES"
+        if label != section:
+            lines += ["", label]
+            section = label
         if entry.is_dir:
-            lines.append(f"{index}. 📁 {entry.name}")
+            lines.append(f"  {number}.  📁  {entry.name}")
         else:
-            lines.append(f"{index}. 📄 {entry.name}  ({human_size(entry.size)})")
-    if len(entries) > len(shown):
-        lines.append(f"\n… and {len(entries) - len(shown)} more")
-    lines += [
-        "",
-        "/cd <number>  open a folder      /cd ..  go up",
-        "/get <number> send me that file  /files  refresh",
-    ]
+            lines.append(f"  {number}.  📄  {entry.name}   {human_size(entry.size)}")
+
+    lines.append("")
+    if total_pages > 1:
+        lines.append(f"Page {page} of {total_pages} — /files {page + 1} for the next")
+    footer = ["/cd <n> open", "/get <n> download"]
+    if path != root:
+        footer.append("/cd .. up")
+    lines.append("  ·  ".join(footer))
     return "\n".join(lines)
 
 

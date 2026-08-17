@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from mind.telegram_files import (
+    is_hidden,
     Entry,
     PathRefused,
     entry_at,
@@ -95,6 +96,43 @@ class ListingTests(unittest.TestCase):
     def test_missing_folder_raises_rather_than_returning_nothing(self):
         with self.assertRaises(PathRefused):
             list_directory(self.root / "does-not-exist")
+
+
+class HiddenEntryTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        (self.root / ".aws").mkdir()
+        (self.root / ".aws" / "credentials").write_text("secret", encoding="utf-8")
+        (self.root / ".gitconfig").write_text("config", encoding="utf-8")
+        (self.root / "Documents").mkdir()
+        (self.root / "report.pdf").write_text("pdf", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_dot_entries_are_left_out_by_default(self):
+        names = [e.name for e in list_directory(self.root)]
+        self.assertEqual(names, ["Documents", "report.pdf"])
+
+    def test_dot_entries_can_be_shown_on_request(self):
+        names = [e.name for e in list_directory(self.root, include_hidden=True)]
+        self.assertIn(".aws", names)
+
+    def test_credential_folders_are_recognised_as_hidden(self):
+        for name in (".aws", ".ssh", ".gnupg", ".azure", ".docker"):
+            self.assertTrue(is_hidden(self.root / name, name), name)
+
+    def test_ordinary_folders_are_not_hidden(self):
+        self.assertFalse(is_hidden(self.root / "Documents", "Documents"))
+        self.assertFalse(is_hidden(self.root / "report.pdf", "report.pdf"))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows attributes")
+    def test_windows_hidden_attribute_is_honoured(self):
+        marked = self.root / "AppData"
+        marked.mkdir()
+        os.system(f'attrib +h "{marked}"')
+        self.assertTrue(is_hidden(marked, marked.name))
+        self.assertNotIn("AppData", [e.name for e in list_directory(self.root)])
 
 
 class SelectionTests(unittest.TestCase):

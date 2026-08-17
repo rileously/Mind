@@ -91,6 +91,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram_files_enabled": False,
     "telegram_files_root": "",
     "telegram_inbox": "",
+    # Hidden and dot-prefixed entries are excluded from browsing. They are almost
+    # all application data, and several of them (.ssh, .aws, .gnupg) hold
+    # credentials that should not be reachable through a chat bot.
+    "telegram_show_hidden": False,
     # Process names Mind's engine stays out of. Telegram is excluded by default
     # because the Telegram bridge answers the same triggers from the chat, so
     # typing "?fix" in Telegram Desktop would be rewritten in the message box
