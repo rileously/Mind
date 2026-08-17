@@ -151,6 +151,20 @@ try {
         if ($startedProcess.HasExited) {
             throw "The updated application exited during its startup check (code $($startedProcess.ExitCode))."
         }
+        # Still running is not the same as working. A build that raises before its
+        # window exists shows a PyInstaller traceback dialog, and that dialog keeps
+        # the process alive - so the check above passed an executable that could
+        # not start at all, and the previous build was never restored. Look for
+        # the dialog by name.
+        $crashDialog = Get-Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.MainWindowTitle -and
+                $_.MainWindowTitle -like "*Unhandled exception*" -and
+                (try { $_.Path -eq $targetPath } catch { $false })
+            }
+        if ($crashDialog) {
+            throw "The updated application could not start: $($crashDialog[0].MainWindowTitle)."
+        }
     } catch {
         $startupError = $_.Exception.Message
         Copy-Item -LiteralPath $backupPath -Destination $targetPath -Force -ErrorAction Stop

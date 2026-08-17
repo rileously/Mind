@@ -923,6 +923,7 @@ class SettingsPage(QWidget):
             "the paper size and what the document is. Printing spends paper and ink "
             "while you may not be in the room, so it is off until you turn it on.",
             self.telegram_print,
+            "✈",
         )
 
         self.telegram_control = ToggleSwitch()
