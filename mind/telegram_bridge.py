@@ -42,6 +42,24 @@ from .telegram_files import (
     search_files,
     unique_destination,
 )
+from .telegram_ui import (
+    CB_ABORT,
+    CB_MEDIA,
+    CB_MENU,
+    CB_REFRESH,
+    REACTION_SAVED,
+    REACTION_WORKING,
+    bot_commands,
+    build_abort_keyboard,
+    build_copy_keyboard,
+    build_main_menu,
+    build_media_keyboard,
+    build_power_keyboard,
+    commands_signature,
+    media_key_at,
+    menu_action_at,
+    menu_text,
+)
 from .telegram_system import (
     SystemActionError,
     abort_shutdown,
@@ -105,6 +123,9 @@ class TelegramBridge(QObject):
         self._browse_dir: dict[int, Path] = {}
         self._browse_entries: dict[int, list] = {}
         self._search_hits: dict[int, list] = {}
+        # What was last published to Telegram's command menu, so it is only
+        # re-sent when the settings behind it actually change.
+        self._published_commands = ""
 
     # -- lifecycle -------------------------------------------------------
 
@@ -170,6 +191,10 @@ class TelegramBridge(QObject):
                     name = identity.get("username") or identity.get("first_name") or "bot"
                     self.log.emit(f"Telegram bridge connected as @{name}")
                     self.status_changed.emit("running")
+                    # A reconnect may follow a settings change, so the menu is
+                    # republished rather than assumed to still be right.
+                    self._published_commands = ""
+                self._publish_commands(self._client, config)
                 updates = self._client.get_updates(self._offset, timeout=POLL_TIMEOUT_SECONDS)
             except TelegramError as exc:
                 self.log.emit(f"Telegram: {exc}")
@@ -200,6 +225,22 @@ class TelegramBridge(QObject):
             if thread is not None and thread.isInterruptionRequested():
                 return
             time.sleep(0.25)
+
+    def _publish_commands(self, client: TelegramClient, config: dict) -> None:
+        """Keep Telegram's command menu matching what is switched on.
+
+        Sent through the same poll loop rather than from the settings page: the
+        page has no client, and this thread already reloads the configuration on
+        every pass.
+        """
+        commands = self.store.load_commands()
+        signature = commands_signature(config, commands)
+        if signature == self._published_commands:
+            return
+        client.set_my_commands(bot_commands(config, commands))
+        client.set_chat_menu_button()
+        self._published_commands = signature
+        self.log.emit("Telegram: updated the command menu.")
 
     # -- dispatch --------------------------------------------------------
 
@@ -260,8 +301,18 @@ class TelegramBridge(QObject):
         request = parse_message(text, prefix)
         trigger = (request.trigger or "").lower()
 
-        if trigger in {"start", "help"}:
-            client.send_message(chat_id, self._help_text(config))
+        if trigger in {"start", "menu"}:
+            client.send_message(
+                chat_id,
+                menu_text(config, _host_name()),
+                reply_markup=build_main_menu(config),
+                html=True,
+            )
+            return
+        if trigger == "help":
+            client.send_message(
+                chat_id, self._help_text(config), reply_markup=build_main_menu(config)
+            )
             return
         if trigger == "clip":
             self.clipboard_requested.emit(chat_id)
@@ -293,7 +344,12 @@ class TelegramBridge(QObject):
                 client.send_message(chat_id, "Send some text after /save to store it.")
                 return
             self.clipboard_received.emit(payload)
-            client.send_message(chat_id, "Saved to your PC's clipboard history.")
+            # The reaction is the confirmation: the text is already on screen,
+            # directly above, and a reply would only push it further away.
+            if isinstance(message_id, int):
+                client.set_message_reaction(chat_id, message_id, REACTION_SAVED)
+            else:
+                client.send_message(chat_id, "Saved to your PC's clipboard history.")
             return
 
         commands = self.store.load_commands()
@@ -326,6 +382,10 @@ class TelegramBridge(QObject):
             return
 
         client.send_chat_action(chat_id)
+        # A transform can take a few seconds. The typing indicator says something
+        # is happening; the reaction says which message it is happening to.
+        if isinstance(message_id, int):
+            client.set_message_reaction(chat_id, message_id, REACTION_WORKING)
         try:
             result = transform_text(
                 config,
@@ -356,19 +416,46 @@ class TelegramBridge(QObject):
             self.log.emit(f"Telegram: ignored a button tap from unlisted chat {chat_id}")
             client.answer_callback_query(callback_id)
             return
-        if not bool(config.get("telegram_files_enabled", False)):
+        chat_id = int(chat_id)
+        action, index = parse_callback(str(callback.get("data", "")))
+
+        if action == CB_NOOP:
+            client.answer_callback_query(callback_id)
+            return
+
+        if action == CB_MENU:
+            self._show_menu(client, chat_id, callback_id, message_id, index, config)
+            return
+
+        if action == CB_MEDIA:
+            self._handle_media_tap(client, chat_id, callback_id, index, config)
+            return
+
+        if action == CB_ABORT:
+            if not bool(config.get("telegram_power_enabled", False)):
+                client.answer_callback_query(callback_id, "Shutdown is switched off.")
+                return
+            try:
+                abort_shutdown()
+            except SystemActionError as exc:
+                client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+                return
+            client.answer_callback_query(callback_id, "Stopped.")
+            client.edit_message_text(
+                chat_id, int(message_id), "Cancelled. The PC will stay on."
+            )
+            return
+
+        # Everything from here on browses files, so this is where that setting
+        # applies. Checking it earlier would refuse menu and power taps with a
+        # message about file access.
+        if not bool(config.get("telegram_files_enabled", False)) and action != CB_POWER:
             client.answer_callback_query(callback_id, "File access is switched off.")
             return
 
-        chat_id = int(chat_id)
-        action, index = parse_callback(str(callback.get("data", "")))
         root = self._files_root(config)
         current = self._browse_dir.get(chat_id, root)
         entries = self._browse_entries.get(chat_id, [])
-
-        if action == CB_NOOP:
-            client.answer_callback_query(callback_id, "Cancelled.")
-            return
 
         if action == CB_POWER:
             if not bool(config.get("telegram_power_enabled", False)):
@@ -392,7 +479,8 @@ class TelegramBridge(QObject):
             client.edit_message_text(
                 chat_id,
                 int(message_id),
-                f"{label} in {POWER_DELAY_SECONDS} seconds. Send /abort to stop it.",
+                f"{label} in {POWER_DELAY_SECONDS} seconds.",
+                reply_markup=build_abort_keyboard(),
             )
             return
 
@@ -405,6 +493,10 @@ class TelegramBridge(QObject):
                 page = 1
             elif action == CB_PAGE:
                 page = index or 1
+            elif action == CB_REFRESH:
+                # Same folder, read again: a file may have finished downloading
+                # or been added since the listing was drawn.
+                page = 1
             elif action == CB_FIND_OPEN:
                 hits = self._search_hits.get(chat_id, [])
                 if index is None or not 0 <= index < len(hits):
@@ -461,6 +553,93 @@ class TelegramBridge(QObject):
             build_keyboard(entries, page, current == root, places),
         )
 
+    def _show_menu(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Run a home menu button, or draw the menu when the tap carried no action.
+
+        The actions are the same code paths the typed commands use, so a button
+        and a command can never drift apart in what they do.
+        """
+        action = menu_action_at(index)
+        if action is None:
+            client.answer_callback_query(callback_id)
+            if isinstance(message_id, int):
+                client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    menu_text(config, _host_name()),
+                    reply_markup=build_main_menu(config),
+                    html=True,
+                )
+            else:
+                client.send_message(
+                    chat_id,
+                    menu_text(config, _host_name()),
+                    reply_markup=build_main_menu(config),
+                    html=True,
+                )
+            return
+
+        # A setting can have been switched off since the message was sent.
+        if action.needs and not bool(config.get(action.needs, False)):
+            client.answer_callback_query(
+                callback_id, "That is switched off in Mind's Preferences.", alert=True
+            )
+            return
+
+        client.answer_callback_query(callback_id)
+        if action.key == "clip":
+            self.clipboard_requested.emit(chat_id)
+        elif action.key == "commands":
+            client.send_message(chat_id, self._command_list(config))
+        elif action.key == "find":
+            client.send_message(
+                chat_id,
+                "Send /find followed by part of a name, for example:\n/find invoice",
+            )
+        elif action.key == "media":
+            client.send_message(
+                chat_id, "🎵  Media keys for this PC.", reply_markup=build_media_keyboard()
+            )
+        elif action.key == "files":
+            self._handle_files(client, chat_id, "files", "", config)
+        else:
+            self._handle_system(client, chat_id, action.key, "", config)
+
+    def _handle_media_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Press a media key without adding a message to the chat for each tap."""
+        if not bool(config.get("telegram_control_enabled", False)):
+            client.answer_callback_query(
+                callback_id, "PC controls are switched off.", alert=True
+            )
+            return
+        key = media_key_at(index)
+        if not key:
+            client.answer_callback_query(callback_id)
+            return
+        try:
+            press_media_key(key)
+        except SystemActionError as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+            return
+        # The toast is the whole reply: volume goes up several taps in a row, and
+        # each one becoming a message would bury everything else.
+        client.answer_callback_query(callback_id, key)
+
     def _handle_system(
         self,
         client: TelegramClient,
@@ -489,8 +668,21 @@ class TelegramBridge(QObject):
                 return
 
             if trigger == "media":
+                if not (argument or "").strip():
+                    # No argument is not a mistake to correct but a request for
+                    # the controls themselves.
+                    client.send_message(
+                        chat_id,
+                        "🎵  Media keys for this PC.",
+                        reply_markup=build_media_keyboard(),
+                    )
+                    return
                 press_media_key(argument)
-                client.send_message(chat_id, f"Sent {argument.strip().lower()}.")
+                client.send_message(
+                    chat_id,
+                    f"Sent {argument.strip().lower()}.",
+                    reply_markup=build_media_keyboard(),
+                )
                 return
 
             if trigger == "lock":
@@ -523,18 +715,10 @@ class TelegramBridge(QObject):
                 client.send_message(
                     chat_id,
                     f"{verb} this PC?\n\nIt will happen after {POWER_DELAY_SECONDS} seconds, "
-                    "and /abort stops it until then.",
-                    reply_markup={
-                        "inline_keyboard": [
-                            [
-                                {
-                                    "text": f"Yes, {verb.lower()}",
-                                    "callback_data": f"{CB_POWER}:{1 if trigger == 'shutdown' else 2}",
-                                },
-                                {"text": "Cancel", "callback_data": CB_NOOP},
-                            ]
-                        ]
-                    },
+                    "and there is a button to stop it until then.",
+                    reply_markup=build_power_keyboard(
+                        trigger, f"{CB_POWER}:{1 if trigger == 'shutdown' else 2}"
+                    ),
                 )
                 return
         except SystemActionError as exc:
@@ -827,6 +1011,16 @@ class TelegramBridge(QObject):
         except TelegramError as exc:
             self.log.emit(f"Telegram: could not send a file ({exc})")
 
+    def send_image(self, chat_id: int, path, caption: str = "") -> None:
+        """Send an image so it shows in the chat instead of arriving as a file."""
+        client = self._client
+        if client is None:
+            return
+        try:
+            client.send_photo(int(chat_id), str(path), caption=caption)
+        except TelegramError as exc:
+            self.log.emit(f"Telegram: could not send an image ({exc})")
+
     def send_text(self, chat_id: int, text: str) -> None:
         client = self._client
         if client is None:
@@ -835,6 +1029,23 @@ class TelegramBridge(QObject):
             client.send_message(int(chat_id), text)
         except TelegramError as exc:
             self.log.emit(f"Telegram: could not send a reply ({exc})")
+
+    def send_clipboard(self, chat_id: int, text: str) -> None:
+        """Send clipboard text with a button that copies it on the phone.
+
+        The point of /clip is usually to paste somewhere else, and selecting text
+        out of a chat message by hand is the fiddliest part of doing that.
+        """
+        client = self._client
+        if client is None:
+            return
+        body = text if text.strip() else "Your PC clipboard is empty."
+        try:
+            client.send_message(
+                int(chat_id), body, reply_markup=build_copy_keyboard(text)
+            )
+        except TelegramError as exc:
+            self.log.emit(f"Telegram: could not send the clipboard ({exc})")
 
     def _help_text(self, config: dict) -> str:
         prefix = str(config.get("prefix", "?"))
@@ -851,6 +1062,7 @@ class TelegramBridge(QObject):
             "",
             "Send a photo and Mind replies with the text it can read from it.",
             "",
+            "/menu      buttons for everything below",
             "/clip      send your PC's clipboard here",
             "/save ...  store text in your PC's clipboard history",
             "/commands  list the commands you can use",
@@ -876,7 +1088,7 @@ class TelegramBridge(QObject):
                 "/screen       send a screenshot",
                 "/lock         lock the session",
                 "/sleep        put it to sleep",
-                "/media next   play, pause, next, prev, mute, volup, voldown",
+                "/media        play, pause, volume, as buttons",
             ]
             if config.get("telegram_power_enabled", False):
                 lines += ["/shutdown, /restart, /abort"]

@@ -1734,9 +1734,8 @@ class MindWindow(QMainWindow):
     def _on_telegram_clipboard_requested(self, chat_id: object) -> None:
         clipboard = QApplication.clipboard()
         text = clipboard.text() if clipboard else ""
-        self.telegram.send_text(
-            int(chat_id), text if text.strip() else "Your PC clipboard is empty."
-        )
+        # Sent through send_clipboard so it arrives with a copy button.
+        self.telegram.send_clipboard(int(chat_id), text)
 
     def _on_telegram_clipboard_received(self, text: str) -> None:
         clipboard = QApplication.clipboard()
@@ -1822,7 +1821,9 @@ class MindWindow(QMainWindow):
             if not shot.save(str(destination), "PNG"):
                 self.telegram.send_text(target, "Could not save the screenshot.")
                 return
-            self.telegram.send_file(target, destination, caption="Screen")
+            # As a photo: a screenshot asked for from a phone is meant to be
+            # looked at, not downloaded first.
+            self.telegram.send_image(target, destination, caption="Screen")
         finally:
             # A screenshot can hold anything that was on screen; do not leave it
             # sitting in temp once it has been sent.

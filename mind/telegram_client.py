@@ -23,6 +23,9 @@ API_ROOT = "https://api.telegram.org"
 DEFAULT_TIMEOUT = 35.0
 # Telegram rejects text messages longer than this.
 MAX_MESSAGE_CHARS = 4096
+# copy_text buttons carry their payload in the button itself, and Telegram caps
+# it. Longer text has to be offered another way.
+MAX_COPY_TEXT_CHARS = 256
 
 
 class TelegramError(RuntimeError):
@@ -32,6 +35,40 @@ class TelegramError(RuntimeError):
 def _redact(message: str, token: str) -> str:
     """Never let a token reach a log or an error dialog."""
     return message.replace(token, "***") if token else message
+
+
+def escape_html(text: str) -> str:
+    """Make text safe to send with parse_mode HTML.
+
+    Formatting is opt-in per message precisely because most of what Mind sends is
+    someone's own text, a path, or a model's output. An unescaped "<" in any of
+    those would have Telegram reject the whole message.
+    """
+    return (
+        str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+
+def split_for_telegram(body: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Cut a long message into sendable pieces, preferring line breaks.
+
+    Splitting mid-tag would leave Telegram with unbalanced HTML and mid-word is
+    simply unpleasant to read, so a newline near the end of the window is used
+    when there is one.
+    """
+    text = body if body.strip() else "(empty result)"
+    chunks: list[str] = []
+    while len(text) > limit:
+        window = text[:limit]
+        cut = window.rfind("\n")
+        # Only honour a break that is not pathologically early, or a single long
+        # paragraph would be sliced into slivers.
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    chunks.append(text)
+    return chunks
 
 
 class TelegramClient:
@@ -95,22 +132,29 @@ class TelegramClient:
         text: str,
         reply_to: int | None = None,
         reply_markup: dict[str, Any] | None = None,
+        html: bool = False,
     ) -> None:
-        body = text if text.strip() else "(empty result)"
-        chunks = [
-            body[index : index + MAX_MESSAGE_CHARS]
-            for index in range(0, len(body), MAX_MESSAGE_CHARS)
-        ]
         # Split rather than truncate: a transformed document is exactly the case
         # where losing the tail without saying so would be worst.
+        chunks = split_for_telegram(text)
         for position, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": chat_id,
                 "text": chunk,
-                "disable_web_page_preview": True,
+                # link_preview_options rather than disable_web_page_preview, which
+                # Telegram has replaced.
+                "link_preview_options": {"is_disabled": True},
             }
+            if html:
+                payload["parse_mode"] = "HTML"
             if reply_to is not None and position == 0:
-                payload["reply_to_message_id"] = reply_to
+                # reply_parameters is the current form; reply_to_message_id is
+                # the retired one.
+                payload["reply_parameters"] = {
+                    "message_id": reply_to,
+                    # The message may be gone by the time a slow transform ends.
+                    "allow_sending_without_reply": True,
+                }
             # Buttons belong on the last chunk, where they end up next to the
             # bottom of the message rather than buried mid-conversation.
             if reply_markup is not None and position == len(chunks) - 1:
@@ -123,14 +167,17 @@ class TelegramClient:
         message_id: int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
+        html: bool = False,
     ) -> None:
         """Update a message in place, so browsing does not fill the chat."""
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text[:MAX_MESSAGE_CHARS],
-            "disable_web_page_preview": True,
+            "link_preview_options": {"is_disabled": True},
         }
+        if html:
+            payload["parse_mode"] = "HTML"
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         try:
@@ -141,13 +188,56 @@ class TelegramClient:
             if "not modified" not in str(exc).lower():
                 raise
 
-    def answer_callback_query(self, callback_id: str, text: str = "") -> None:
+    def answer_callback_query(
+        self, callback_id: str, text: str = "", alert: bool = False
+    ) -> None:
         """Acknowledge a tap. Without this the button spins on the client."""
         payload: dict[str, Any] = {"callback_query_id": callback_id}
         if text:
             payload["text"] = text[:200]
+        if alert:
+            # A refusal needs to be read, not glimpsed as a toast.
+            payload["show_alert"] = True
         try:
             self._call("answerCallbackQuery", payload)
+        except TelegramError:
+            pass
+
+    def set_my_commands(self, commands: list[dict[str, str]]) -> None:
+        """Publish the command list Telegram shows in its own menu.
+
+        This is what puts Mind's commands behind the "/" button and the menu
+        beside the message box, so they can be picked from a list instead of
+        remembered and typed.
+        """
+        try:
+            self._call("setMyCommands", {"commands": commands[:100]})
+        except TelegramError:
+            # Cosmetic: the commands still work when typed.
+            pass
+
+    def set_chat_menu_button(self) -> None:
+        """Make the button beside the message box open the command list."""
+        try:
+            self._call("setChatMenuButton", {"menu_button": {"type": "commands"}})
+        except TelegramError:
+            pass
+
+    def set_message_reaction(self, chat_id: int, message_id: int, emoji: str) -> None:
+        """React to a message instead of sending one.
+
+        An acknowledgement that carries no information does not deserve its own
+        message: a reaction says "got it" without pushing the conversation up.
+        """
+        try:
+            self._call(
+                "setMessageReaction",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": emoji}],
+                },
+            )
         except TelegramError:
             pass
 
@@ -158,11 +248,43 @@ class TelegramClient:
             # Purely cosmetic feedback; never fail a request over it.
             pass
 
-    def send_document(self, chat_id: int, path: str, caption: str = "") -> None:
+    def send_document(
+        self,
+        chat_id: int,
+        path: str,
+        caption: str = "",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        self._upload("sendDocument", "document", chat_id, path, caption, reply_markup)
+
+    def send_photo(
+        self,
+        chat_id: int,
+        path: str,
+        caption: str = "",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        """Send an image as a photo, which shows in the chat rather than as a file.
+
+        Worth the separate call for screenshots: the whole point of asking for one
+        from a phone is to look at it, not to download it first.
+        """
+        self._upload("sendPhoto", "photo", chat_id, path, caption, reply_markup)
+
+    def _upload(
+        self,
+        method: str,
+        field: str,
+        chat_id: int,
+        path: str,
+        caption: str,
+        reply_markup: dict[str, Any] | None,
+    ) -> None:
         """Upload a file with a hand-rolled multipart body.
 
-        sendDocument cannot take JSON, and the standard library has no multipart
-        encoder, so the body is assembled here rather than adding a dependency.
+        The upload methods cannot take JSON, and the standard library has no
+        multipart encoder, so the body is assembled here rather than adding a
+        dependency.
         """
         from pathlib import Path as _Path
 
@@ -183,10 +305,17 @@ class TelegramClient:
                 b"",
                 caption.encode("utf-8"),
             ]
+        if reply_markup is not None:
+            parts += [
+                line,
+                b'Content-Disposition: form-data; name="reply_markup"',
+                b"",
+                json.dumps(reply_markup).encode("utf-8"),
+            ]
         filename = source.name.replace('"', "")
         parts += [
             line,
-            f'Content-Disposition: form-data; name="document"; filename="{filename}"'.encode(
+            f'Content-Disposition: form-data; name="{field}"; filename="{filename}"'.encode(
                 "utf-8"
             ),
             b"Content-Type: application/octet-stream",
@@ -194,7 +323,7 @@ class TelegramClient:
         ]
         body = b"\r\n".join(parts) + b"\r\n" + payload + f"\r\n--{boundary}--\r\n".encode()
 
-        url = f"{API_ROOT}/bot{self._token}/sendDocument"
+        url = f"{API_ROOT}/bot{self._token}/{method}"
         request = urllib.request.Request(
             url,
             data=body,

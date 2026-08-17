@@ -14,6 +14,12 @@ import stat as stat_module
 from dataclasses import dataclass
 from pathlib import Path
 
+# The listing's own actions are defined below; these belong to the wider
+# interface and are defined once, in telegram_ui, so both use the same codes.
+# Re-exported here because callers import the browsing vocabulary from this
+# module.
+from .telegram_ui import CB_MENU, CB_NOOP, CB_REFRESH
+
 
 # Telegram refuses documents larger than 50 MB from a bot.
 MAX_SEND_BYTES = 45 * 1024 * 1024
@@ -262,7 +268,12 @@ def build_search_keyboard(hits: list[Hit]) -> dict:
                 }
             ]
         )
-    rows.append([{"text": "🏠 Home", "callback_data": CB_HOME}])
+    rows.append(
+        [
+            {"text": "🏠 Home", "callback_data": CB_HOME},
+            {"text": "☰ Menu", "callback_data": CB_MENU},
+        ]
+    )
     return {"inline_keyboard": rows}
 
 
@@ -314,7 +325,6 @@ CB_GET = "g"
 CB_UP = "u"
 CB_HOME = "h"
 CB_PAGE = "p"
-CB_NOOP = "x"
 CB_FIND_OPEN = "f"
 
 # Rows of buttons, kept short so the message stays readable on a phone.
@@ -399,6 +409,12 @@ def build_keyboard(
         navigation.append(
             {"text": "◀ Back", "callback_data": callback_data(CB_PAGE, page - 1)}
         )
+    if total_pages > 1:
+        # Where you are in the folder, on the button between the arrows. It leads
+        # nowhere on purpose; it is a label with a tappable shape.
+        navigation.append(
+            {"text": f"{page} / {total_pages}", "callback_data": CB_NOOP}
+        )
     if page < total_pages:
         navigation.append(
             {"text": "Next ▶", "callback_data": callback_data(CB_PAGE, page + 1)}
@@ -406,12 +422,15 @@ def build_keyboard(
     if navigation:
         rows.append(navigation)
 
-    place_row: list[dict] = []
+    # One row that is always in the same place, so the way out of a folder does
+    # not move around as the listing changes.
+    actions: list[dict] = []
     if not at_root:
-        place_row.append({"text": "⬆ Up", "callback_data": CB_UP})
-        place_row.append({"text": "🏠 Home", "callback_data": CB_HOME})
-    if place_row:
-        rows.append(place_row)
+        actions.append({"text": "⬆ Up", "callback_data": CB_UP})
+        actions.append({"text": "🏠 Home", "callback_data": CB_HOME})
+    actions.append({"text": "⟳ Refresh", "callback_data": CB_REFRESH})
+    actions.append({"text": "☰ Menu", "callback_data": CB_MENU})
+    rows.append(actions)
 
     return {"inline_keyboard": rows}
 
