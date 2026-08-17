@@ -89,6 +89,7 @@ from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
+from .telegram_system import read_running_apps, read_visible_apps
 from .watchers import (
     APP_KINDS as WATCHER_APP_KINDS,
     FOLDER_NEW as WATCHER_FOLDER_NEW,
@@ -673,10 +674,25 @@ class WatcherDialog(QDialog):
         layout.addLayout(threshold_row)
 
         self.target = QLineEdit(watcher.target)
+        # Apps are picked from what is actually on this PC rather than typed
+        # from memory: nobody knows a program is called ApplicationFrameHost.exe
+        # until they look. Editable, because the point may be to watch for a game
+        # that is not running yet.
+        self.app_picker = QComboBox()
+        self.app_picker.setEditable(True)
+        self.app_picker.setInsertPolicy(QComboBox.NoInsert)
+        self.app_picker.setMinimumWidth(240)
+        completer = self.app_picker.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            # Matches anywhere in the name, so "chrome" finds it however the
+            # program's file name begins.
+            completer.setFilterMode(Qt.MatchContains)
         self.browse = QPushButton("Choose…")
         self.browse.clicked.connect(self._choose_folder)
         target_row = QHBoxLayout()
         target_row.addWidget(self.target, 1)
+        target_row.addWidget(self.app_picker, 1)
         target_row.addWidget(self.browse)
         self.target_label = QLabel("")
         layout.addWidget(self.target_label)
@@ -714,17 +730,58 @@ class WatcherDialog(QDialog):
         self.threshold.setVisible(wants_number)
         self.threshold_label.setVisible(wants_number)
         self.threshold_label.setText(kind.unit)
-        self.target.setVisible(kind.needs_target)
+        is_app = kind.key in WATCHER_APP_KINDS
+        self.target.setVisible(kind.needs_target and not is_app)
+        self.app_picker.setVisible(is_app)
         self.target_label.setVisible(kind.needs_target)
         self.browse.setVisible(kind.key == WATCHER_FOLDER_NEW)
         if kind.key == WATCHER_FOLDER_NEW:
             self.target_label.setText("Folder to watch")
-        elif kind.key in WATCHER_APP_KINDS:
-            self.target_label.setText("Application, for example game.exe")
+        elif is_app:
+            self._fill_app_picker()
+            self.target_label.setText("Application — pick one, or type a name")
         else:
             self.target_label.setText("Drive, for example C:\\")
         if wants_number and not self.threshold.value():
             self.threshold.setValue(int(kind.default_threshold))
+
+    def _fill_app_picker(self) -> None:
+        """List what is on this PC, the ones with windows first.
+
+        Filled when the app kinds are chosen rather than at startup, so the list
+        is of what is running now and costs nothing for every other kind.
+        """
+        if self.app_picker.count():
+            return
+        chosen = self._watcher.target
+        try:
+            visible = read_visible_apps()
+            running = sorted(read_running_apps())
+        except OSError:
+            visible, running = [], []
+        seen: set[str] = set()
+        for name, title in visible:
+            # The window title is what a person recognises; the process name is
+            # what is actually stored.
+            self.app_picker.addItem(f"{name}  —  {title[:38]}" if title else name, name)
+            seen.add(name)
+        for name in running:
+            if name not in seen:
+                self.app_picker.addItem(name, name)
+                seen.add(name)
+        if chosen:
+            index = self.app_picker.findData(chosen)
+            if index >= 0:
+                self.app_picker.setCurrentIndex(index)
+            else:
+                # A program that is not running now still has to be editable.
+                # The index is cleared first, or the combo keeps pointing at its
+                # first row while showing this text.
+                self.app_picker.setCurrentIndex(-1)
+                self.app_picker.setCurrentText(chosen)
+        else:
+            self.app_picker.setCurrentIndex(-1)
+            self.app_picker.setCurrentText("")
 
     def _choose_folder(self) -> None:
         chosen = QFileDialog.getExistingDirectory(self, "Folder to watch", self.target.text())
@@ -733,11 +790,23 @@ class WatcherDialog(QDialog):
 
     def result_watcher(self) -> Watcher:
         kind = str(self.kind.currentData())
+        if kind in WATCHER_APP_KINDS:
+            # What is written in the box decides. When it still reads as the row
+            # that was picked, that row's process name is used; when it has been
+            # typed over, the typing wins - the app may not be running yet, so it
+            # cannot be required to appear in the list.
+            index = self.app_picker.currentIndex()
+            typed = self.app_picker.currentText().strip()
+            label = self.app_picker.itemText(index) if index >= 0 else ""
+            stored = str(self.app_picker.itemData(index) or "") if index >= 0 else ""
+            target = stored if stored and typed == label else typed.split("  —  ")[0].strip()
+        else:
+            target = self.target.text().strip()
         return replace(
             self._watcher,
             kind=kind,
             threshold=float(self.threshold.value()),
-            target=self.target.text().strip(),
+            target=target,
             cooldown_minutes=int(self.cooldown.value()),
         )
 

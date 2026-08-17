@@ -249,5 +249,90 @@ class RunningAppsPanelTests(unittest.TestCase):
         self.assertIn("closed", self.client.edited[-1]["text"])
 
 
+class AppPickerTests(unittest.TestCase):
+    """Apps are picked from what is on the PC, not typed from memory."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def dialog(self, kind: str, target: str = ""):
+        from mind.main_window import WatcherDialog
+        from mind.watchers import new_watcher
+
+        listed = [("game.exe", "Doom"), ("chrome.exe", "News")]
+        running = frozenset({"game.exe", "chrome.exe", "svchost.exe"})
+        with mock.patch("mind.main_window.read_visible_apps", return_value=listed), mock.patch(
+            "mind.main_window.read_running_apps", return_value=running
+        ):
+            made = WatcherDialog(new_watcher(kind, target=target))
+        self.addCleanup(made.deleteLater)
+        return made
+
+    def test_the_app_kinds_offer_a_list_instead_of_a_text_box(self):
+        dialog = self.dialog(APP_OPENED)
+        self.assertTrue(dialog.app_picker.isVisibleTo(dialog))
+        self.assertFalse(dialog.target.isVisibleTo(dialog))
+        self.assertGreater(dialog.app_picker.count(), 0)
+
+    def test_apps_with_a_window_come_first_and_carry_their_title(self):
+        # The title is what a person recognises; the process name is what is
+        # stored and matched.
+        dialog = self.dialog(APP_OPENED)
+        self.assertIn("Doom", dialog.app_picker.itemText(0))
+        self.assertEqual(dialog.app_picker.itemData(0), "game.exe")
+
+    def test_everything_running_is_offered_even_without_a_window(self):
+        dialog = self.dialog(APP_OPENED)
+        offered = {dialog.app_picker.itemData(i) for i in range(dialog.app_picker.count())}
+        self.assertIn("svchost.exe", offered)
+
+    def test_nothing_is_listed_twice(self):
+        dialog = self.dialog(APP_OPENED)
+        offered = [dialog.app_picker.itemData(i) for i in range(dialog.app_picker.count())]
+        self.assertEqual(len(offered), len(set(offered)))
+
+    def test_picking_one_stores_the_process_name_not_the_label(self):
+        dialog = self.dialog(APP_OPENED)
+        dialog.app_picker.setCurrentIndex(0)
+        self.assertEqual(dialog.result_watcher().target, "game.exe")
+
+    def test_an_app_that_is_not_running_yet_can_still_be_typed(self):
+        # The usual case for a game: you set the watcher before you play.
+        dialog = self.dialog(APP_OPENED)
+        dialog.app_picker.setCurrentIndex(-1)
+        dialog.app_picker.setCurrentText("eldenring.exe")
+        self.assertEqual(dialog.result_watcher().target, "eldenring.exe")
+
+    def test_editing_an_existing_watcher_starts_on_its_app(self):
+        dialog = self.dialog(APP_OPENED, target="chrome.exe")
+        self.assertEqual(dialog.result_watcher().target, "chrome.exe")
+
+    def test_a_saved_app_no_longer_running_is_kept_rather_than_lost(self):
+        dialog = self.dialog(APP_CLOSED, target="eldenring.exe")
+        self.assertEqual(dialog.result_watcher().target, "eldenring.exe")
+
+    def test_the_other_kinds_keep_their_own_field(self):
+        from mind.watchers import DISK_LOW, FOLDER_NEW
+
+        disk = self.dialog(DISK_LOW, target="C:\\")
+        self.assertFalse(disk.app_picker.isVisibleTo(disk))
+        self.assertEqual(disk.result_watcher().target, "C:\\")
+        folder = self.dialog(FOLDER_NEW, target="C:\\Downloads")
+        self.assertTrue(folder.browse.isVisibleTo(folder))
+        self.assertEqual(folder.result_watcher().target, "C:\\Downloads")
+
+    def test_the_list_can_be_searched_by_part_of_a_name(self):
+        from PySide6.QtCore import Qt
+
+        dialog = self.dialog(APP_OPENED)
+        completer = dialog.app_picker.completer()
+        self.assertIsNotNone(completer)
+        self.assertEqual(completer.filterMode(), Qt.MatchContains)
+        self.assertEqual(completer.caseSensitivity(), Qt.CaseInsensitive)
+
+
 if __name__ == "__main__":
     unittest.main()
