@@ -142,6 +142,140 @@ def relative_label(root: Path, path: Path) -> str:
     return str(relative) if str(relative) != "." else "(top)"
 
 
+# Telegram caps callback_data at 64 bytes, so buttons carry a short action and
+# an index into the listing the chat is currently looking at, never a path.
+CB_OPEN = "o"
+CB_GET = "g"
+CB_UP = "u"
+CB_HOME = "h"
+CB_PAGE = "p"
+CB_NOOP = "x"
+
+# Rows of buttons, kept short so the message stays readable on a phone.
+BUTTON_PAGE_SIZE = 10
+BUTTON_LABEL_CHARS = 30
+
+
+def callback_data(action: str, value: int | None = None) -> str:
+    return action if value is None else f"{action}:{value}"
+
+
+def parse_callback(data: str) -> tuple[str, int | None]:
+    action, _, raw = (data or "").partition(":")
+    if not raw:
+        return action, None
+    try:
+        return action, int(raw)
+    except ValueError:
+        return action, None
+
+
+def _truncate(label: str) -> str:
+    if len(label) <= BUTTON_LABEL_CHARS:
+        return label
+    return label[: BUTTON_LABEL_CHARS - 1] + "…"
+
+
+def build_keyboard(
+    entries: list[Entry],
+    page: int,
+    at_root: bool,
+    places: list[Entry] | None = None,
+) -> dict:
+    """One button per entry, plus a navigation row.
+
+    Indexes are absolute within the folder rather than within the page, so a
+    button keeps pointing at the same entry no matter how the user got there.
+    """
+    total_pages = page_count_for_buttons(len(entries))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * BUTTON_PAGE_SIZE
+    window = entries[start : start + BUTTON_PAGE_SIZE]
+
+    rows: list[list[dict]] = []
+    if at_root and places:
+        shortcut: list[dict] = []
+        for place in places[:3]:
+            index = next(
+                (i for i, e in enumerate(entries) if e.name == place.name and e.is_dir),
+                None,
+            )
+            if index is not None:
+                shortcut.append(
+                    {"text": place.name, "callback_data": callback_data(CB_OPEN, index)}
+                )
+        if shortcut:
+            rows.append(shortcut)
+
+    for offset, entry in enumerate(window):
+        index = start + offset
+        if entry.is_dir:
+            rows.append(
+                [
+                    {
+                        "text": f"📁  {_truncate(entry.name)}",
+                        "callback_data": callback_data(CB_OPEN, index),
+                    }
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    {
+                        "text": f"📄  {_truncate(entry.name)}   {human_size(entry.size)}",
+                        "callback_data": callback_data(CB_GET, index),
+                    }
+                ]
+            )
+
+    navigation: list[dict] = []
+    if page > 1:
+        navigation.append(
+            {"text": "◀ Back", "callback_data": callback_data(CB_PAGE, page - 1)}
+        )
+    if page < total_pages:
+        navigation.append(
+            {"text": "Next ▶", "callback_data": callback_data(CB_PAGE, page + 1)}
+        )
+    if navigation:
+        rows.append(navigation)
+
+    place_row: list[dict] = []
+    if not at_root:
+        place_row.append({"text": "⬆ Up", "callback_data": CB_UP})
+        place_row.append({"text": "🏠 Home", "callback_data": CB_HOME})
+    if place_row:
+        rows.append(place_row)
+
+    return {"inline_keyboard": rows}
+
+
+def page_count_for_buttons(total: int) -> int:
+    return max(1, (total + BUTTON_PAGE_SIZE - 1) // BUTTON_PAGE_SIZE)
+
+
+def format_header(root: Path, path: Path, entries: list[Entry], page: int) -> str:
+    """The text beside the buttons: where you are and how much is here."""
+    lines = [f"📂  {breadcrumb(root, path)}"]
+    if not entries:
+        lines.append("This folder is empty.")
+        return "\n".join(lines)
+    folders = sum(1 for e in entries if e.is_dir)
+    files = len(entries) - folders
+    summary = []
+    if folders:
+        summary.append(f"{folders} folder{'s' if folders != 1 else ''}")
+    if files:
+        summary.append(f"{files} file{'s' if files != 1 else ''}")
+    total_pages = page_count_for_buttons(len(entries))
+    line = " · ".join(summary)
+    if total_pages > 1:
+        line += f"   —   page {min(page, total_pages)} of {total_pages}"
+    lines.append(line)
+    lines.append("\nTap a folder to open it, or a file to download it.")
+    return "\n".join(lines)
+
+
 def breadcrumb(root: Path, path: Path) -> str:
     label = relative_label(root, path)
     if label == "(top)":

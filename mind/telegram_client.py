@@ -82,26 +82,74 @@ class TelegramClient:
             "timeout": timeout,
             # Only ask for what the bridge acts on, so a group's unrelated
             # traffic is not pulled down and discarded.
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         }
         if offset is not None:
             payload["offset"] = offset
         result = self._call("getUpdates", payload)
         return result if isinstance(result, list) else []
 
-    def send_message(self, chat_id: int, text: str, reply_to: int | None = None) -> None:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
         body = text if text.strip() else "(empty result)"
+        chunks = [
+            body[index : index + MAX_MESSAGE_CHARS]
+            for index in range(0, len(body), MAX_MESSAGE_CHARS)
+        ]
         # Split rather than truncate: a transformed document is exactly the case
         # where losing the tail without saying so would be worst.
-        for index in range(0, len(body), MAX_MESSAGE_CHARS):
+        for position, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": chat_id,
-                "text": body[index : index + MAX_MESSAGE_CHARS],
+                "text": chunk,
                 "disable_web_page_preview": True,
             }
-            if reply_to is not None and index == 0:
+            if reply_to is not None and position == 0:
                 payload["reply_to_message_id"] = reply_to
+            # Buttons belong on the last chunk, where they end up next to the
+            # bottom of the message rather than buried mid-conversation.
+            if reply_markup is not None and position == len(chunks) - 1:
+                payload["reply_markup"] = reply_markup
             self._call("sendMessage", payload)
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        """Update a message in place, so browsing does not fill the chat."""
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text[:MAX_MESSAGE_CHARS],
+            "disable_web_page_preview": True,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        try:
+            self._call("editMessageText", payload)
+        except TelegramError as exc:
+            # Telegram rejects an edit that would not change anything; that is a
+            # no-op for us, not a failure worth surfacing.
+            if "not modified" not in str(exc).lower():
+                raise
+
+    def answer_callback_query(self, callback_id: str, text: str = "") -> None:
+        """Acknowledge a tap. Without this the button spins on the client."""
+        payload: dict[str, Any] = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text[:200]
+        try:
+            self._call("answerCallbackQuery", payload)
+        except TelegramError:
+            pass
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         try:

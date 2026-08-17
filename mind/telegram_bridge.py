@@ -17,13 +17,21 @@ from PySide6.QtCore import QObject, QThread, Signal
 from .config_store import ConfigStore
 from .telegram_client import TelegramClient, TelegramError, guess_extension, scratch_name
 from .telegram_files import (
+    CB_GET,
+    CB_HOME,
+    CB_NOOP,
+    CB_OPEN,
+    CB_PAGE,
+    CB_UP,
     MAX_SEND_BYTES,
     PathRefused,
+    build_keyboard,
     entry_at,
-    format_listing,
+    format_header,
     human_size,
     is_hidden,
     list_directory,
+    parse_callback,
     quick_places,
     relative_label,
     resolve_root,
@@ -167,6 +175,10 @@ class TelegramBridge(QObject):
     # -- dispatch --------------------------------------------------------
 
     def _handle_update(self, update: dict) -> None:
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            self._handle_callback(callback)
+            return
         message = update.get("message")
         if not isinstance(message, dict):
             return
@@ -281,6 +293,112 @@ class TelegramBridge(QObject):
             client.send_message(chat_id, f"Mind could not transform that: {exc}")
             return
         client.send_message(chat_id, result, reply_to=message_id)
+
+    def _handle_callback(self, callback: dict) -> None:
+        """Act on a button tap and update the message in place."""
+        client = self._client
+        if client is None:
+            return
+        callback_id = str(callback.get("id", ""))
+        message = callback.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+
+        config = self.store.load()
+        allowed = parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids"))
+        if not is_authorized(chat_id, allowed):
+            # A tap is a request like any other; the allowlist applies equally.
+            self.log.emit(f"Telegram: ignored a button tap from unlisted chat {chat_id}")
+            client.answer_callback_query(callback_id)
+            return
+        if not bool(config.get("telegram_files_enabled", False)):
+            client.answer_callback_query(callback_id, "File access is switched off.")
+            return
+
+        chat_id = int(chat_id)
+        action, index = parse_callback(str(callback.get("data", "")))
+        root = self._files_root(config)
+        current = self._browse_dir.get(chat_id, root)
+        entries = self._browse_entries.get(chat_id, [])
+
+        if action == CB_NOOP:
+            client.answer_callback_query(callback_id)
+            return
+
+        try:
+            if action == CB_HOME:
+                current = root
+                page = 1
+            elif action == CB_UP:
+                current = resolve_within_root(root, current, "..")
+                page = 1
+            elif action == CB_PAGE:
+                page = index or 1
+            elif action in {CB_OPEN, CB_GET}:
+                if index is None or not 0 <= index < len(entries):
+                    # The app restarted, or the message is from an older listing.
+                    client.answer_callback_query(
+                        callback_id, "That listing is out of date. Send /files again."
+                    )
+                    return
+                entry = entries[index]
+                target = resolve_within_root(root, current, entry.name)
+                if action == CB_GET:
+                    self._send_file(client, chat_id, callback_id, target, config)
+                    return
+                current = target
+                page = 1
+            else:
+                client.answer_callback_query(callback_id)
+                return
+
+            entries = list_directory(
+                current, include_hidden=bool(config.get("telegram_show_hidden", False))
+            )
+        except PathRefused as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190])
+            return
+        except OSError as exc:
+            client.answer_callback_query(callback_id, f"Could not open that: {exc}"[:190])
+            return
+
+        self._browse_dir[chat_id] = current
+        self._browse_entries[chat_id] = entries
+        places = quick_places(root) if current == root else None
+        client.answer_callback_query(callback_id)
+        client.edit_message_text(
+            chat_id,
+            int(message_id),
+            format_header(root, current, entries, page),
+            build_keyboard(entries, page, current == root, places),
+        )
+
+    def _send_file(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        target: Path,
+        config: dict,
+    ) -> None:
+        if not target.is_file():
+            client.answer_callback_query(callback_id, "That is not a file.")
+            return
+        size = target.stat().st_size
+        if size > MAX_SEND_BYTES:
+            client.answer_callback_query(
+                callback_id,
+                f"{human_size(size)} is over Telegram's {human_size(MAX_SEND_BYTES)} limit.",
+            )
+            return
+        client.answer_callback_query(callback_id, f"Sending {target.name}…")
+        client.send_chat_action(chat_id, "upload_document")
+        try:
+            client.send_document(chat_id, str(target), caption=target.name)
+            self.log.emit(f"Telegram: sent '{target.name}' to chat {chat_id}")
+        except TelegramError as exc:
+            client.send_message(chat_id, f"Could not send that file: {exc}")
 
     def _files_root(self, config: dict) -> Path:
         return resolve_root(str(config.get("telegram_files_root", "")))
@@ -416,7 +534,9 @@ class TelegramBridge(QObject):
         # is a long list of application data.
         places = quick_places(root) if current == root else None
         client.send_message(
-            chat_id, format_listing(root, current, entries, page=page, places=places)
+            chat_id,
+            format_header(root, current, entries, page),
+            reply_markup=build_keyboard(entries, page, current == root, places),
         )
 
     def _save_incoming_document(
