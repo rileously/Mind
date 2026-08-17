@@ -24,6 +24,10 @@ from mind.telegram_print import (
     STRATEGY_VERB,
     PrintError,
     PrintJob,
+    Printer,
+    MAX_COPIES,
+    SIDES_BOTH,
+    SIDES_ONE,
     describe,
     is_printable,
     paper_by_key,
@@ -39,6 +43,9 @@ from mind.telegram_ui import (
     PRINT_PRINTER,
     PRINT_START,
     PRINT_COLOUR,
+    PRINT_COPIES,
+    PRINT_GO,
+    PRINT_SIDES,
     build_paper_keyboard,
     build_print_offer,
     build_printer_keyboard,
@@ -138,7 +145,7 @@ class ChoiceTests(unittest.TestCase):
 
 class JobTests(unittest.TestCase):
     def setUp(self):
-        self.job = PrintJob(path=Path("a.pdf")).with_printers(["HP", "Canon"])
+        self.job = PrintJob(path=Path("a.pdf")).with_printers([Printer("HP", True, True), Printer("Canon")])
 
     def test_a_job_is_only_complete_once_all_three_are_chosen(self):
         self.assertFalse(self.job.is_complete)
@@ -160,7 +167,9 @@ class JobTests(unittest.TestCase):
 
     def test_the_summary_reads_as_a_sentence(self):
         job = self.job.with_printer(0).with_paper(0).with_colour(0)
-        self.assertEqual(describe(job), "HP · A4 · black and white")
+        self.assertEqual(
+            describe(job), "HP · A4 · black and white · one side · 1 copy"
+        )
 
     def test_an_incomplete_job_is_refused_before_anything_is_spent(self):
         with self.assertRaises(PrintError):
@@ -180,7 +189,7 @@ class ScriptArgumentTests(unittest.TestCase):
             target.write_bytes(b"%PDF-1.4")
             job = (
                 PrintJob(path=target)
-                .with_printers(["HP Photo"])
+                .with_printers([Printer("HP Photo")])
                 .with_printer(0)
                 .with_paper(0)
                 .with_colour(1)
@@ -203,7 +212,7 @@ class ScriptArgumentTests(unittest.TestCase):
             target.write_text("hello", encoding="utf-8")
             job = (
                 PrintJob(path=target)
-                .with_printers(["HP"])
+                .with_printers([Printer("HP")])
                 .with_printer(0)
                 .with_paper(1)
                 .with_colour(0)
@@ -245,7 +254,7 @@ class ScriptBindingTests(unittest.TestCase):
     def build(self, path: Path, printer: str, colour: bool) -> PrintJob:
         return (
             PrintJob(path=path)
-            .with_printers([printer])
+            .with_printers([Printer(printer, True, False)])
             .with_printer(0)
             .with_paper(0)
             .with_colour(1 if colour else 0)
@@ -290,16 +299,16 @@ class PrintKeyboardTests(unittest.TestCase):
         self.assertIn("Print", self.buttons(markup)[0]["text"])
 
     def test_the_default_printer_is_marked_and_comes_first(self):
-        markup = build_printer_keyboard(["HP", "Canon"])
+        markup = build_printer_keyboard([Printer("HP", True), Printer("Canon")])
         self.assertIn("★", self.buttons(markup)[0]["text"])
         self.assertNotIn("★", self.buttons(markup)[1]["text"])
 
     def test_a_long_printer_name_still_fits_a_button(self):
-        markup = build_printer_keyboard(["X" * 120])
+        markup = build_printer_keyboard([Printer("X" * 120)])
         self.assertLess(len(self.buttons(markup)[0]["text"]), 40)
 
     def test_only_as_many_printers_as_fit_are_offered(self):
-        markup = build_printer_keyboard([f"printer {i}" for i in range(20)])
+        markup = build_printer_keyboard([Printer(f"printer {i}") for i in range(20)])
         printer_buttons = [
             b for b in self.buttons(markup) if b["callback_data"].endswith(tuple("01234567"))
         ]
@@ -307,7 +316,7 @@ class PrintKeyboardTests(unittest.TestCase):
 
     def test_every_step_can_be_cancelled(self):
         for markup in (
-            build_printer_keyboard(["HP"]),
+            build_printer_keyboard([Printer("HP")]),
             build_paper_keyboard(PAPERS),
             build_colour_keyboard(COLOUR_MODES),
         ):
@@ -362,7 +371,8 @@ class PrintFlowTests(unittest.TestCase):
 
     def tap(self, message_id: int, step: str, value: int | None = None) -> None:
         with mock.patch(
-            "mind.telegram_bridge.printers", return_value=["HP", "Canon"]
+            "mind.telegram_bridge.printers",
+            return_value=[Printer("HP", True, True), Printer("Canon")],
         ), mock.patch("mind.telegram_bridge.print_job", side_effect=self.record):
             self.bridge._handle_print_tap(
                 self.client,
@@ -379,6 +389,7 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_PRINTER, 1)
         self.tap(message, PRINT_PAPER, 0)
         self.tap(message, PRINT_COLOUR, 0)
+        self.tap(message, PRINT_GO)
         return message
 
     def test_a_printable_file_is_offered_with_a_button(self):
@@ -438,6 +449,7 @@ class PrintFlowTests(unittest.TestCase):
             self.tap(message, PRINT_PAPER, 0)
             self.assertIn("Colour or black and white", self.client.edited[-1]["text"])
             self.tap(message, PRINT_COLOUR, index)
+            self.tap(message, PRINT_GO)
             self.assertEqual(self.printed[0].colour, expected)
 
     def test_the_result_says_which_colour_was_used(self):
@@ -462,6 +474,86 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_PRINTER, 0)
         self.tap(message, PRINT_PAPER, 0)
         self.assertNotIn("administrator", self.client.edited[-1]["text"])
+
+    def summary(self, message: int) -> None:
+        """Walk as far as the last panel, where sides and copies live."""
+        self.tap(message, PRINT_START)
+        self.tap(message, PRINT_PRINTER, 0)
+        self.tap(message, PRINT_PAPER, 0)
+        self.tap(message, PRINT_COLOUR, 0)
+
+    def test_the_panel_defaults_to_one_side_and_one_copy(self):
+        # The common print, so it needs no taps of its own.
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].sides, SIDES_ONE)
+        self.assertEqual(self.printed[0].copies, 1)
+
+    def test_copies_go_up_and_down_from_the_panel(self):
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_COPIES, 3)
+        self.assertIn("3 copies", str(self.client.edited[-1]["markup"]))
+        self.tap(message, PRINT_COPIES, 2)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].copies, 2)
+
+    def test_copies_stop_at_the_ends_rather_than_erroring(self):
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_COPIES, 0)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].copies, 1)
+        self.printed.clear()
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_COPIES, MAX_COPIES + 5)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].copies, MAX_COPIES)
+
+    def test_both_sides_can_be_chosen_on_a_printer_that_does_it(self):
+        message = self.offer()
+        self.summary(message)
+        self.assertIn("Both sides", str(self.client.edited[-1]["markup"]))
+        self.tap(message, PRINT_SIDES, 1)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].sides, SIDES_BOTH)
+
+    def test_a_printer_that_cannot_duplex_is_not_offered_both_sides(self):
+        # A button that quietly does nothing is worse than no button, and the
+        # panel says why instead of leaving the user hunting for the option.
+        message = self.offer()
+        self.tap(message, PRINT_START)
+        self.tap(message, PRINT_PRINTER, 1)  # Canon: duplex=False in the fixture
+        self.tap(message, PRINT_PAPER, 0)
+        self.tap(message, PRINT_COLOUR, 0)
+        self.assertNotIn("Both sides", str(self.client.edited[-1]["markup"]))
+        self.assertIn("one side only", self.client.edited[-1]["text"])
+
+    def test_both_sides_is_dropped_when_the_printer_changes_to_one_that_cannot(self):
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_SIDES, 1)
+        self.tap(message, PRINT_PRINTER, 1)
+        self.tap(message, PRINT_PAPER, 0)
+        self.tap(message, PRINT_COLOUR, 0)
+        self.tap(message, PRINT_GO)
+        self.assertEqual(self.printed[0].sides, SIDES_ONE)
+
+    def test_nothing_prints_from_the_panel_until_print_is_tapped(self):
+        message = self.offer()
+        self.summary(message)
+        self.tap(message, PRINT_COPIES, 4)
+        self.tap(message, PRINT_SIDES, 1)
+        self.assertEqual(self.printed, [])
+
+    def test_the_panel_shows_the_whole_job_before_any_paper_is_spent(self):
+        message = self.offer()
+        self.summary(message)
+        text = self.client.edited[-1]["text"]
+        for expected in ("report.pdf", "A4", "black and white", "one side", "1 copy"):
+            self.assertIn(expected, text)
 
     def test_cancelling_prints_nothing_and_says_so(self):
         message = self.offer()
@@ -504,6 +596,7 @@ class PrintFlowTests(unittest.TestCase):
             self.tap(message, PRINT_PRINTER, 0)
             self.tap(message, PRINT_PAPER, 0)
             self.tap(message, PRINT_COLOUR, 0)
+            self.tap(message, PRINT_GO)
         self.assertEqual([job.path.name for job in self.printed], ["report.pdf", "second.pdf"])
 
     def test_old_offers_are_forgotten_rather_than_kept_for_ever(self):
@@ -518,11 +611,12 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_START)
         self.tap(message, PRINT_PRINTER, 0)
         self.tap(message, PRINT_PAPER, 0)
+        self.tap(message, PRINT_COLOUR, 0)
         with mock.patch(
             "mind.telegram_bridge.print_job", side_effect=PrintError("The printer is offline.")
         ):
             self.bridge._handle_print_tap(
-                self.client, 7, "cb", message, print_callback(PRINT_COLOUR, 0), self.config
+                self.client, 7, "cb", message, print_callback(PRINT_GO), self.config
             )
         self.assertIn("offline", self.client.edited[-1]["text"])
         self.assertIsNotNone(self.client.edited[-1]["markup"])
@@ -558,12 +652,13 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_START)
         self.tap(message, PRINT_PRINTER, 0)
         self.tap(message, PRINT_PAPER, 0)
+        self.tap(message, PRINT_COLOUR, 0)
         with mock.patch(
             "mind.telegram_bridge.print_job",
             return_value=["Changing the paper size needs administrator rights."],
         ):
             self.bridge._handle_print_tap(
-                self.client, 7, "cb", message, print_callback(PRINT_COLOUR, 0), self.config
+                self.client, 7, "cb", message, print_callback(PRINT_GO), self.config
             )
         text = self.client.edited[-1]["text"]
         self.assertIn("Sent report.pdf", text)

@@ -172,6 +172,9 @@ PRINT_START = "g"
 PRINT_PRINTER = "r"
 PRINT_PAPER = "s"
 PRINT_COLOUR = "t"
+PRINT_SIDES = "d"
+PRINT_COPIES = "n"
+PRINT_GO = "o"
 PRINT_CANCEL = "c"
 
 
@@ -202,20 +205,22 @@ def build_print_offer(label: str) -> dict:
     }
 
 
-def build_printer_keyboard(names: list[str]) -> dict:
+def build_printer_keyboard(available) -> dict:
     """One printer per row: names are long, and this is the widest choice.
 
-    The first is the Windows default, so the top button is almost always the
-    right one - which is what makes three questions bearable on a phone.
+    The Windows default is marked and sorted first, so the top button is almost
+    always the right one - which is what makes a few questions bearable on a
+    phone. Takes the printer records rather than names, so the star follows what
+    Windows actually reports rather than a position.
     """
     rows = [
         [
             {
-                "text": ("★  " if index == 0 else "") + name[:32],
+                "text": ("★  " if printer.default else "") + printer.name[:32],
                 "callback_data": print_callback(PRINT_PRINTER, index),
             }
         ]
-        for index, name in enumerate(names[:8])
+        for index, printer in enumerate(available[:8])
     ]
     rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
     return {"inline_keyboard": rows}
@@ -244,6 +249,54 @@ def build_colour_keyboard(modes) -> dict:
         for index, mode in enumerate(modes)
     ]
     rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
+    return {"inline_keyboard": rows}
+
+
+def build_print_summary(job, max_copies: int) -> dict:
+    """The last panel: everything chosen, with the rest adjustable.
+
+    Sides and copies live here rather than as two more questions. Most prints are
+    one copy on one side, so asking would add taps to every job to serve a few;
+    on the panel they cost nothing until wanted, and the whole job is visible in
+    one place before any paper is spent.
+
+    Both sides only appears where the printer says it can, and the current choice
+    carries a dot so the panel shows a state rather than two identical buttons.
+    """
+    rows: list[list[dict]] = []
+    if job.duplex_capable:
+        rows.append(
+            [
+                {
+                    "text": ("● " if job.sides == "one" else "") + "📄  One side",
+                    "callback_data": f"{CB_PRINT}:{PRINT_SIDES}0",
+                },
+                {
+                    "text": ("● " if job.sides == "both" else "") + "🔁  Both sides",
+                    "callback_data": f"{CB_PRINT}:{PRINT_SIDES}1",
+                },
+            ]
+        )
+    # The count is a label between the two controls, so the number being changed
+    # is where the eye already is.
+    copies_row = [
+        {"text": "−", "callback_data": print_callback(PRINT_COPIES, max(1, job.copies - 1))},
+        {
+            "text": f"{job.copies} copy" if job.copies == 1 else f"{job.copies} copies",
+            "callback_data": print_callback(PRINT_COPIES, job.copies),
+        },
+        {
+            "text": "+",
+            "callback_data": print_callback(PRINT_COPIES, min(max_copies, job.copies + 1)),
+        },
+    ]
+    rows.append(copies_row)
+    rows.append(
+        [
+            {"text": "🖨  Print", "callback_data": print_callback(PRINT_GO)},
+            {"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)},
+        ]
+    )
     return {"inline_keyboard": rows}
 
 

@@ -43,7 +43,10 @@ from .telegram_files import (
     unique_destination,
 )
 from .telegram_print import (
+    MAX_COPIES,
     PAPERS,
+    SIDES_BOTH,
+    SIDES_ONE,
     COLOUR_MODES,
     PrintError,
     PrintJob,
@@ -64,10 +67,14 @@ from .telegram_ui import (
     PRINT_PRINTER,
     PRINT_START,
     PRINT_COLOUR,
+    PRINT_COPIES,
+    PRINT_GO,
+    PRINT_SIDES,
     build_paper_keyboard,
     build_print_offer,
     build_printer_keyboard,
     build_colour_keyboard,
+    build_print_summary,
     parse_print_callback,
     REACTION_SAVED,
     REACTION_WORKING,
@@ -871,12 +878,41 @@ class TelegramBridge(QObject):
             )
             return
 
-        if step == PRINT_COLOUR:
-            job = job.with_colour(index if index is not None else -1)
-            if not job.is_complete:
-                client.answer_callback_query(
-                    callback_id, "Choose colour or black and white."
+        if step in {PRINT_COLOUR, PRINT_SIDES, PRINT_COPIES}:
+            if step == PRINT_COLOUR:
+                job = job.with_colour(index if index is not None else -1)
+                if not job.is_complete:
+                    client.answer_callback_query(
+                        callback_id, "Choose colour or black and white."
+                    )
+                    return
+            elif step == PRINT_SIDES:
+                job = job.with_sides(SIDES_BOTH if index else SIDES_ONE)
+            else:
+                job = job.with_copies(index)
+            self._print_jobs[key] = job
+            client.answer_callback_query(callback_id)
+            # The last panel rather than a fourth question: sides and copies are
+            # adjustable here, and nothing is printed until Print is tapped.
+            lines = [f"🖨  {job.path.name}", describe_print(job)]
+            if not job.duplex_capable:
+                lines.append("\nThis printer prints one side only.")
+            if colour_is_advisory(job.path):
+                lines.append(
+                    "\nWindows may keep the printer's own paper, colour and sides "
+                    "for this kind of file unless Mind runs as administrator."
                 )
+            client.edit_message_text(
+                chat_id,
+                message_id,
+                "\n".join(lines),
+                reply_markup=build_print_summary(job, MAX_COPIES),
+            )
+            return
+
+        if step == PRINT_GO:
+            if not job.is_complete:
+                client.answer_callback_query(callback_id, "Choose the settings first.")
                 return
             self._print_jobs.pop(key, None)
             # Answered before printing starts: a print can take a moment, and an

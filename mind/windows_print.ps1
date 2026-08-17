@@ -31,6 +31,8 @@ param(
     # parameter - it fails before the script runs, which is how all printing was
     # broken while the arguments still looked right.
     [ValidateSet("colour", "mono")][string]$Ink = "colour",
+    [ValidateSet("one", "both")][string]$Sides = "one",
+    [ValidateRange(1, 10)][int]$Copies = 1,
     [int]$SpoolTimeoutSeconds = 25,
     # A physical safety limit. A 25 MB text file is thousands of pages, and the
     # person who tapped Print may be nowhere near the printer.
@@ -43,7 +45,8 @@ $Color = ($Ink -eq "colour")
 # Loaded here, before anything reaches for a type inside it. The image branch
 # opens the picture before it builds the document, so leaving this to the
 # document helper meant every image print failed with "Unable to find type".
-if (-not $List -and $Strategy -ne "verb") {
+# The listing needs it too, to ask each printer whether it can print both sides.
+if ($List -or $Strategy -ne "verb") {
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
 }
 
@@ -55,7 +58,21 @@ if ($List) {
             Where-Object { $_.Default } | Select-Object -First 1 -ExpandProperty Name)
     } catch { $default = "" }
     $printers = @(Get-Printer -ErrorAction Stop | ForEach-Object {
-        [pscustomobject]@{ name = $_.Name; default = ($_.Name -eq $default) }
+        # Asked of the driver rather than assumed, so "Both sides" is only ever
+        # offered where it does something.
+        $duplex = $false
+        try {
+            $probe = New-Object System.Drawing.Printing.PrintDocument
+            $probe.PrinterSettings.PrinterName = $_.Name
+            $duplex = [bool]$probe.PrinterSettings.CanDuplex
+        } catch {
+            $duplex = $false
+        }
+        [pscustomobject]@{
+            name    = $_.Name
+            default = ($_.Name -eq $default)
+            duplex  = $duplex
+        }
     })
     # An array wrapper so a single printer does not serialise as a bare object.
     ConvertTo-Json -InputObject @{ printers = $printers } -Depth 3 -Compress
@@ -77,6 +94,25 @@ function New-Document([string]$PrinterName, [string]$Name) {
     }
     $document.DocumentName = $Name
     $document.DefaultPageSettings.Color = $Color
+    if ($Sides -eq "both") {
+        if ($document.PrinterSettings.CanDuplex) {
+            # Vertical is the long-edge flip, which is how a document is read.
+            $document.PrinterSettings.Duplex = [System.Drawing.Printing.Duplex]::Vertical
+        } else {
+            Write-Output "warning: this printer prints one side only, so both sides was ignored."
+        }
+    }
+    # Native copies when the driver will take them, because it spools once and
+    # can collate. Where it reports a maximum of one, the caller prints again
+    # instead - which is the only thing left that produces two pieces of paper.
+    $script:copiesToRepeat = 1
+    if ($Copies -gt 1) {
+        if ($document.PrinterSettings.MaximumCopies -ge $Copies) {
+            $document.PrinterSettings.Copies = $Copies
+        } else {
+            $script:copiesToRepeat = $Copies
+        }
+    }
     if ($Paper) {
         $size = $document.PrinterSettings.PaperSizes |
             Where-Object { $_.Kind -eq $Paper -or $_.PaperName -eq $Paper } |
@@ -110,7 +146,9 @@ switch ($Strategy) {
                 $event.Graphics.DrawImage($image, $left, $top, $width, $height)
                 $event.HasMorePages = $false
             })
-            $document.Print()
+            for ($copy = 0; $copy -lt $script:copiesToRepeat; $copy++) {
+                $document.Print()
+            }
         } finally {
             $image.Dispose()
         }
@@ -155,7 +193,12 @@ switch ($Strategy) {
                 }
                 $event.HasMorePages = ($script:offset -lt $content.Length)
             })
-            $document.Print()
+            for ($copy = 0; $copy -lt $script:copiesToRepeat; $copy++) {
+                # Each copy starts at the beginning of the text again.
+                $script:offset = 0
+                $script:pages = 0
+                $document.Print()
+            }
             if ($script:truncated) {
                 Write-Output "warning: only the first $MaxTextPages pages were printed."
             }
@@ -178,23 +221,28 @@ switch ($Strategy) {
         if ($previous) {
             $settings = @{ PrinterName = $Printer; Color = $Color }
             if ($Paper) { $settings["PaperSize"] = $Paper }
+            if ($Sides -eq "both") { $settings["DuplexingMode"] = "TwoSidedLongEdge" }
             try {
                 Set-PrintConfiguration @settings -ErrorAction Stop
                 $applied = $true
             } catch {
-                # Both settings go through the same call, so both are lost when it
-                # is refused. Saying only "paper size" would leave someone
-                # wondering why a colour page came out grey.
-                Write-Output ("warning: the paper size and colour choice need " +
+                # Every one of these goes through the same call, so they are all
+                # lost together. Naming only the paper size would leave someone
+                # wondering why a colour page came out grey on one side.
+                Write-Output ("warning: the paper size, colour and sides need " +
                     "administrator rights for this file type, so the printer's own " +
                     "settings were used.")
             }
         }
         try {
             # ArgumentList becomes the verb's parameters, which is where the
-            # printto handler looks for the printer name.
-            Start-Process -FilePath $path -Verb PrintTo -ArgumentList "`"$Printer`"" `
-                -WindowStyle Hidden -ErrorAction Stop
+            # printto handler looks for the printer name. There is nowhere to put
+            # a number of copies, so the file is simply printed again.
+            for ($copy = 0; $copy -lt $Copies; $copy++) {
+                Start-Process -FilePath $path -Verb PrintTo -ArgumentList "`"$Printer`"" `
+                    -WindowStyle Hidden -ErrorAction Stop
+                if ($copy -lt $Copies - 1) { Start-Sleep -Milliseconds 1200 }
+            }
             if ($applied) {
                 # The handler is another process and prints asynchronously, so the
                 # settings must stay in place until the job reaches the queue.
@@ -211,8 +259,11 @@ switch ($Strategy) {
         } finally {
             if ($applied) {
                 try {
+                    # Duplex is restored too, or a one-sided printer setting would
+                    # be left flipped for everything else on this PC.
                     Set-PrintConfiguration -PrinterName $Printer `
-                        -PaperSize $previous.PaperSize -Color $previous.Color -ErrorAction Stop
+                        -PaperSize $previous.PaperSize -Color $previous.Color `
+                        -DuplexingMode $previous.DuplexingMode -ErrorAction Stop
                 } catch {
                     Write-Output "warning: the printer's own settings could not be put back."
                 }

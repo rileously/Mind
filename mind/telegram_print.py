@@ -109,14 +109,33 @@ COLOUR_MODES: tuple[ColourMode, ...] = (
 
 
 @dataclass(frozen=True)
+class Printer:
+    name: str
+    default: bool = False
+    # Whether the driver reports it can print both sides. Offering the choice on
+    # a printer that cannot would be a button that quietly does nothing.
+    duplex: bool = False
+
+
+SIDES_ONE = "one"
+SIDES_BOTH = "both"
+# A physical cap. The person tapping "+" may be nowhere near the paper tray.
+MAX_COPIES = 10
+
+
+@dataclass(frozen=True)
 class PrintJob:
     """A file being set up to print, and the choices made so far."""
 
     path: Path
-    printers: tuple[str, ...] = ()
+    printers: tuple[Printer, ...] = ()
     printer: str = ""
     paper: str = ""
     colour: str = ""
+    sides: str = SIDES_ONE
+    copies: int = 1
+    # Capability of the chosen printer, carried so the panel knows what to offer.
+    duplex_capable: bool = False
 
     @property
     def strategy(self) -> str:
@@ -134,7 +153,30 @@ class PrintJob:
     def with_printer(self, index: int) -> "PrintJob":
         if not 0 <= index < len(self.printers):
             return self
-        return replace(self, printer=self.printers[index])
+        chosen = self.printers[index]
+        # Both sides cannot stay selected on a printer that cannot do it.
+        sides = self.sides if chosen.duplex else SIDES_ONE
+        return replace(
+            self, printer=chosen.name, duplex_capable=chosen.duplex, sides=sides
+        )
+
+    def with_sides(self, sides: str) -> "PrintJob":
+        if sides not in (SIDES_ONE, SIDES_BOTH):
+            return self
+        if sides == SIDES_BOTH and not self.duplex_capable:
+            return self
+        return replace(self, sides=sides)
+
+    def with_copies(self, count: int | None) -> "PrintJob":
+        """Set the number of copies, clamped rather than refused.
+
+        The buttons only ever ask for one more or one less, so a value outside
+        the range means a stale message; holding at the edge is friendlier than
+        an error about a number the user never typed.
+        """
+        if count is None:
+            return self
+        return replace(self, copies=max(1, min(int(count), MAX_COPIES)))
 
     def with_paper(self, index: int) -> "PrintJob":
         if not 0 <= index < len(PAPERS):
@@ -254,8 +296,8 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def printers(timeout: float = 20.0) -> list[str]:
-    """Printer names, the default first so it is the obvious button to press."""
+def printers(timeout: float = 25.0) -> list[Printer]:
+    """The printers, default first so it is the obvious button to press."""
     output = _run_script(["-List"], timeout)
     try:
         payload = json.loads(output or "{}")
@@ -264,19 +306,23 @@ def printers(timeout: float = 20.0) -> list[str]:
     entries = payload.get("printers") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
         return []
-    names: list[str] = []
-    default = ""
+    found: list[Printer] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name", "")).strip()
         if not name:
             continue
-        if entry.get("default") and not default:
-            default = name
-        else:
-            names.append(name)
-    return ([default] if default else []) + names
+        found.append(
+            Printer(
+                name=name,
+                default=bool(entry.get("default")),
+                duplex=bool(entry.get("duplex")),
+            )
+        )
+    # Windows' default first; the rest keep the order Windows gave them.
+    found.sort(key=lambda printer: not printer.default)
+    return found
 
 
 def print_job(job: PrintJob, timeout: float = 180.0) -> list[str]:
@@ -309,6 +355,10 @@ def print_job(job: PrintJob, timeout: float = 180.0) -> list[str]:
             # PowerShell refuses to bind that text to a boolean parameter.
             "-Ink",
             "colour" if colour.color else "mono",
+            "-Sides",
+            job.sides,
+            "-Copies",
+            str(job.copies),
         ],
         timeout,
     )
@@ -331,5 +381,11 @@ def describe(job: PrintJob) -> str:
     """The choices in one line, for the message that says it was printed."""
     paper = paper_by_key(job.paper)
     colour = colour_by_key(job.colour)
-    parts = [job.printer or "printer", paper.label if paper else "", colour.summary if colour else ""]
+    parts = [
+        job.printer or "printer",
+        paper.label if paper else "",
+        colour.summary if colour else "",
+        "both sides" if job.sides == SIDES_BOTH else "one side",
+        "1 copy" if job.copies == 1 else f"{job.copies} copies",
+    ]
     return " · ".join(part for part in parts if part)
