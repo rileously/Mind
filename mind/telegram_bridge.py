@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from .config_store import ConfigStore
 from .telegram_client import TelegramClient, TelegramError, guess_extension, scratch_name
 from .telegram_files import (
+    CB_FIND_OPEN,
     CB_GET,
     CB_HOME,
     CB_NOOP,
@@ -26,8 +27,10 @@ from .telegram_files import (
     MAX_SEND_BYTES,
     PathRefused,
     build_keyboard,
+    build_search_keyboard,
     entry_at,
     format_header,
+    format_search_header,
     human_size,
     is_hidden,
     list_directory,
@@ -36,6 +39,7 @@ from .telegram_files import (
     relative_label,
     resolve_root,
     resolve_within_root,
+    search_files,
     unique_destination,
 )
 from .telegram_routing import (
@@ -76,6 +80,7 @@ class TelegramBridge(QObject):
         # "/get 3" refers to the same thing the user is looking at.
         self._browse_dir: dict[int, Path] = {}
         self._browse_entries: dict[int, list] = {}
+        self._search_hits: dict[int, list] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -240,6 +245,9 @@ class TelegramBridge(QObject):
         if trigger in {"commands", "list"}:
             client.send_message(chat_id, self._command_list(config))
             return
+        if trigger in {"find", "search"}:
+            self._handle_search(client, chat_id, request.text, config)
+            return
         if trigger in {"files", "ls", "cd", "get", "pwd"}:
             self._handle_files(client, chat_id, trigger, request.text, config)
             return
@@ -335,6 +343,23 @@ class TelegramBridge(QObject):
                 page = 1
             elif action == CB_PAGE:
                 page = index or 1
+            elif action == CB_FIND_OPEN:
+                hits = self._search_hits.get(chat_id, [])
+                if index is None or not 0 <= index < len(hits):
+                    client.answer_callback_query(
+                        callback_id, "Those results are out of date. Search again."
+                    )
+                    return
+                hit = hits[index]
+                # Re-check containment: the result was produced earlier, and the
+                # allowed root may have been narrowed in settings since.
+                target = resolve_within_root(root, root, str(hit.path))
+                if hit.is_dir:
+                    current = target
+                    page = 1
+                else:
+                    self._send_file(client, chat_id, callback_id, target, config)
+                    return
             elif action in {CB_OPEN, CB_GET}:
                 if index is None or not 0 <= index < len(entries):
                     # The app restarted, or the message is from an older listing.
@@ -372,6 +397,40 @@ class TelegramBridge(QObject):
             int(message_id),
             format_header(root, current, entries, page),
             build_keyboard(entries, page, current == root, places),
+        )
+
+    def _handle_search(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        query: str,
+        config: dict,
+    ) -> None:
+        if not bool(config.get("telegram_files_enabled", False)):
+            client.send_message(
+                chat_id,
+                "File access is switched off. Turn on 'Telegram file access' in "
+                "Mind's Preferences to search this PC.",
+            )
+            return
+        needle = (query or "").strip()
+        if len(needle) < 2:
+            client.send_message(
+                chat_id, "Send /find followed by at least two characters of a name."
+            )
+            return
+
+        root = self._files_root(config)
+        client.send_chat_action(chat_id, "typing")
+        hits, truncated = search_files(
+            root, needle, include_hidden=bool(config.get("telegram_show_hidden", False))
+        )
+        self._search_hits[chat_id] = hits
+        self.log.emit(f"Telegram: searched '{needle}', {len(hits)} match(es)")
+        client.send_message(
+            chat_id,
+            format_search_header(needle, hits, truncated),
+            reply_markup=build_search_keyboard(hits) if hits else None,
         )
 
     def _send_file(
@@ -651,10 +710,11 @@ class TelegramBridge(QObject):
             lines += [
                 "",
                 f"Files, limited to {root}:",
-                "/files       list the current folder",
-                "/cd <n>      open a folder, /cd .. to go up",
-                "/get <n>     send me that file",
-                "/pwd         where am I",
+                "/files        browse, with buttons to tap",
+                "/find <text>  search for a name anywhere below that folder",
+                "/cd <n>       open a folder, /cd .. to go up",
+                "/get <n>      send me that file",
+                "/pwd          where am I",
                 "",
                 "Send any file and Mind saves it to your PC.",
             ]

@@ -115,6 +115,171 @@ def list_directory(path: Path, include_hidden: bool = False) -> list[Entry]:
     return entries
 
 
+# Folders that hold generated or vendored content rather than anything a person
+# filed. Searching a home folder without skipping these buries real documents
+# under build intermediates, and walking them costs most of the time budget.
+NOISY_DIRS = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        "site-packages",
+        "venv",
+        "env",
+        "vendor",
+        "build",
+        "dist",
+        "out",
+        "target",
+        "obj",
+        "bin",
+        "intermediates",
+        "generated",
+        "deriveddata",
+        "pods",
+        "gradle",
+        "appdata",
+        "cmake-build-debug",
+        "cmake-build-release",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Hit:
+    """A search result, carrying enough to show and fetch it."""
+
+    path: Path
+    relative: str
+    size: int
+    is_dir: bool
+
+
+def search_files(
+    root: Path,
+    query: str,
+    include_hidden: bool = False,
+    limit: int = 40,
+    time_budget: float = 8.0,
+    max_depth: int = 12,
+    skip_noisy: bool = True,
+) -> tuple[list[Hit], bool]:
+    """Find entries under ``root`` whose name contains ``query``.
+
+    Bounded on three axes, because this runs on the thread that also polls
+    Telegram: a result cap, a wall-clock budget, and a depth limit. Returns the
+    hits and whether the walk stopped early, so the caller can say so rather
+    than implying the list is complete.
+
+    Hidden directories are pruned rather than merely filtered, which keeps the
+    walk out of .git and node_modules and, more importantly, means a credential
+    folder is never even descended into.
+    """
+    import time
+
+    needle = (query or "").strip().lower()
+    if not needle:
+        return [], False
+
+    root = Path(root).resolve()
+    deadline = time.monotonic() + time_budget
+    hits: list[Hit] = []
+    truncated = False
+
+    for current, dirnames, filenames in os.walk(root, topdown=True):
+        current_path = Path(current)
+        depth = len(current_path.relative_to(root).parts) if current_path != root else 0
+        if depth >= max_depth:
+            dirnames[:] = []
+        if not include_hidden:
+            dirnames[:] = [
+                name for name in dirnames if not is_hidden(current_path / name, name)
+            ]
+        if skip_noisy:
+            dirnames[:] = [name for name in dirnames if name.lower() not in NOISY_DIRS]
+
+        for name in list(dirnames) + filenames:
+            if time.monotonic() > deadline:
+                return hits, True
+            if needle not in name.lower():
+                continue
+            candidate = current_path / name
+            if not include_hidden and is_hidden(candidate, name):
+                continue
+            try:
+                is_dir = candidate.is_dir()
+                size = 0 if is_dir else candidate.stat().st_size
+            except OSError:
+                continue
+            hits.append(
+                Hit(
+                    path=candidate,
+                    relative=str(candidate.relative_to(root)),
+                    size=size,
+                    is_dir=is_dir,
+                )
+            )
+            if len(hits) >= limit:
+                return hits, True
+
+        if time.monotonic() > deadline:
+            truncated = True
+            break
+
+    return rank_hits(hits, needle), truncated
+
+
+def rank_hits(hits: list[Hit], needle: str) -> list[Hit]:
+    """Most likely match first.
+
+    A walk returns whatever it reached earliest, which is an arbitrary order.
+    Prefer a name that starts with the query over one that merely contains it,
+    then shallower paths, which are far more often the thing being looked for
+    than something buried deep in a project tree.
+    """
+
+    def key(hit: Hit) -> tuple:
+        name = hit.path.name.lower()
+        stem = hit.path.stem.lower()
+        exact = 0 if stem == needle else 1
+        prefix = 0 if name.startswith(needle) else 1
+        depth = hit.relative.count(os.sep)
+        return (exact, prefix, depth, len(name), name)
+
+    return sorted(hits, key=key)
+
+
+def build_search_keyboard(hits: list[Hit]) -> dict:
+    """Results are buttons indexed into the search, not the folder listing."""
+    rows: list[list[dict]] = []
+    for index, hit in enumerate(hits[:BUTTON_PAGE_SIZE * 2]):
+        icon = "📁" if hit.is_dir else "📄"
+        detail = "" if hit.is_dir else f"   {human_size(hit.size)}"
+        rows.append(
+            [
+                {
+                    "text": f"{icon}  {_truncate(hit.relative)}{detail}",
+                    "callback_data": callback_data(CB_FIND_OPEN, index),
+                }
+            ]
+        )
+    rows.append([{"text": "🏠 Home", "callback_data": CB_HOME}])
+    return {"inline_keyboard": rows}
+
+
+def format_search_header(query: str, hits: list[Hit], truncated: bool) -> str:
+    if not hits:
+        return (
+            f'Nothing matching "{query}".\n\n'
+            "Search looks at names inside the folder Mind is allowed to browse, "
+            "and skips hidden system folders."
+        )
+    lines = [f'🔎  "{query}" — {len(hits)} match{"es" if len(hits) != 1 else ""}']
+    if truncated:
+        lines.append("Stopped early, so there may be more. Try a narrower search.")
+    lines.append("\nTap a file to download it, or a folder to open it.")
+    return "\n".join(lines)
+
+
 def quick_places(root: Path) -> list[Entry]:
     """The common folders that actually exist directly under the root."""
     found: list[Entry] = []
@@ -150,6 +315,7 @@ CB_UP = "u"
 CB_HOME = "h"
 CB_PAGE = "p"
 CB_NOOP = "x"
+CB_FIND_OPEN = "f"
 
 # Rows of buttons, kept short so the message stays readable on a phone.
 BUTTON_PAGE_SIZE = 10
