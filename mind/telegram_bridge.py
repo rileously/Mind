@@ -54,6 +54,7 @@ from .telegram_ui import (
     build_copy_keyboard,
     build_main_menu,
     build_media_keyboard,
+    build_menu_keyboard,
     build_power_keyboard,
     commands_signature,
     media_key_at,
@@ -126,6 +127,9 @@ class TelegramBridge(QObject):
         # What was last published to Telegram's command menu, so it is only
         # re-sent when the settings behind it actually change.
         self._published_commands = ""
+        # The menu message currently in each chat, so a new one can replace it
+        # rather than joining it.
+        self._menu_message: dict[int, int] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -302,12 +306,7 @@ class TelegramBridge(QObject):
         trigger = (request.trigger or "").lower()
 
         if trigger in {"start", "menu"}:
-            client.send_message(
-                chat_id,
-                menu_text(config, _host_name()),
-                reply_markup=build_main_menu(config),
-                html=True,
-            )
+            self._send_menu(client, chat_id, config)
             return
         if trigger == "help":
             client.send_message(
@@ -553,6 +552,48 @@ class TelegramBridge(QObject):
             build_keyboard(entries, page, current == root, places),
         )
 
+    def _send_menu(self, client: TelegramClient, chat_id: int, config: dict) -> None:
+        """Show the menu, taking away the one already in the chat.
+
+        Only one is kept per chat. A second copy carries the same buttons as the
+        first, so the older one is no longer worth anything and only makes the
+        conversation longer to scroll.
+        """
+        previous = self._menu_message.pop(chat_id, None)
+        if previous is not None:
+            client.delete_message(chat_id, previous)
+        sent = client.send_message(
+            chat_id,
+            menu_text(config, _host_name()),
+            reply_markup=build_main_menu(config),
+            html=True,
+        )
+        if sent is not None:
+            self._menu_message[chat_id] = sent
+
+    def _replace_menu(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        text: str,
+        reply_markup: dict | None,
+    ) -> bool:
+        """Turn the tapped menu into what it opened, in place.
+
+        The menu has served its purpose the moment something is picked from it,
+        so the reply takes its place instead of being added below it. Returns
+        whether the message could be reused; a tap on a message too old to edit
+        falls back to sending.
+        """
+        if not isinstance(message_id, int):
+            return False
+        # This message is no longer a menu, so it must not be deleted as one.
+        if self._menu_message.get(chat_id) == message_id:
+            self._menu_message.pop(chat_id, None)
+        client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
+        return True
+
     def _show_menu(
         self,
         client: TelegramClient,
@@ -571,6 +612,8 @@ class TelegramBridge(QObject):
         if action is None:
             client.answer_callback_query(callback_id)
             if isinstance(message_id, int):
+                # A listing or a keyboard becoming the menu again: reuse it, and
+                # remember it as the menu now in the chat.
                 client.edit_message_text(
                     chat_id,
                     message_id,
@@ -578,13 +621,9 @@ class TelegramBridge(QObject):
                     reply_markup=build_main_menu(config),
                     html=True,
                 )
+                self._menu_message[chat_id] = message_id
             else:
-                client.send_message(
-                    chat_id,
-                    menu_text(config, _host_name()),
-                    reply_markup=build_main_menu(config),
-                    html=True,
-                )
+                self._send_menu(client, chat_id, config)
             return
 
         # A setting can have been switched off since the message was sent.
@@ -595,21 +634,32 @@ class TelegramBridge(QObject):
             return
 
         client.answer_callback_query(callback_id)
-        if action.key == "clip":
-            self.clipboard_requested.emit(chat_id)
-        elif action.key == "commands":
-            client.send_message(chat_id, self._command_list(config))
+        if action.key == "commands":
+            if not self._replace_menu(
+                client, chat_id, message_id, self._command_list(config), build_menu_keyboard()
+            ):
+                client.send_message(chat_id, self._command_list(config))
         elif action.key == "find":
-            client.send_message(
-                chat_id,
-                "Send /find followed by part of a name, for example:\n/find invoice",
-            )
+            hint = "Send /find followed by part of a name, for example:\n/find invoice"
+            if not self._replace_menu(client, chat_id, message_id, hint, build_menu_keyboard()):
+                client.send_message(chat_id, hint)
         elif action.key == "media":
-            client.send_message(
-                chat_id, "🎵  Media keys for this PC.", reply_markup=build_media_keyboard()
-            )
+            if not self._replace_menu(
+                client, chat_id, message_id, "🎵  Media keys for this PC.", build_media_keyboard()
+            ):
+                client.send_message(
+                    chat_id, "🎵  Media keys for this PC.", reply_markup=build_media_keyboard()
+                )
         elif action.key == "files":
-            self._handle_files(client, chat_id, "files", "", config)
+            # The listing takes the menu's place, which is also how the browsing
+            # buttons already behave once you are inside a folder.
+            self._handle_files(
+                client, chat_id, "files", "", config, replace_message=message_id
+            )
+        elif action.key == "clip":
+            # These answer with content of their own - text, a photo - so the
+            # menu stays where it is rather than being consumed.
+            self.clipboard_requested.emit(chat_id)
         else:
             self._handle_system(client, chat_id, action.key, "", config)
 
@@ -801,7 +851,13 @@ class TelegramBridge(QObject):
         trigger: str,
         argument: str,
         config: dict,
+        replace_message: object = None,
     ) -> None:
+        """Browse files. ``replace_message`` reuses that message for the listing.
+
+        Passed when a button opened the listing, so the menu it was tapped on
+        becomes the listing rather than staying above it.
+        """
         if not bool(config.get("telegram_files_enabled", False)):
             client.send_message(
                 chat_id,
@@ -917,11 +973,11 @@ class TelegramBridge(QObject):
         # Offer the everyday folders only at the top level, where the alternative
         # is a long list of application data.
         places = quick_places(root) if current == root else None
-        client.send_message(
-            chat_id,
-            format_header(root, current, entries, page),
-            reply_markup=build_keyboard(entries, page, current == root, places),
-        )
+        header = format_header(root, current, entries, page)
+        keyboard = build_keyboard(entries, page, current == root, places)
+        if self._replace_menu(client, chat_id, replace_message, header, keyboard):
+            return
+        client.send_message(chat_id, header, reply_markup=keyboard)
 
     def _save_incoming_document(
         self,

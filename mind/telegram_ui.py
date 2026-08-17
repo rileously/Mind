@@ -165,6 +165,11 @@ def build_abort_keyboard() -> dict:
     return {"inline_keyboard": [[{"text": "⏹  Stop it", "callback_data": CB_ABORT}]]}
 
 
+def build_menu_keyboard() -> dict:
+    """A single way back, for a message that replaced the menu it came from."""
+    return {"inline_keyboard": [[{"text": "☰  Menu", "callback_data": callback(CB_MENU, None)}]]}
+
+
 def menu_text(config: dict, host: str = "") -> str:
     """The home screen. HTML, so the caller must not pass unescaped text in."""
     where = f" on <b>{escape_html(host)}</b>" if host else ""

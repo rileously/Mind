@@ -133,10 +133,16 @@ class TelegramClient:
         reply_to: int | None = None,
         reply_markup: dict[str, Any] | None = None,
         html: bool = False,
-    ) -> None:
+    ) -> int | None:
+        """Send a message, returning the id of the last part sent.
+
+        The id is what lets a caller replace this message later instead of
+        stacking another one on top of it.
+        """
         # Split rather than truncate: a transformed document is exactly the case
         # where losing the tail without saying so would be worst.
         chunks = split_for_telegram(text)
+        sent: int | None = None
         for position, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": chat_id,
@@ -159,7 +165,23 @@ class TelegramClient:
             # bottom of the message rather than buried mid-conversation.
             if reply_markup is not None and position == len(chunks) - 1:
                 payload["reply_markup"] = reply_markup
-            self._call("sendMessage", payload)
+            result = self._call("sendMessage", payload)
+            if isinstance(result, dict) and isinstance(result.get("message_id"), int):
+                sent = int(result["message_id"])
+        return sent
+
+    def delete_message(self, chat_id: int, message_id: int) -> None:
+        """Remove a message the bot sent.
+
+        Used to take away a menu that has been superseded, rather than leaving a
+        column of identical menus behind in the chat. Failure is ignored: the
+        message may already be gone, or older than the 48 hours Telegram allows
+        a bot to delete within, and neither is worth reporting.
+        """
+        try:
+            self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        except TelegramError:
+            pass
 
     def edit_message_text(
         self,
