@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QThread, QThreadPool, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -90,7 +90,11 @@ from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
-from .network_scanner import DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL, NetworkScanner
+from .network_scanner import (
+    DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL,
+    NetworkScanner,
+    RouterTest,
+)
 from .telegram_system import read_running_apps, read_visible_apps
 from .watchers import (
     APP_KINDS as WATCHER_APP_KINDS,
@@ -997,6 +1001,9 @@ class NotificationsPage(QWidget):
         self._save()
 
 
+ROUTER_PASSWORD_MASK = "•" * 10
+
+
 class NetworkDevicesPage(QWidget):
     """What else is on this Wi-Fi, kept up to date while Mind runs."""
 
@@ -1045,6 +1052,38 @@ class NetworkDevicesPage(QWidget):
         toolbar.addWidget(self.scan_button)
         root.addWidget(toolbar_card)
 
+        # The router's own list is the only place a phone's real name lives, and
+        # reaching it means signing in. Everyone's password is different, so it
+        # is asked for here rather than assumed.
+        router_card = Card(variant="InsetCard")
+        router = QHBoxLayout(router_card)
+        router.setContentsMargins(14, 12, 14, 12)
+        router.setSpacing(10)
+        self.router_address = QLineEdit()
+        self.router_address.setPlaceholderText("Router address")
+        self.router_address.setMaximumWidth(150)
+        self.router_username = QLineEdit()
+        self.router_username.setPlaceholderText("Username")
+        self.router_username.setMaximumWidth(130)
+        self.router_password = QLineEdit()
+        self.router_password.setPlaceholderText("Password")
+        self.router_password.setEchoMode(QLineEdit.Password)
+        self.router_password.setMaximumWidth(150)
+        self.router_test = QPushButton("Test")
+        self.router_test.clicked.connect(self._test_router)
+        self.router_status = QLabel("")
+        self.router_status.setObjectName("Muted")
+        self.router_status.setWordWrap(True)
+        for field in (self.router_address, self.router_username, self.router_password):
+            field.editingFinished.connect(self._save_router)
+        router.addWidget(QLabel("Router"))
+        router.addWidget(self.router_address)
+        router.addWidget(self.router_username)
+        router.addWidget(self.router_password)
+        router.addWidget(self.router_test)
+        router.addWidget(self.router_status, 1)
+        root.addWidget(router_card)
+
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
             ["Name", "IP address", "MAC address", "Vendor", "Status", "Last seen"]
@@ -1085,6 +1124,12 @@ class NetworkDevicesPage(QWidget):
             self.enabled_switch.setChecked(on)
             self.interval.setValue(
                 int(config.get("network_scan_seconds", NETWORK_DEFAULT_INTERVAL))
+            )
+            self.router_address.setText(str(config.get("router_address", "")))
+            self.router_username.setText(str(config.get("router_username", "")))
+            # Shown as a mask when one is stored, never as the password itself.
+            self.router_password.setText(
+                ROUTER_PASSWORD_MASK if self.store.get_router_password(config) else ""
             )
         finally:
             self._loading = False
@@ -1144,6 +1189,51 @@ class NetworkDevicesPage(QWidget):
             self.scanner.start() if on else self.scanner.stop()
         self.refresh()
         self.updated.emit()
+
+    def _save_router(self) -> None:
+        """Keep the router details, with the password encrypted like the token.
+
+        A password already saved shows as a mask, so leaving the field untouched
+        must not overwrite it with the mask itself.
+        """
+        if self._loading:
+            return
+        config = self.store.load()
+        config["router_address"] = self.router_address.text().strip()
+        config["router_username"] = self.router_username.text().strip()
+        typed = self.router_password.text()
+        if typed != ROUTER_PASSWORD_MASK:
+            config = self.store.set_router_password(config, typed)
+        self.store.save(config)
+
+    def _test_router(self) -> None:
+        """Ask the router now, and say plainly what came back.
+
+        On its own thread: signing in and reading a page takes seconds, and the
+        window must not freeze while it happens.
+        """
+        self._save_router()
+        self.router_test.setEnabled(False)
+        self.router_status.setText("Asking the router…")
+        self._router_thread = QThread(self)
+        self._router_worker = RouterTest(self.store)
+        self._router_worker.moveToThread(self._router_thread)
+        self._router_thread.started.connect(self._router_worker.run)
+        self._router_worker.done.connect(self._router_tested)
+        self._router_thread.start()
+
+    def _router_tested(self, message: str) -> None:
+        self.router_status.setText(message)
+        self.router_test.setEnabled(True)
+        thread = getattr(self, "_router_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+        self._router_thread = None
+        self._router_worker = None
+        # A successful sign-in changes what the next scan can name.
+        if message.startswith("Signed in") and self.scanner is not None:
+            self.scanner.scan_now()
 
     def _interval_changed(self, seconds: int) -> None:
         if self._loading or self.scanner is None:

@@ -90,6 +90,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # owner's to decide on a network they do not run.
     "network_scan_enabled": False,
     "network_scan_seconds": 60,
+    # The router's own device list is the only place a phone's real name lives,
+    # and reaching it means signing in. The password is stored encrypted, like
+    # the bot token; the address defaults to whatever the gateway turns out to be.
+    "router_address": "",
+    "router_username": "",
+    "router_password_protected": "",
     # File browsing and transfer over the bridge. Off by default: a bot token is
     # a bearer credential, so this must never be something a user ends up with
     # without choosing it. Browsing is confined to telegram_files_root, which
@@ -217,6 +223,27 @@ class ConfigStore:
         clean = token.strip() if isinstance(token, str) else ""
         updated = deepcopy(config)
         updated["telegram_token_protected"] = protect_text(clean) if clean else ""
+        return updated
+
+    def get_router_password(self, config: dict[str, Any] | None = None) -> str:
+        """Read the router password, stored encrypted like the bot token.
+
+        It opens the router's whole administration interface, so it never sits in
+        config.json as plain text and is never written to a log.
+        """
+        current = config if config is not None else self.load()
+        protected = current.get("router_password_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return ""
+        try:
+            return unprotect_text(protected)
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def set_router_password(self, config: dict[str, Any], password: str) -> dict[str, Any]:
+        clean = password if isinstance(password, str) else ""
+        updated = deepcopy(config)
+        updated["router_password_protected"] = protect_text(clean) if clean else ""
         return updated
 
     def ensure_commands(self) -> None:

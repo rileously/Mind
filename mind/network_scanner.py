@@ -17,8 +17,11 @@ import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from dataclasses import replace
+
 from .config_store import ConfigStore
 from .network_devices import Device, from_dict, merge, rename, scan, to_dict
+from .router_client import RouterError, fetch_devices
 from .telegram_system import read_network_devices
 
 
@@ -30,19 +33,85 @@ MIN_INTERVAL_SECONDS = 15
 ONLINE_GRACE_SECONDS = 210.0
 
 
+def router_names(store: ConfigStore) -> dict[str, str]:
+    """The names the router knows, keyed by MAC, or nothing if it is not set up.
+
+    The router is the only thing that knows a device by the name it gave when it
+    joined, so these are the best names available - better than anything a device
+    volunteers to a scan. Failure is silent here: a wrong password should not
+    stop the scan that works without it, and the Test button is where a person
+    goes to find out why.
+    """
+    config = store.load()
+    address = str(config.get("router_address", "")).strip()
+    username = str(config.get("router_username", "")).strip()
+    password = store.get_router_password(config)
+    if not (address and username and password):
+        return {}
+    try:
+        devices, _notes = fetch_devices(address, username, password)
+    except RouterError:
+        return {}
+    return {device.mac: device.hostname for device in devices if device.hostname}
+
+
 class ScanWorker(QObject):
     """Does one scan when asked, and says what it found."""
 
     finished = Signal(list, list)
     failed = Signal(str)
 
+    def __init__(self, store: ConfigStore, parent: QObject | None = None):
+        super().__init__(parent)
+        self.store = store
+
     def run(self) -> None:
         try:
             observed = scan(read_network_devices)
+            names = router_names(self.store)
+            if names:
+                # The router's name wins over whatever the device said about
+                # itself, because it is the one the owner typed into the phone.
+                observed = [
+                    replace(item, hostname=names.get(item.mac, item.hostname))
+                    for item in observed
+                ]
         except Exception as exc:  # a scan must never take the thread down
             self.failed.emit(str(exc))
             return
         self.finished.emit(list(observed), [])
+
+
+class RouterTest(QObject):
+    """Tries the router once and reports what came back, in words."""
+
+    done = Signal(str)
+
+    def __init__(self, store: ConfigStore, parent: QObject | None = None):
+        super().__init__(parent)
+        self.store = store
+
+    def run(self) -> None:
+        config = self.store.load()
+        address = str(config.get("router_address", "")).strip()
+        username = str(config.get("router_username", "")).strip()
+        password = self.store.get_router_password(config)
+        if not (address and username and password):
+            self.done.emit("Fill in the address, username and password first.")
+            return
+        try:
+            devices, notes = fetch_devices(address, username, password)
+        except RouterError as exc:
+            self.done.emit(str(exc))
+            return
+        except Exception as exc:
+            self.done.emit(f"The router could not be read: {exc}")
+            return
+        named = sum(1 for device in devices if device.hostname)
+        message = f"Signed in. {len(devices)} devices, {named} with names."
+        if notes:
+            message += " " + " ".join(notes) + "."
+        self.done.emit(message)
 
 
 class NetworkScanner(QObject):
@@ -110,7 +179,7 @@ class NetworkScanner(QObject):
         self._busy = True
         self.scanning.emit(True)
         self._thread = QThread()
-        self._worker = ScanWorker()
+        self._worker = ScanWorker(self.store)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._scan_finished)
