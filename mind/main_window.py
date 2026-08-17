@@ -83,7 +83,7 @@ from .selection import (
 )
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
-from .shell_menu import apply as shell_menu_apply
+from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import TelegramBridge
 from .telegram_routing import CommandRefused, parse_allowed_chat_ids, parse_message, select_command
 from .transform_client import TransformError, transform_text
@@ -949,7 +949,7 @@ class SettingsPage(QWidget):
             appearance_layout,
             "Right-click Send to Telegram",
             "Adds 'Send to Telegram' to the Windows right-click menu for any file or "
-            "image. On Windows 11 it sits under 'Show more options'.",
+            "image. Windows 11 keeps unsigned entries under 'Show more options'.",
             self.telegram_send_menu,
             "✈",
         )
@@ -1222,17 +1222,25 @@ class SettingsPage(QWidget):
                 "Anyone can message a Telegram bot, so Mind will not connect until you "
                 "list at least one chat ID that is allowed to use it.",
             )
+        want_shell_menu = self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
         try:
             self.store.save(config)
             set_start_with_windows(self.startup.isChecked(), launcher_path())
             # Re-applied on every save so the entry follows the executable if the
             # first-run installer has since moved it.
-            shell_menu_apply(
-                self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
-            )
+            shell_menu_added = shell_menu_apply(want_shell_menu)
         except OSError as exc:
             QMessageBox.critical(self, "Could not save settings", str(exc))
             return
+        if want_shell_menu and not shell_menu_added:
+            # Otherwise the switch looks on while nothing was added, and the user
+            # is left searching a menu that was never going to contain it.
+            QMessageBox.information(
+                self,
+                "Right-click entry not added",
+                "The setting is saved, but 'Send to Telegram' was not added to the "
+                f"right-click menu. {shell_menu_describe()}",
+            )
         self.updated.emit(
             str(self.theme.currentData()),
             self.mind_palette.isChecked(),
@@ -1454,6 +1462,7 @@ class MindWindow(QMainWindow):
             ),
         )
         QTimer.singleShot(0, self.configure_telegram)
+        QTimer.singleShot(0, self.sync_shell_menu)
         if self.config.get("start_engine_on_launch", False):
             QTimer.singleShot(300, self.engine.start)
         QTimer.singleShot(2500, lambda: self.settings.check_for_updates(silent=True))
@@ -1876,6 +1885,23 @@ class MindWindow(QMainWindow):
 
     def _log(self, message: str) -> None:
         self.diagnostics.append(message)
+
+    def sync_shell_menu(self) -> None:
+        """Make the Explorer entry match the saved setting on every launch.
+
+        Saving Preferences is not enough on its own: an update writes a new
+        executable, and a user who switched the entry on months ago never opens
+        that page again. Reconciling here also puts the entry back if something
+        else removed it.
+        """
+        enabled = bool(self.config.get("telegram_enabled", False)) and bool(
+            self.config.get("telegram_send_menu_enabled", False)
+        )
+        try:
+            if not shell_menu_apply(enabled):
+                self._log("Send to Telegram: the right-click entry could not be written.")
+        except OSError as exc:
+            self._log(f"Send to Telegram: could not update the right-click entry ({exc}).")
 
     def configure_palette(self, enabled: bool, preferred_shortcut: str) -> None:
         user32 = ctypes.windll.user32

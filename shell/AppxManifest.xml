@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A sparse package: it carries nothing but this manifest and its signature. The
+  handler DLL, the logos and Mind.exe itself all resolve from the external
+  location the package is registered against, which is Mind's install folder.
+
+  This exists only to give Mind package identity. Windows 11 will not show a
+  context menu command without it, however the command is registered.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap uap10 rescap desktop4 desktop5 desktop6 com">
+
+  <!-- Publisher has to match the signing certificate's subject exactly, so
+       build_shell_menu.ps1 rewrites it rather than leaving it to be edited. -->
+  <Identity
+    Name="Mind.ShellMenu"
+    Publisher="CN=Mind"
+    Version="0.3.20.0" />
+
+  <Properties>
+    <DisplayName>Mind</DisplayName>
+    <PublisherDisplayName>Mind</PublisherDisplayName>
+    <Logo>resources\logo_150x150.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+    <!-- Mind writes its own settings and runtime folders; virtualising those
+         writes would hide them from the copy of Mind already running. -->
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+
+  <Applications>
+    <Application
+      Id="Mind"
+      Executable="Mind.exe"
+      uap10:TrustLevel="mediumIL"
+      uap10:RuntimeBehavior="win32App">
+      <!-- AppListEntry="none": this package is a menu handler, not a second copy
+           of Mind, and must not appear in the Start Menu next to the real one. -->
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="Mind"
+        Description="Mind Explorer commands"
+        BackgroundColor="transparent"
+        Square150x150Logo="resources\logo_150x150.png"
+        Square44x44Logo="resources\logo_44x44.png" />
+      <Extensions>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <!-- "*" is every file type, matching the registry verb this replaces.
+                 Folders are left out: the command sends a file. -->
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="MindSendToTelegram" Clsid="54804E3A-9FD3-4AE0-B0F5-BC7A113F16C9" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <!-- A surrogate host, so a fault in the handler cannot take Explorer
+                 down with it. -->
+            <com:SurrogateServer DisplayName="Mind">
+              <com:Class
+                Id="54804E3A-9FD3-4AE0-B0F5-BC7A113F16C9"
+                Path="MindShellMenu.dll"
+                ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

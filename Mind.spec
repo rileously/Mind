@@ -9,6 +9,17 @@ project_dir = Path(SPECPATH)
 spellchecker_data = collect_data_files("spellchecker")
 mind_submodules = collect_submodules("mind")
 
+# The Windows 11 context menu handler and its sparse package, built separately by
+# shell\build_shell_menu.ps1 because they need MSVC and the Windows SDK. Bundled
+# when present rather than required, so Mind still builds without that toolchain;
+# the registry verb under "Show more options" is the fallback in that case.
+shell_menu_dir = project_dir / "artifacts" / "shell"
+shell_menu_data = [
+    (str(shell_menu_dir / name), "shell_menu")
+    for name in ("MindShellMenu.dll", "MindShellMenu.msix")
+    if (shell_menu_dir / name).is_file()
+]
+
 
 a = Analysis(
     [str(project_dir / "mind_app.pyw")],
@@ -20,7 +31,7 @@ a = Analysis(
         (str(project_dir / "assets" / "mind-logo-final.png"), "assets"),
         (str(project_dir / "mind" / "install_update.ps1"), "mind"),
         (str(project_dir / "mind" / "windows_ocr.ps1"), "mind"),
-    ] + spellchecker_data,
+    ] + spellchecker_data + shell_menu_data,
     hiddenimports=["spellchecker"] + mind_submodules,
     hookspath=[],
     hooksconfig={},
