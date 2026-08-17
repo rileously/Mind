@@ -473,3 +473,52 @@ def read_wifi_networks(timeout: float = 15.0) -> frozenset[str]:
         return frozenset()
     names = re.findall(r"^\s*SSID \d+\s*:\s*(.+?)\s*$", completed.stdout, re.MULTILINE)
     return frozenset(name for name in names if name)
+
+
+def read_network_devices(timeout: float = 15.0) -> dict[str, str]:
+    """Devices seen on the local network, as MAC address -> IP address.
+
+    Read from the ARP table, which is what the PC has already learned by
+    talking to them - no scanning, no probing, and nothing sent to anyone. It
+    follows that a device that has been silent since the PC joined may not
+    appear yet.
+
+    Keyed by MAC because a router hands out a different IP tomorrow, and a
+    device with a new address is not a new device.
+    """
+    import re
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["arp", "-a"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if completed.returncode != 0:
+        return {}
+
+    found: dict[str, str] = {}
+    pattern = re.compile(
+        r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9a-f]{2}(?:-[0-9a-f]{2}){5})\s+(\w+)",
+        re.IGNORECASE,
+    )
+    for line in completed.stdout.splitlines():
+        match = pattern.match(line)
+        if not match:
+            continue
+        ip, mac, kind = match.group(1), match.group(2).lower(), match.group(3).lower()
+        if kind != "dynamic":
+            # Static rows are the multicast and broadcast addresses Windows
+            # keeps permanently; none of them is a device that joined.
+            continue
+        if mac.startswith(("01-00-5e", "33-33")) or mac == "ff-ff-ff-ff-ff-ff":
+            continue
+        if ip.endswith(".255"):
+            continue
+        found.setdefault(mac, ip)
+    return found

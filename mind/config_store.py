@@ -85,6 +85,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram_default_command": "fix",
     "telegram_notifications": False,
     "watchers_enabled": False,
+    # Scanning the local network for other devices. Off by default: it puts a
+    # packet on every address in the subnet, which is nobody's business but the
+    # owner's to decide on a network they do not run.
+    "network_scan_enabled": False,
+    "network_scan_seconds": 60,
     # File browsing and transfer over the bridge. Off by default: a bot token is
     # a bearer credential, so this must never be something a user ends up with
     # without choosing it. Browsing is confined to telegram_files_root, which
@@ -130,6 +135,7 @@ class ConfigStore:
         self.config_path = self.root / "config.json"
         self.commands_path = self.root / "commands.json"
         self.watchers_path = self.root / "watchers.json"
+        self.devices_path = self.root / "devices.json"
         self.root.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -276,6 +282,22 @@ class ConfigStore:
         if not isinstance(items, list):
             return []
         return [item for item in items if isinstance(item, dict)]
+
+    def load_devices(self) -> list[dict[str, Any]]:
+        """Network devices remembered from earlier scans."""
+        try:
+            with self.devices_path.open("r", encoding="utf-8-sig") as handle:
+                items = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def save_devices(self, devices: list[dict[str, Any]]) -> None:
+        # Capped: a network with a busy guest wifi would otherwise grow this
+        # file for ever, and the oldest entries are the least interesting.
+        self._atomic_json_write(self.devices_path, list(devices)[:500])
 
     def load_watchers(self) -> list[dict[str, Any]]:
         """The saved PC watchers, or an empty list when there are none.

@@ -63,6 +63,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("lock", "🔒  Lock", "telegram_control_enabled"),
     MenuAction("commands", "✨  Commands"),
     MenuAction("apps", "🧩  Apps", "telegram_control_enabled"),
+    MenuAction("devices", "📶  Devices", "network_scan_enabled"),
 )
 
 # Label, and the argument press_media_key already understands.
@@ -309,6 +310,44 @@ CB_WATCH_FILE = "z"
 CB_APP_CLOSE = "q"
 # "j:2" closes the third app in the list /apps last showed.
 CB_APP_KILL = "j"
+# Devices on the network. "y" refreshes the list.
+CB_DEVICES = "y"
+
+
+def build_devices_keyboard() -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⟳  Refresh", "callback_data": CB_DEVICES},
+                {"text": "☰  Menu", "callback_data": callback(CB_MENU, None)},
+            ]
+        ]
+    }
+
+
+def devices_text(devices, now: float, enabled: bool) -> str:
+    """The /devices panel: who is on the network, and who was.
+
+    Online first, because the question is almost always about right now.
+    """
+    if not enabled:
+        return (
+            "📶  Wi-Fi device scanning is off.\n\n"
+            "Turn it on from Mind's Wi-Fi devices page to see what is on this "
+            "network."
+        )
+    if not devices:
+        return "📶  Nothing found on the network yet."
+    online = [device for device in devices if device.online]
+    offline = [device for device in devices if not device.online]
+    lines = [f"📶  {len(online)} online of {len(devices)} known", ""]
+    for device in online[:14]:
+        lines.append(f"• {device.display_name} — {device.ip or device.mac}")
+    if offline:
+        lines += ["", "Seen before:"]
+        for device in offline[:6]:
+            lines.append(f"◦ {device.display_name} — {device.seen_label(now)}")
+    return "\n".join(lines)
 
 
 def build_apps_keyboard(apps) -> dict:
@@ -453,6 +492,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("save", "Store text in the clipboard history", None),
     ("commands", "List Mind's text commands", None),
     ("apps", "See and close what is running", "telegram_control_enabled"),
+    ("devices", "Who is on this Wi-Fi", "network_scan_enabled"),
     ("watch", "Alerts about this PC", "watchers_enabled"),
     ("files", "Browse this PC's files", "telegram_files_enabled"),
     ("find", "Search for a file by name", "telegram_files_enabled"),

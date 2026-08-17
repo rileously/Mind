@@ -37,6 +37,7 @@ ALL_ON = {
     "telegram_files_enabled": True,
     "telegram_control_enabled": True,
     "telegram_power_enabled": True,
+    "network_scan_enabled": True,
 }
 
 

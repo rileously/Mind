@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -89,6 +90,7 @@ from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
+from .network_scanner import DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL, NetworkScanner
 from .telegram_system import read_running_apps, read_visible_apps
 from .watchers import (
     APP_KINDS as WATCHER_APP_KINDS,
@@ -993,6 +995,185 @@ class NotificationsPage(QWidget):
             return
         del self.watchers[row]
         self._save()
+
+
+class NetworkDevicesPage(QWidget):
+    """What else is on this Wi-Fi, kept up to date while Mind runs."""
+
+    updated = Signal()
+
+    def __init__(self, store: ConfigStore, scanner, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.store = store
+        self.scanner = scanner
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(18)
+        root.addWidget(page_header(
+            "Wi-Fi devices",
+            "Everything Mind can see on this network, and when it was last here.",
+            "NETWORK",
+        ))
+
+        toolbar_card = Card(variant="InsetCard")
+        toolbar = QHBoxLayout(toolbar_card)
+        toolbar.setContentsMargins(14, 12, 14, 12)
+        toolbar.setSpacing(10)
+        self.enabled_switch = ToggleSwitch()
+        self.enabled_switch.toggled.connect(self._set_enabled)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        self.interval = QSpinBox()
+        self.interval.setRange(15, 3600)
+        self.interval.setSuffix(" s")
+        self.interval.setToolTip("How often to look")
+        self.interval.valueChanged.connect(self._interval_changed)
+        self.scan_button = QPushButton("Scan now")
+        self.scan_button.setProperty("primary", True)
+        self.scan_button.clicked.connect(self._scan_now)
+        self.rename_button = QPushButton("Rename")
+        self.rename_button.clicked.connect(self._rename)
+        self.forget_button = QPushButton("Forget")
+        self.forget_button.setProperty("danger", True)
+        self.forget_button.clicked.connect(self._forget)
+        toolbar.addWidget(self.enabled_switch)
+        toolbar.addWidget(self.status_label, 1)
+        toolbar.addWidget(self.interval)
+        toolbar.addWidget(self.rename_button)
+        toolbar.addWidget(self.forget_button)
+        toolbar.addWidget(self.scan_button)
+        root.addWidget(toolbar_card)
+
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["Name", "IP address", "MAC address", "Vendor", "Status", "Last seen"]
+        )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        self.table.doubleClicked.connect(self._rename)
+        self.table.itemSelectionChanged.connect(self._sync_actions)
+        root.addWidget(self.table, 1)
+
+        self.empty_label = QLabel(
+            "Nothing found yet. Turn the switch on to look — Mind pings every address "
+            "on this network, asks devices to name themselves, and remembers what it finds."
+        )
+        self.empty_label.setObjectName("Muted")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        root.addWidget(self.empty_label)
+
+        self._loading = False
+        if scanner is not None:
+            scanner.devices_changed.connect(self._show_devices)
+            scanner.scanning.connect(self._scanning)
+        self.refresh()
+
+    def refresh(self) -> None:
+        config = self.store.load()
+        on = bool(config.get("network_scan_enabled", False))
+        self._loading = True
+        try:
+            self.enabled_switch.setChecked(on)
+            self.interval.setValue(
+                int(config.get("network_scan_seconds", NETWORK_DEFAULT_INTERVAL))
+            )
+        finally:
+            self._loading = False
+        self._show_devices(list(self.scanner.devices) if self.scanner else [])
+
+    def _show_devices(self, devices: list) -> None:
+        now = time.time()
+        self.devices = list(devices)
+        self.table.setRowCount(len(self.devices))
+        for row, device in enumerate(self.devices):
+            values = [
+                device.display_name,
+                device.ip or "—",
+                device.mac,
+                device.vendor or "Unknown",
+                "Online" if device.online else "Offline",
+                device.seen_label(now),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, column, item)
+        self.empty_label.setVisible(not self.devices)
+        self.table.setVisible(bool(self.devices))
+        online = sum(1 for device in self.devices if device.online)
+        if not bool(self.store.load().get("network_scan_enabled", False)):
+            self.status_label.setText("Scanning is off.")
+        else:
+            self.status_label.setText(
+                f"{online} online of {len(self.devices)} known."
+                if self.devices
+                else "Looking…"
+            )
+        self._sync_actions()
+
+    def _scanning(self, busy: bool) -> None:
+        self.scan_button.setEnabled(not busy)
+        self.scan_button.setText("Scanning…" if busy else "Scan now")
+
+    def _sync_actions(self) -> None:
+        chosen = self.table.currentRow() >= 0 and bool(getattr(self, "devices", []))
+        self.rename_button.setEnabled(chosen)
+        self.forget_button.setEnabled(chosen)
+
+    def _selected(self):
+        row = self.table.currentRow()
+        devices = getattr(self, "devices", [])
+        return devices[row] if 0 <= row < len(devices) else None
+
+    def _set_enabled(self, on: bool) -> None:
+        if self._loading:
+            return
+        config = self.store.load()
+        config["network_scan_enabled"] = on
+        self.store.save(config)
+        if self.scanner is not None:
+            self.scanner.start() if on else self.scanner.stop()
+        self.refresh()
+        self.updated.emit()
+
+    def _interval_changed(self, seconds: int) -> None:
+        if self._loading or self.scanner is None:
+            return
+        self.scanner.set_interval(int(seconds))
+
+    def _scan_now(self) -> None:
+        if self.scanner is not None:
+            self.scanner.scan_now()
+
+    def _rename(self) -> None:
+        device = self._selected()
+        if device is None or self.scanner is None:
+            return
+        name, accepted = QInputDialog.getText(
+            self,
+            "Name this device",
+            f"{device.ip or device.mac}\n\nWhat do you call it?",
+            text=device.custom_name or device.display_name,
+        )
+        if accepted:
+            self.scanner.rename_device(device.mac, name)
+
+    def _forget(self) -> None:
+        device = self._selected()
+        if device is None or self.scanner is None:
+            return
+        # Forgetting only clears the history; a device still here is found again
+        # by the next scan, which is worth saying so it is not a surprise.
+        self.scanner.forget(device.mac)
 
 
 class SettingsPage(QWidget):
@@ -1972,6 +2153,11 @@ class MindWindow(QMainWindow):
         self.telegram.clipboard_received.connect(self._on_telegram_clipboard_received)
         self.telegram.image_received.connect(self._on_telegram_image_received)
         self.telegram.screenshot_requested.connect(self._on_telegram_screenshot_requested)
+        # Owned by the window rather than the page, so scanning carries on while
+        # the page is closed and there is only ever one scan on the machine.
+        self.scanner = NetworkScanner(self.store, self)
+        self.scanner.log.connect(self._log)
+        self.scanner.arrived.connect(self._on_devices_arrived)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -2021,6 +2207,7 @@ class MindWindow(QMainWindow):
             ),
         )
         QTimer.singleShot(0, self.configure_telegram)
+        QTimer.singleShot(0, self.configure_network_scan)
         QTimer.singleShot(0, self.sync_shell_menu)
         if self.config.get("start_engine_on_launch", False):
             QTimer.singleShot(300, self.engine.start)
@@ -2082,6 +2269,7 @@ class MindWindow(QMainWindow):
             ("◇", "Providers", "api key gemini groq ollama lm studio connection model"),
             ("⌘", "Commands", "trigger automation writing actions"),
             ("◔", "Notifications", "watchers alerts battery disk memory idle folder telegram"),
+            ("◈", "Wi-Fi devices", "network devices wifi lan ip mac vendor who is connected"),
             ("⚙", "Preferences", "settings behavior typing spelling definition dictionary tooltip theme startup palette shortcut"),
             ("▥", "Diagnostics", "logs troubleshooting system health data folder"),
         ]
@@ -2128,6 +2316,7 @@ class MindWindow(QMainWindow):
         self.providers = ProvidersPage(self.store)
         self.commands = CommandsPage(self.store)
         self.notifications = NotificationsPage(self.store)
+        self.network = NetworkDevicesPage(self.store, self.scanner)
         self.settings = SettingsPage(self.store)
         self.diagnostics = DiagnosticsPage(self.store.root)
         for page in [
@@ -2135,6 +2324,7 @@ class MindWindow(QMainWindow):
             self.providers,
             self.commands,
             self.notifications,
+            self.network,
             self.settings,
             self.diagnostics,
         ]:
@@ -2430,6 +2620,29 @@ class MindWindow(QMainWindow):
                     pass
         if not sent_any:
             self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
+
+    def configure_network_scan(self) -> None:
+        """Start or stop scanning to match the saved setting."""
+        if self._quitting:
+            self.scanner.stop()
+            return
+        wanted = bool(self.store.load().get("network_scan_enabled", False))
+        if wanted and not self.scanner.is_running:
+            self.scanner.start()
+        elif not wanted and self.scanner.is_running:
+            self.scanner.stop()
+
+    def _on_devices_arrived(self, devices: list) -> None:
+        """Tell Telegram about a device that has just joined.
+
+        Sent as its own message per device rather than a digest: a stranger on
+        the network is the one alert here worth arriving on its own.
+        """
+        for device in devices[:5]:
+            where = f" at {device.ip}" if device.ip else ""
+            self.notify_telegram(
+                f"📶  New on the network: {device.display_name}{where}\n{device.mac}"
+            )
 
     def notify_telegram(self, message: str) -> None:
         """Push an alert to every allowed chat, when the user asked for that."""

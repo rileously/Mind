@@ -68,6 +68,7 @@ from .telegram_ui import (
     CB_WATCH_FILE,
     CB_APP_CLOSE,
     CB_APP_KILL,
+    CB_DEVICES,
     PRINT_CANCEL,
     PRINT_PAPER,
     PRINT_PRINTER,
@@ -85,6 +86,8 @@ from .telegram_ui import (
     build_watcher_files_keyboard,
     build_app_alert_keyboard,
     build_apps_keyboard,
+    build_devices_keyboard,
+    devices_text,
     apps_text,
     watcher_list_text,
     parse_print_callback,
@@ -102,6 +105,9 @@ from .telegram_ui import (
     menu_action_at,
     menu_text,
 )
+from dataclasses import replace as replace_device
+
+from .network_devices import from_dict as device_from_dict
 from .watchers import (
     Reading as WatcherReading,
     watches_apps,
@@ -156,12 +162,15 @@ PANEL_COMMANDS = "commands"
 PANEL_HINT = "hint"
 PANEL_WATCH = "watch"
 PANEL_APPS = "apps"
+PANEL_DEVICES = "devices"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
 CB_POWER = "w"
 ERROR_BACKOFF_SECONDS = 15
 MAX_INPUT_CHARS = 8000
+# How recently a device must have been seen to count as still here.
+DEVICE_ONLINE_SECONDS = 210.0
 
 
 def _host_name() -> str:
@@ -431,6 +440,38 @@ class TelegramBridge(QObject):
         except TelegramError as exc:
             client.send_message(chat_id, f"Could not send that file: {exc}")
 
+    def _send_devices_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        """Show what is on the network, from what the scanner last found.
+
+        Read rather than scanned: the app owns the scanning, and a sweep from
+        the poll thread would be a second scan racing the first.
+        """
+        enabled = bool(config.get("network_scan_enabled", False))
+        devices = [
+            device
+            for device in (device_from_dict(item) for item in self.store.load_devices())
+            if device
+        ]
+        # The file records history; whether something is online now is decided by
+        # how recently it was seen.
+        now = time.time()
+        fresh = [
+            replace_device(device, online=(now - device.last_seen) <= DEVICE_ONLINE_SECONDS)
+            for device in devices
+        ]
+        fresh.sort(key=lambda device: (not device.online, device.display_name.lower()))
+        text = devices_text(fresh, now, enabled)
+        keyboard = build_devices_keyboard() if enabled else build_menu_keyboard()
+        if self._replace_panel(client, chat_id, message_id, PANEL_DEVICES, text, keyboard):
+            return
+        self._send_panel(client, chat_id, PANEL_DEVICES, text, keyboard)
+
     def _send_apps_panel(
         self,
         client: TelegramClient,
@@ -677,6 +718,9 @@ class TelegramBridge(QObject):
         if trigger == "clip":
             self.clipboard_requested.emit(chat_id)
             return
+        if trigger in {"devices", "network", "wifi"}:
+            self._send_devices_panel(client, chat_id, config)
+            return
         if trigger in {"apps", "running", "tasks"}:
             self._send_apps_panel(client, chat_id, config)
             return
@@ -801,6 +845,11 @@ class TelegramBridge(QObject):
 
         if action == CB_MEDIA:
             self._handle_media_tap(client, chat_id, callback_id, index, config)
+            return
+
+        if action == CB_DEVICES:
+            client.answer_callback_query(callback_id)
+            self._send_devices_panel(client, chat_id, config, message_id)
             return
 
         if action == CB_APP_KILL:
@@ -1099,6 +1148,8 @@ class TelegramBridge(QObject):
                 self._send_panel(
                     client, chat_id, PANEL_MEDIA, MEDIA_PROMPT, build_media_keyboard()
                 )
+        elif action.key == "devices":
+            self._send_devices_panel(client, chat_id, config, message_id)
         elif action.key == "apps":
             self._send_apps_panel(client, chat_id, config, message_id)
         elif action.key == "files":
