@@ -131,9 +131,44 @@ def _offer_install(store: ConfigStore, config: dict, minimized: bool) -> bool:
     return True
 
 
+def run_telegram_send(argv: list[str]) -> int:
+    """Send the paths given after --telegram-send, then exit.
+
+    Runs as its own short-lived process, before the singleton is taken, so a
+    right-click never waits on or disturbs the instance already running.
+    """
+    from mind.telegram_send import SendError, send_paths
+
+    index = argv.index("--telegram-send")
+    paths = [argument for argument in argv[index + 1 :] if not argument.startswith("--")]
+    if not paths:
+        return 0
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("Mind")
+    app.setWindowIcon(app_icon())
+    try:
+        sent, failures = send_paths(paths)
+    except SendError as exc:
+        QMessageBox.warning(None, "Could not send to Telegram", str(exc))
+        return 1
+    if failures:
+        summary = "\n".join(failures[:8])
+        QMessageBox.warning(
+            None,
+            "Sent with problems" if sent else "Could not send to Telegram",
+            f"Sent {sent} of {sent + len(failures)}.\n\n{summary}",
+        )
+        return 0 if sent else 1
+    # Success is visible in Telegram itself, so say nothing and get out of the way.
+    return 0
+
+
 def main() -> int:
     if "--engine" in sys.argv:
         return run_engine()
+    if "--telegram-send" in sys.argv:
+        return run_telegram_send(sys.argv)
     if not _acquire_app_singleton():
         return 0
 

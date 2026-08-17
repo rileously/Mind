@@ -101,6 +101,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Shutdown and restart, kept behind their own switch because they are the
     # only controls that can lose unsaved work.
     "telegram_power_enabled": False,
+    # "Send to Telegram" in the Explorer right-click menu, and the chat those
+    # sends go to. The chat must still be one of the allowed ids.
+    "telegram_send_menu_enabled": False,
+    "telegram_send_chat_id": "",
     # Process names Mind's engine stays out of. Telegram is excluded by default
     # because the Telegram bridge answers the same triggers from the chat, so
     # typing "?fix" in Telegram Desktop would be rewritten in the message box

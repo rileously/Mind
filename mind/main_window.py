@@ -83,6 +83,7 @@ from .selection import (
 )
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
+from .shell_menu import apply as shell_menu_apply
 from .telegram_bridge import TelegramBridge
 from .telegram_routing import CommandRefused, parse_allowed_chat_ids, parse_message, select_command
 from .transform_client import TransformError, transform_text
@@ -943,7 +944,17 @@ class SettingsPage(QWidget):
             self.telegram_enabled.toggled.connect(widget.setEnabled)
         for widget in (self.telegram_files_root, self.telegram_inbox):
             self.telegram_files.toggled.connect(widget.setEnabled)
+        self.telegram_send_menu = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Right-click Send to Telegram",
+            "Adds 'Send to Telegram' to the Windows right-click menu for any file or "
+            "image. On Windows 11 it sits under 'Show more options'.",
+            self.telegram_send_menu,
+            "✈",
+        )
         self.telegram_control.toggled.connect(self.telegram_power.setEnabled)
+        self.telegram_enabled.toggled.connect(self.telegram_send_menu.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
             appearance_layout,
@@ -1144,6 +1155,8 @@ class SettingsPage(QWidget):
             widget.setEnabled(telegram_on and files_on)
         self.telegram_control.setEnabled(telegram_on)
         self.telegram_power.setEnabled(telegram_on and control_on)
+        self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
+        self.telegram_send_menu.setEnabled(telegram_on)
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
         self.url_peek.setChecked(bool(config.get("url_peek_enabled", True)))
         self.ghost_text.setChecked(bool(config.get("ghost_text_enabled", True)))
@@ -1189,6 +1202,7 @@ class SettingsPage(QWidget):
                 "telegram_inbox": self.telegram_inbox.text().strip(),
                 "telegram_control_enabled": self.telegram_control.isChecked(),
                 "telegram_power_enabled": self.telegram_power.isChecked(),
+                "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
                 "ghost_text_enabled": self.ghost_text.isChecked(),
@@ -1211,6 +1225,11 @@ class SettingsPage(QWidget):
         try:
             self.store.save(config)
             set_start_with_windows(self.startup.isChecked(), launcher_path())
+            # Re-applied on every save so the entry follows the executable if the
+            # first-run installer has since moved it.
+            shell_menu_apply(
+                self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
+            )
         except OSError as exc:
             QMessageBox.critical(self, "Could not save settings", str(exc))
             return
