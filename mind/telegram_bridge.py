@@ -42,11 +42,32 @@ from .telegram_files import (
     search_files,
     unique_destination,
 )
+from .telegram_print import (
+    PAPERS,
+    PRESETS,
+    PrintError,
+    PrintJob,
+    describe as describe_print,
+    print_job,
+    printers,
+    refusal_for,
+)
 from .telegram_ui import (
     CB_ABORT,
     CB_MEDIA,
     CB_MENU,
+    CB_PRINT,
     CB_REFRESH,
+    PRINT_CANCEL,
+    PRINT_PAPER,
+    PRINT_PRINTER,
+    PRINT_START,
+    PRINT_TYPE,
+    build_paper_keyboard,
+    build_print_offer,
+    build_printer_keyboard,
+    build_type_keyboard,
+    parse_print_callback,
     REACTION_SAVED,
     REACTION_WORKING,
     bot_commands,
@@ -145,6 +166,10 @@ class TelegramBridge(QObject):
         # asked for, a transform, or text read from a photo is content and is
         # never tracked here.
         self._panels: dict[tuple[int, str], int] = {}
+        # Files being set up to print, keyed by the message showing the choices,
+        # so two files can be arranged independently and a stale message cannot
+        # print the wrong one.
+        self._print_jobs: dict[tuple[int, int], PrintJob] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -289,7 +314,7 @@ class TelegramBridge(QObject):
         photos = message.get("photo")
         document = message.get("document")
         if photos or self._is_image_document(document):
-            self._handle_image(client, int(chat_id), message, photos, document)
+            self._handle_image(client, int(chat_id), message, photos, document, config)
             return
         if isinstance(document, dict):
             # Any other attachment is a file transfer to the PC.
@@ -453,6 +478,12 @@ class TelegramBridge(QObject):
 
         if action == CB_MEDIA:
             self._handle_media_tap(client, chat_id, callback_id, index, config)
+            return
+
+        if action == CB_PRINT:
+            self._handle_print_tap(
+                client, chat_id, callback_id, message_id, str(callback.get("data", "")), config
+            )
             return
 
         if action == CB_ABORT:
@@ -732,6 +763,201 @@ class TelegramBridge(QObject):
             self.clipboard_requested.emit(chat_id)
         else:
             self._handle_system(client, chat_id, action.key, "", config)
+
+    def _handle_print_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        data: str,
+        config: dict,
+    ) -> None:
+        """Walk the three questions, then print.
+
+        Each answer edits the same message into the next question, so the whole
+        thing occupies one message however many taps it takes, and the file it
+        refers to is remembered against that message rather than the chat.
+        """
+        if not bool(config.get("telegram_print_enabled", False)):
+            client.answer_callback_query(
+                callback_id,
+                "Printing is switched off. Turn on 'Telegram printing' in Mind's "
+                "Preferences to use it.",
+                alert=True,
+            )
+            return
+        if not isinstance(message_id, int):
+            client.answer_callback_query(callback_id, "Send the file again.", alert=True)
+            return
+
+        step, index = parse_print_callback(data)
+        key = (chat_id, message_id)
+        job = self._print_jobs.get(key)
+        if job is None:
+            # The app restarted, or this is a message from before it did.
+            client.answer_callback_query(
+                callback_id, "Send the file again to print it.", alert=True
+            )
+            return
+
+        if step == PRINT_CANCEL:
+            self._print_jobs.pop(key, None)
+            client.answer_callback_query(callback_id, "Cancelled.")
+            client.edit_message_text(
+                chat_id, message_id, f"{job.path.name} was not printed."
+            )
+            return
+
+        if step == PRINT_START:
+            try:
+                available = printers()
+            except PrintError as exc:
+                client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+                return
+            if not available:
+                client.answer_callback_query(
+                    callback_id, "No printers are set up on this PC.", alert=True
+                )
+                return
+            job = job.with_printers(available)
+            self._print_jobs[key] = job
+            client.answer_callback_query(callback_id)
+            client.edit_message_text(
+                chat_id,
+                message_id,
+                f"🖨  Print {job.path.name}\n\nWhich printer?",
+                reply_markup=build_printer_keyboard(list(available)),
+            )
+            return
+
+        if step == PRINT_PRINTER:
+            job = job.with_printer(index if index is not None else -1)
+            if not job.printer:
+                client.answer_callback_query(callback_id, "Choose a printer.")
+                return
+            self._print_jobs[key] = job
+            client.answer_callback_query(callback_id)
+            client.edit_message_text(
+                chat_id,
+                message_id,
+                f"🖨  {job.path.name}\nPrinter: {job.printer}\n\nWhich paper?",
+                reply_markup=build_paper_keyboard(PAPERS),
+            )
+            return
+
+        if step == PRINT_PAPER:
+            job = job.with_paper(index if index is not None else -1)
+            if not job.paper:
+                client.answer_callback_query(callback_id, "Choose a paper size.")
+                return
+            self._print_jobs[key] = job
+            client.answer_callback_query(callback_id)
+            client.edit_message_text(
+                chat_id,
+                message_id,
+                f"🖨  {job.path.name}\n{describe_print(job)}\n\nWhat is it?",
+                reply_markup=build_type_keyboard(PRESETS),
+            )
+            return
+
+        if step == PRINT_TYPE:
+            job = job.with_preset(index if index is not None else -1)
+            if not job.is_complete:
+                client.answer_callback_query(callback_id, "Choose a type.")
+                return
+            self._print_jobs.pop(key, None)
+            # Answered before printing starts: a print can take a moment, and an
+            # unanswered tap spins on the phone until it times out.
+            client.answer_callback_query(callback_id, "Printing…")
+            client.edit_message_text(
+                chat_id, message_id, f"🖨  Printing {job.path.name}\n{describe_print(job)}"
+            )
+            try:
+                notes = print_job(job)
+            except PrintError as exc:
+                self.log.emit(f"Telegram: printing '{job.path.name}' failed ({exc})")
+                client.edit_message_text(
+                    chat_id,
+                    message_id,
+                    f"{job.path.name} was not printed.\n{exc}",
+                    reply_markup=build_menu_keyboard(),
+                )
+                return
+            self.log.emit(f"Telegram: printed '{job.path.name}' for chat {chat_id}")
+            lines = [
+                f"✅  Sent {job.path.name} to the printer.",
+                describe_print(job),
+            ]
+            # Said plainly rather than buried: a chosen paper size that could not
+            # be applied is exactly what the user would otherwise discover at the
+            # printer.
+            lines += notes
+            client.edit_message_text(
+                chat_id,
+                message_id,
+                "\n".join(lines),
+                reply_markup=build_menu_keyboard(),
+            )
+            return
+
+        client.answer_callback_query(callback_id)
+
+    def _offer_printing(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        path: Path,
+        text: str,
+        config: dict,
+    ) -> None:
+        """Say a file was saved, and offer to print it when that is possible.
+
+        The offer is only made when printing is switched on and Windows has a way
+        to print that format, so a button never appears that would only explain
+        why it cannot work.
+        """
+        if not bool(config.get("telegram_print_enabled", False)) or refusal_for(path):
+            client.send_message(chat_id, text)
+            return
+        sent = client.send_message(
+            chat_id, text, reply_markup=build_print_offer(path.suffix.lstrip(".").upper())
+        )
+        if sent is not None:
+            self._print_jobs[(chat_id, sent)] = PrintJob(path=path)
+            self._forget_stale_print_jobs(chat_id)
+
+    def _keep_for_printing(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        document: dict,
+        data: bytes,
+        config: dict,
+    ) -> None:
+        """Save an image that arrived as a file, and offer to print it."""
+        if not bool(config.get("telegram_files_enabled", False)):
+            return
+        try:
+            inbox = self._inbox(config)
+            destination = unique_destination(inbox, str(document.get("file_name") or "image"))
+            destination.write_bytes(data)
+        except OSError as exc:
+            self.log.emit(f"Telegram: could not keep an image for printing ({exc})")
+            return
+        self._offer_printing(
+            client,
+            chat_id,
+            destination,
+            f"Saved {destination.name} ({human_size(len(data))}) to {destination.parent}",
+            config,
+        )
+
+    def _forget_stale_print_jobs(self, chat_id: int, keep: int = 12) -> None:
+        """Keep the most recent offers only, so this cannot grow without end."""
+        keys = [key for key in self._print_jobs if key[0] == chat_id]
+        for key in keys[:-keep]:
+            self._print_jobs.pop(key, None)
 
     def _handle_media_tap(
         self,
@@ -1101,8 +1327,12 @@ class TelegramBridge(QObject):
             client.send_message(chat_id, f"Could not save that file: {exc}")
             return
         self.log.emit(f"Telegram: saved '{destination.name}' from chat {chat_id}")
-        client.send_message(
-            chat_id, f"Saved {destination.name} ({human_size(len(data))}) to {destination.parent}"
+        self._offer_printing(
+            client,
+            chat_id,
+            destination,
+            f"Saved {destination.name} ({human_size(len(data))}) to {destination.parent}",
+            config,
         )
 
     def _handle_image(
@@ -1112,6 +1342,7 @@ class TelegramBridge(QObject):
         message: dict,
         photos: object,
         document: object,
+        config: dict | None = None,
     ) -> None:
         file_id = ""
         if isinstance(photos, list) and photos:
@@ -1138,6 +1369,14 @@ class TelegramBridge(QObject):
         except OSError as exc:
             client.send_message(chat_id, f"Could not save the image for reading: {exc}")
             return
+
+        settings = config if config is not None else self.store.load()
+        if isinstance(document, dict) and bool(settings.get("telegram_print_enabled", False)):
+            # An image sent as a file is a file: it is kept where the other saved
+            # files go, and can be printed. A compressed photo is not - that is
+            # something to read, and is only ever read. Saved from the bytes
+            # already in hand rather than downloaded a second time.
+            self._keep_for_printing(client, chat_id, document, data, settings)
 
         caption = str(message.get("caption") or "")
         # OCR needs a QImage, which must be built on the GUI thread; hand it over
@@ -1248,6 +1487,8 @@ class TelegramBridge(QObject):
                 "",
                 "Send any file and Mind saves it to your PC.",
             ]
+            if config.get("telegram_print_enabled", False):
+                lines += ["Saved files offer a Print button, if Windows can print them."]
         if config.get("telegram_control_enabled", False):
             lines += [
                 "",

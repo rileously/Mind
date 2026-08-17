@@ -165,6 +165,88 @@ def build_abort_keyboard() -> dict:
     return {"inline_keyboard": [[{"text": "⏹  Stop it", "callback_data": CB_ABORT}]]}
 
 
+# The printing flow. One letter per step, because the payload also carries which
+# option was picked: "p:r2" is the third printer, "p:s0" the first paper size.
+CB_PRINT = "p"
+PRINT_START = "g"
+PRINT_PRINTER = "r"
+PRINT_PAPER = "s"
+PRINT_TYPE = "t"
+PRINT_CANCEL = "c"
+
+
+def print_callback(step: str, value: int | None = None) -> str:
+    return f"{CB_PRINT}:{step}" if value is None else f"{CB_PRINT}:{step}{value}"
+
+
+def parse_print_callback(data: str) -> tuple[str, int | None]:
+    """Split "p:r2" into its step and the option picked, if any."""
+    _, _, rest = (data or "").partition(":")
+    if not rest:
+        return "", None
+    step, digits = rest[0], rest[1:]
+    if not digits:
+        return step, None
+    try:
+        return step, int(digits)
+    except ValueError:
+        return step, None
+
+
+def build_print_offer(label: str) -> dict:
+    """Offered beside a file that has just arrived, when printing is switched on."""
+    return {
+        "inline_keyboard": [
+            [{"text": f"🖨  Print {label}", "callback_data": print_callback(PRINT_START)}]
+        ]
+    }
+
+
+def build_printer_keyboard(names: list[str]) -> dict:
+    """One printer per row: names are long, and this is the widest choice.
+
+    The first is the Windows default, so the top button is almost always the
+    right one - which is what makes three questions bearable on a phone.
+    """
+    rows = [
+        [
+            {
+                "text": ("★  " if index == 0 else "") + name[:32],
+                "callback_data": print_callback(PRINT_PRINTER, index),
+            }
+        ]
+        for index, name in enumerate(names[:8])
+    ]
+    rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
+    return {"inline_keyboard": rows}
+
+
+def build_paper_keyboard(papers) -> dict:
+    """Paper sizes, three to a row: the labels are short enough to share one."""
+    rows: list[list[dict]] = []
+    for index, paper in enumerate(papers):
+        button = {
+            "text": paper.label,
+            "callback_data": print_callback(PRINT_PAPER, index),
+        }
+        if index % 3 == 0:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
+    return {"inline_keyboard": rows}
+
+
+def build_type_keyboard(presets) -> dict:
+    """Document types, one per row, because each carries an icon and a word."""
+    rows = [
+        [{"text": preset.label, "callback_data": print_callback(PRINT_TYPE, index)}]
+        for index, preset in enumerate(presets)
+    ]
+    rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
+    return {"inline_keyboard": rows}
+
+
 def build_menu_keyboard() -> dict:
     """A single way back, for a message that replaced the menu it came from."""
     return {"inline_keyboard": [[{"text": "☰  Menu", "callback_data": callback(CB_MENU, None)}]]}

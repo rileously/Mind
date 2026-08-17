@@ -915,6 +915,16 @@ class SettingsPage(QWidget):
             self.telegram_inbox,
             "✈",
         )
+        self.telegram_print = ToggleSwitch()
+        self._setting_row(
+            appearance_layout,
+            "Telegram printing",
+            "Adds a Print button to files sent to the bot, which asks for the printer, "
+            "the paper size and what the document is. Printing spends paper and ink "
+            "while you may not be in the room, so it is off until you turn it on.",
+            self.telegram_print,
+        )
+
         self.telegram_control = ToggleSwitch()
         self._setting_row(
             appearance_layout,
@@ -1148,6 +1158,9 @@ class SettingsPage(QWidget):
             self.telegram_files,
         ):
             widget.setEnabled(telegram_on)
+        # Printing needs the file-saving side: what it prints is what was saved.
+        self.telegram_print.setChecked(bool(config.get("telegram_print_enabled", False)))
+        self.telegram_print.setEnabled(telegram_on and files_on)
         control_on = bool(config.get("telegram_control_enabled", False))
         self.telegram_control.setChecked(control_on)
         self.telegram_power.setChecked(bool(config.get("telegram_power_enabled", False)))
@@ -1200,6 +1213,7 @@ class SettingsPage(QWidget):
                 "telegram_files_enabled": self.telegram_files.isChecked(),
                 "telegram_files_root": self.telegram_files_root.text().strip(),
                 "telegram_inbox": self.telegram_inbox.text().strip(),
+                "telegram_print_enabled": self.telegram_print.isChecked(),
                 "telegram_control_enabled": self.telegram_control.isChecked(),
                 "telegram_power_enabled": self.telegram_power.isChecked(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
