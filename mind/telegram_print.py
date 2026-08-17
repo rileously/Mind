@@ -91,7 +91,7 @@ PAPERS: tuple[Paper, ...] = (
 
 
 @dataclass(frozen=True)
-class Preset:
+class ColourMode:
     key: str
     label: str
     color: bool
@@ -99,12 +99,12 @@ class Preset:
     summary: str
 
 
-# "Document type" as a person would think of it, rather than the six independent
-# switches a printer driver exposes.
-PRESETS: tuple[Preset, ...] = (
-    Preset("document", "📄  Document", False, "black and white"),
-    Preset("photo", "🖼  Photo", True, "colour"),
-    Preset("colour", "🎨  Colour document", True, "colour"),
+# Asked directly rather than inferred from a "document type", which is what this
+# step used to be. Type was never anything but colour underneath, and a question
+# that means one thing should say that thing.
+COLOUR_MODES: tuple[ColourMode, ...] = (
+    ColourMode("mono", "🖤  Black and white", False, "black and white"),
+    ColourMode("colour", "🎨  Colour", True, "colour"),
 )
 
 
@@ -116,7 +116,7 @@ class PrintJob:
     printers: tuple[str, ...] = ()
     printer: str = ""
     paper: str = ""
-    preset: str = ""
+    colour: str = ""
 
     @property
     def strategy(self) -> str:
@@ -141,22 +141,34 @@ class PrintJob:
             return self
         return replace(self, paper=PAPERS[index].key)
 
-    def with_preset(self, index: int) -> "PrintJob":
-        if not 0 <= index < len(PRESETS):
+    def with_colour(self, index: int) -> "PrintJob":
+        if not 0 <= index < len(COLOUR_MODES):
             return self
-        return replace(self, preset=PRESETS[index].key)
+        return replace(self, colour=COLOUR_MODES[index].key)
 
     @property
     def is_complete(self) -> bool:
-        return bool(self.printer and self.paper and self.preset)
+        return bool(self.printer and self.paper and self.colour)
 
 
 def paper_by_key(key: str) -> Paper | None:
     return next((paper for paper in PAPERS if paper.key == key), None)
 
 
-def preset_by_key(key: str) -> Preset | None:
-    return next((preset for preset in PRESETS if preset.key == key), None)
+def colour_by_key(key: str) -> ColourMode | None:
+    return next((mode for mode in COLOUR_MODES if mode.key == key), None)
+
+
+def colour_is_advisory(path: Path | str) -> bool:
+    """Whether the colour and paper choices can only be a request for this file.
+
+    True for the formats printed by their own application: it takes a printer
+    name and nothing else, so the settings have to be written to the printer,
+    which Windows allows administrators alone. The choice is still offered - it
+    works for anyone running as administrator - but the chat says up front that
+    it may not take.
+    """
+    return strategy_for(path) == STRATEGY_VERB
 
 
 def strategy_for(path: Path | str) -> str | None:
@@ -276,12 +288,12 @@ def print_job(job: PrintJob, timeout: float = 180.0) -> list[str]:
     explaining it. Silently ignoring the chosen size would be worse.
     """
     if not job.is_complete:
-        raise PrintError("Choose a printer, a paper size and a type first.")
+        raise PrintError("Choose a printer, a paper size and colour first.")
     if not job.path.is_file():
         raise PrintError("That file is no longer there.")
     paper = paper_by_key(job.paper)
-    preset = preset_by_key(job.preset)
-    if paper is None or preset is None:
+    colour = colour_by_key(job.colour)
+    if paper is None or colour is None:
         raise PrintError("Those print settings are no longer available.")
     output = _run_script(
         [
@@ -293,8 +305,10 @@ def print_job(job: PrintJob, timeout: float = 180.0) -> list[str]:
             paper.windows_name,
             "-Strategy",
             job.strategy,
-            "-Color",
-            "$true" if preset.color else "$false",
+            # A word, not "$true": arguments reach a -File script as text, and
+            # PowerShell refuses to bind that text to a boolean parameter.
+            "-Ink",
+            "colour" if colour.color else "mono",
         ],
         timeout,
     )
@@ -316,6 +330,6 @@ def warnings_from(output: str) -> list[str]:
 def describe(job: PrintJob) -> str:
     """The choices in one line, for the message that says it was printed."""
     paper = paper_by_key(job.paper)
-    preset = preset_by_key(job.preset)
-    parts = [job.printer or "printer", paper.label if paper else "", preset.summary if preset else ""]
+    colour = colour_by_key(job.colour)
+    parts = [job.printer or "printer", paper.label if paper else "", colour.summary if colour else ""]
     return " · ".join(part for part in parts if part)

@@ -171,7 +171,7 @@ CB_PRINT = "p"
 PRINT_START = "g"
 PRINT_PRINTER = "r"
 PRINT_PAPER = "s"
-PRINT_TYPE = "t"
+PRINT_COLOUR = "t"
 PRINT_CANCEL = "c"
 
 
@@ -237,11 +237,11 @@ def build_paper_keyboard(papers) -> dict:
     return {"inline_keyboard": rows}
 
 
-def build_type_keyboard(presets) -> dict:
-    """Document types, one per row, because each carries an icon and a word."""
+def build_colour_keyboard(modes) -> dict:
+    """Colour or black and white, one per row so each label reads in full."""
     rows = [
-        [{"text": preset.label, "callback_data": print_callback(PRINT_TYPE, index)}]
-        for index, preset in enumerate(presets)
+        [{"text": mode.label, "callback_data": print_callback(PRINT_COLOUR, index)}]
+        for index, mode in enumerate(modes)
     ]
     rows.append([{"text": "✕  Cancel", "callback_data": print_callback(PRINT_CANCEL)}])
     return {"inline_keyboard": rows}

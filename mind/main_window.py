@@ -920,8 +920,8 @@ class SettingsPage(QWidget):
             appearance_layout,
             "Telegram printing",
             "Adds a Print button to files sent to the bot, which asks for the printer, "
-            "the paper size and what the document is. Printing spends paper and ink "
-            "while you may not be in the room, so it is off until you turn it on.",
+            "the paper size, and colour or black and white. Printing spends paper and "
+            "ink while you may not be in the room, so it is off until you turn it on.",
             self.telegram_print,
             "✈",
         )

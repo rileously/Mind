@@ -44,12 +44,13 @@ from .telegram_files import (
 )
 from .telegram_print import (
     PAPERS,
-    PRESETS,
+    COLOUR_MODES,
     PrintError,
     PrintJob,
     describe as describe_print,
     print_job,
     printers,
+    colour_is_advisory,
     refusal_for,
 )
 from .telegram_ui import (
@@ -62,11 +63,11 @@ from .telegram_ui import (
     PRINT_PAPER,
     PRINT_PRINTER,
     PRINT_START,
-    PRINT_TYPE,
+    PRINT_COLOUR,
     build_paper_keyboard,
     build_print_offer,
     build_printer_keyboard,
-    build_type_keyboard,
+    build_colour_keyboard,
     parse_print_callback,
     REACTION_SAVED,
     REACTION_WORKING,
@@ -853,18 +854,29 @@ class TelegramBridge(QObject):
                 return
             self._print_jobs[key] = job
             client.answer_callback_query(callback_id)
+            question = "Colour or black and white?"
+            if colour_is_advisory(job.path):
+                # Said before the choice rather than after the job: for these
+                # formats only an administrator can make it stick, and finding
+                # that out at the printer is worse than reading it here.
+                question += (
+                    "\n\nWindows may keep the printer's own setting for this kind "
+                    "of file unless Mind runs as administrator."
+                )
             client.edit_message_text(
                 chat_id,
                 message_id,
-                f"🖨  {job.path.name}\n{describe_print(job)}\n\nWhat is it?",
-                reply_markup=build_type_keyboard(PRESETS),
+                f"🖨  {job.path.name}\n{describe_print(job)}\n\n{question}",
+                reply_markup=build_colour_keyboard(COLOUR_MODES),
             )
             return
 
-        if step == PRINT_TYPE:
-            job = job.with_preset(index if index is not None else -1)
+        if step == PRINT_COLOUR:
+            job = job.with_colour(index if index is not None else -1)
             if not job.is_complete:
-                client.answer_callback_query(callback_id, "Choose a type.")
+                client.answer_callback_query(
+                    callback_id, "Choose colour or black and white."
+                )
                 return
             self._print_jobs.pop(key, None)
             # Answered before printing starts: a print can take a moment, and an

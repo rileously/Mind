@@ -6,6 +6,7 @@ the button may not be near. So the rules held here are about not surprising them
 choices, and a setting that could not be applied is reported rather than ignored.
 """
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +18,7 @@ from mind.telegram_bridge import TelegramBridge
 from mind.telegram_print import (
     MAX_PRINT_BYTES,
     PAPERS,
-    PRESETS,
+    COLOUR_MODES,
     STRATEGY_IMAGE,
     STRATEGY_TEXT,
     STRATEGY_VERB,
@@ -26,7 +27,7 @@ from mind.telegram_print import (
     describe,
     is_printable,
     paper_by_key,
-    preset_by_key,
+    colour_by_key,
     refusal_for,
     strategy_for,
     warnings_from,
@@ -37,16 +38,39 @@ from mind.telegram_ui import (
     PRINT_PAPER,
     PRINT_PRINTER,
     PRINT_START,
-    PRINT_TYPE,
+    PRINT_COLOUR,
     build_paper_keyboard,
     build_print_offer,
     build_printer_keyboard,
-    build_type_keyboard,
+    build_colour_keyboard,
     parse_print_callback,
     print_callback,
 )
 
 from tests.test_telegram_menu_flow import FakeClient
+
+
+def one_pixel_png() -> bytes:
+    """A real PNG, built here so Windows will actually open it.
+
+    The image path is exercised for real, and GDI+ rejects an approximation, so
+    the chunks and their checksums have to be right.
+    """
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)  # 1x1, 8-bit RGB
+    pixel = zlib.compress(b"\x00\xff\x00\x00")  # one filtered scanline: red
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", pixel)
+        + chunk(b"IEND", b"")
+    )
 
 
 class StrategyTests(unittest.TestCase):
@@ -83,25 +107,33 @@ class StrategyTests(unittest.TestCase):
 class ChoiceTests(unittest.TestCase):
     def test_the_lists_are_short_enough_to_be_buttons(self):
         self.assertLessEqual(len(PAPERS), 6)
-        self.assertLessEqual(len(PRESETS), 4)
+        self.assertLessEqual(len(COLOUR_MODES), 4)
 
     def test_keys_are_unique_so_a_choice_is_unambiguous(self):
         self.assertEqual(len({p.key for p in PAPERS}), len(PAPERS))
-        self.assertEqual(len({p.key for p in PRESETS}), len(PRESETS))
+        self.assertEqual(len({p.key for p in COLOUR_MODES}), len(COLOUR_MODES))
 
     def test_every_paper_names_a_size_windows_knows(self):
         for paper in PAPERS:
             self.assertTrue(paper.windows_name)
             self.assertTrue(paper.windows_name[0].isupper())
 
-    def test_document_prints_in_black_and_white_and_photo_in_colour(self):
-        self.assertFalse(preset_by_key("document").color)
-        self.assertTrue(preset_by_key("photo").color)
+    def test_colour_is_asked_directly_rather_than_inferred(self):
+        # Two choices, each saying exactly what it does. The old "document type"
+        # step decided colour behind a word that did not mention it.
+        self.assertEqual([mode.key for mode in COLOUR_MODES], ["mono", "colour"])
+        self.assertFalse(colour_by_key("mono").color)
+        self.assertTrue(colour_by_key("colour").color)
+
+    def test_both_choices_say_which_they_are_on_the_button(self):
+        labels = " ".join(mode.label.lower() for mode in COLOUR_MODES)
+        self.assertIn("black and white", labels)
+        self.assertIn("colour", labels)
 
     def test_an_unknown_key_resolves_to_nothing_rather_than_a_default(self):
         # Falling back to a default would print something nobody chose.
         self.assertIsNone(paper_by_key("a2"))
-        self.assertIsNone(preset_by_key("glossy"))
+        self.assertIsNone(colour_by_key("glossy"))
 
 
 class JobTests(unittest.TestCase):
@@ -114,7 +146,7 @@ class JobTests(unittest.TestCase):
         self.assertFalse(job.is_complete)
         job = job.with_paper(0)
         self.assertFalse(job.is_complete)
-        job = job.with_preset(0)
+        job = job.with_colour(0)
         self.assertTrue(job.is_complete)
 
     def test_a_button_means_the_printer_whose_name_was_on_it(self):
@@ -124,10 +156,10 @@ class JobTests(unittest.TestCase):
         # A stale message must not print to a printer the user never saw.
         self.assertEqual(self.job.with_printer(9).printer, "")
         self.assertEqual(self.job.with_paper(99).paper, "")
-        self.assertEqual(self.job.with_preset(-1).preset, "")
+        self.assertEqual(self.job.with_colour(-1).colour, "")
 
     def test_the_summary_reads_as_a_sentence(self):
-        job = self.job.with_printer(0).with_paper(0).with_preset(0)
+        job = self.job.with_printer(0).with_paper(0).with_colour(0)
         self.assertEqual(describe(job), "HP · A4 · black and white")
 
     def test_an_incomplete_job_is_refused_before_anything_is_spent(self):
@@ -135,7 +167,7 @@ class JobTests(unittest.TestCase):
             telegram_print.print_job(self.job)
 
     def test_a_file_that_has_gone_is_refused(self):
-        job = self.job.with_printer(0).with_paper(0).with_preset(0)
+        job = self.job.with_printer(0).with_paper(0).with_colour(0)
         with self.assertRaises(PrintError) as caught:
             telegram_print.print_job(job)
         self.assertIn("no longer there", str(caught.exception))
@@ -151,7 +183,7 @@ class ScriptArgumentTests(unittest.TestCase):
                 .with_printers(["HP Photo"])
                 .with_printer(0)
                 .with_paper(0)
-                .with_preset(1)
+                .with_colour(1)
             )
             with mock.patch.object(
                 telegram_print, "_run_script", return_value="printed"
@@ -162,8 +194,8 @@ class ScriptArgumentTests(unittest.TestCase):
         self.assertEqual(pairs["-Printer"], "HP Photo")
         self.assertEqual(pairs["-Paper"], "A4")
         self.assertEqual(pairs["-Strategy"], STRATEGY_VERB)
-        # Photo is the colour preset.
-        self.assertEqual(pairs["-Color"], "$true")
+        # Index 1 is the colour choice.
+        self.assertEqual(pairs["-Ink"], "colour")
 
     def test_black_and_white_is_passed_as_a_powershell_false(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -174,14 +206,14 @@ class ScriptArgumentTests(unittest.TestCase):
                 .with_printers(["HP"])
                 .with_printer(0)
                 .with_paper(1)
-                .with_preset(0)
+                .with_colour(0)
             )
             with mock.patch.object(
                 telegram_print, "_run_script", return_value="printed"
             ) as runner:
                 telegram_print.print_job(job)
         pairs = dict(zip(runner.call_args[0][0][::2], runner.call_args[0][0][1::2]))
-        self.assertEqual(pairs["-Color"], "$false")
+        self.assertEqual(pairs["-Ink"], "mono")
         self.assertEqual(pairs["-Paper"], "Letter")
         self.assertEqual(pairs["-Strategy"], STRATEGY_TEXT)
 
@@ -196,6 +228,56 @@ class ScriptArgumentTests(unittest.TestCase):
 
     def test_a_clean_run_has_nothing_to_report(self):
         self.assertEqual(warnings_from("printed"), [])
+
+
+@unittest.skipUnless(sys.platform == "win32", "the print helper is Windows-only")
+class ScriptBindingTests(unittest.TestCase):
+    """Run the real script, because arguments that look right can still not bind.
+
+    Every argument reaches a -File script as text. Passing "$true" to a [bool]
+    parameter fails before the script runs, and no test that only inspected the
+    argument list could see it - which is exactly how printing shipped broken
+    while its unit tests passed. These call PowerShell for real and stop short of
+    printing: once at a file that is not there, and once at a printer that does
+    not exist. Reaching either message proves the arguments bound.
+    """
+
+    def build(self, path: Path, printer: str, colour: bool) -> PrintJob:
+        return (
+            PrintJob(path=path)
+            .with_printers([printer])
+            .with_printer(0)
+            .with_paper(0)
+            .with_colour(1 if colour else 0)
+        )
+
+    def test_the_arguments_bind_for_both_colour_choices(self):
+        missing = Path(tempfile.gettempdir()) / "mind-not-here-9d4f2.pdf"
+        for colour in (True, False):
+            with self.assertRaises(PrintError) as caught:
+                telegram_print.print_job(self.build(missing, "Some Printer", colour), timeout=90)
+            message = str(caught.exception)
+            self.assertNotIn("argument transformation", message)
+            self.assertNotIn("Cannot convert", message)
+            self.assertIn("no longer there", message)
+
+    def test_an_image_reaches_the_printer_stage(self):
+        # Past binding, past the strategy switch, past loading the picture: the
+        # only thing left is the printer, which is why a bogus one is used.
+        with tempfile.TemporaryDirectory() as folder:
+            image = Path(folder) / "probe.png"
+            image.write_bytes(one_pixel_png())
+            with self.assertRaises(PrintError) as caught:
+                telegram_print.print_job(
+                    self.build(image, "Mind No Such Printer", True), timeout=90
+                )
+        message = str(caught.exception)
+        self.assertNotIn("argument transformation", message)
+        self.assertIn("printer", message.lower())
+
+    def test_listing_printers_works_against_the_real_script(self):
+        # The same script, the other entry point; proves it is present and runs.
+        self.assertIsInstance(telegram_print.printers(timeout=60), list)
 
 
 class PrintKeyboardTests(unittest.TestCase):
@@ -227,7 +309,7 @@ class PrintKeyboardTests(unittest.TestCase):
         for markup in (
             build_printer_keyboard(["HP"]),
             build_paper_keyboard(PAPERS),
-            build_type_keyboard(PRESETS),
+            build_colour_keyboard(COLOUR_MODES),
         ):
             self.assertTrue(
                 any("Cancel" in b["text"] for b in self.buttons(markup)),
@@ -237,11 +319,11 @@ class PrintKeyboardTests(unittest.TestCase):
     def test_paper_sizes_share_rows_and_types_do_not(self):
         paper_rows = build_paper_keyboard(PAPERS)["inline_keyboard"]
         self.assertTrue(any(len(row) > 1 for row in paper_rows))
-        type_rows = build_type_keyboard(PRESETS)["inline_keyboard"][:-1]
+        type_rows = build_colour_keyboard(COLOUR_MODES)["inline_keyboard"][:-1]
         self.assertTrue(all(len(row) == 1 for row in type_rows))
 
     def test_payloads_round_trip_and_stay_tiny(self):
-        for step in (PRINT_START, PRINT_PRINTER, PRINT_PAPER, PRINT_TYPE, PRINT_CANCEL):
+        for step in (PRINT_START, PRINT_PRINTER, PRINT_PAPER, PRINT_COLOUR, PRINT_CANCEL):
             self.assertEqual(parse_print_callback(print_callback(step, 3)), (step, 3))
             self.assertEqual(parse_print_callback(print_callback(step)), (step, None))
             self.assertLessEqual(len(print_callback(step, 7).encode("utf-8")), 64)
@@ -296,7 +378,7 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_START)
         self.tap(message, PRINT_PRINTER, 1)
         self.tap(message, PRINT_PAPER, 0)
-        self.tap(message, PRINT_TYPE, 0)
+        self.tap(message, PRINT_COLOUR, 0)
         return message
 
     def test_a_printable_file_is_offered_with_a_button(self):
@@ -322,7 +404,7 @@ class PrintFlowTests(unittest.TestCase):
         job = self.printed[0]
         self.assertEqual(job.printer, "Canon")
         self.assertEqual(job.paper, PAPERS[0].key)
-        self.assertEqual(job.preset, PRESETS[0].key)
+        self.assertEqual(job.colour, COLOUR_MODES[0].key)
         self.assertEqual(job.path, self.file)
 
     def test_the_whole_flow_stays_in_one_message(self):
@@ -344,7 +426,42 @@ class PrintFlowTests(unittest.TestCase):
         self.tap(message, PRINT_PRINTER, 0)
         self.assertIn("Which paper", self.client.edited[-1]["text"])
         self.tap(message, PRINT_PAPER, 0)
-        self.assertIn("What is it", self.client.edited[-1]["text"])
+        self.assertIn("Colour or black and white", self.client.edited[-1]["text"])
+
+    def test_the_last_question_is_colour_and_either_answer_prints(self):
+        for index, expected in ((0, "mono"), (1, "colour")):
+            self.printed.clear()
+            self.client = FakeClient()
+            message = self.offer()
+            self.tap(message, PRINT_START)
+            self.tap(message, PRINT_PRINTER, 0)
+            self.tap(message, PRINT_PAPER, 0)
+            self.assertIn("Colour or black and white", self.client.edited[-1]["text"])
+            self.tap(message, PRINT_COLOUR, index)
+            self.assertEqual(self.printed[0].colour, expected)
+
+    def test_the_result_says_which_colour_was_used(self):
+        self.walk()
+        self.assertIn("black and white", self.client.edited[-1]["text"])
+
+    def test_a_pdf_is_warned_that_colour_may_not_stick(self):
+        # Windows only lets an administrator apply it for these formats, and
+        # learning that at the printer is worse than reading it here.
+        message = self.offer()
+        self.tap(message, PRINT_START)
+        self.tap(message, PRINT_PRINTER, 0)
+        self.tap(message, PRINT_PAPER, 0)
+        self.assertIn("administrator", self.client.edited[-1]["text"])
+
+    def test_an_image_is_not_warned_because_it_is_applied_per_job(self):
+        image = Path(self.temp.name) / "scan.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        self.bridge._offer_printing(self.client, 7, image, "Saved scan.png", self.config)
+        message = self.client.sent[-1]["id"]
+        self.tap(message, PRINT_START)
+        self.tap(message, PRINT_PRINTER, 0)
+        self.tap(message, PRINT_PAPER, 0)
+        self.assertNotIn("administrator", self.client.edited[-1]["text"])
 
     def test_cancelling_prints_nothing_and_says_so(self):
         message = self.offer()
@@ -357,7 +474,7 @@ class PrintFlowTests(unittest.TestCase):
         message = self.offer()
         self.tap(message, PRINT_START)
         self.tap(message, PRINT_CANCEL)
-        self.tap(message, PRINT_TYPE, 0)
+        self.tap(message, PRINT_COLOUR, 0)
         self.assertEqual(self.printed, [])
         self.assertTrue(any("again" in text for text in self.client.answered))
 
@@ -386,7 +503,7 @@ class PrintFlowTests(unittest.TestCase):
             self.tap(message, PRINT_START)
             self.tap(message, PRINT_PRINTER, 0)
             self.tap(message, PRINT_PAPER, 0)
-            self.tap(message, PRINT_TYPE, 0)
+            self.tap(message, PRINT_COLOUR, 0)
         self.assertEqual([job.path.name for job in self.printed], ["report.pdf", "second.pdf"])
 
     def test_old_offers_are_forgotten_rather_than_kept_for_ever(self):
@@ -405,7 +522,7 @@ class PrintFlowTests(unittest.TestCase):
             "mind.telegram_bridge.print_job", side_effect=PrintError("The printer is offline.")
         ):
             self.bridge._handle_print_tap(
-                self.client, 7, "cb", message, print_callback(PRINT_TYPE, 0), self.config
+                self.client, 7, "cb", message, print_callback(PRINT_COLOUR, 0), self.config
             )
         self.assertIn("offline", self.client.edited[-1]["text"])
         self.assertIsNotNone(self.client.edited[-1]["markup"])
@@ -446,7 +563,7 @@ class PrintFlowTests(unittest.TestCase):
             return_value=["Changing the paper size needs administrator rights."],
         ):
             self.bridge._handle_print_tap(
-                self.client, 7, "cb", message, print_callback(PRINT_TYPE, 0), self.config
+                self.client, 7, "cb", message, print_callback(PRINT_COLOUR, 0), self.config
             )
         text = self.client.edited[-1]["text"]
         self.assertIn("Sent report.pdf", text)

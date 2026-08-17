@@ -26,7 +26,11 @@ param(
     [string]$File = "",
     [string]$Paper = "",
     [ValidateSet("verb", "text", "image")][string]$Strategy = "verb",
-    [bool]$Color = $true,
+    # A word rather than a boolean. Arguments arrive as text when a script is run
+    # with -File, and PowerShell will not bind the text "$true" to a [bool]
+    # parameter - it fails before the script runs, which is how all printing was
+    # broken while the arguments still looked right.
+    [ValidateSet("colour", "mono")][string]$Ink = "colour",
     [int]$SpoolTimeoutSeconds = 25,
     # A physical safety limit. A 25 MB text file is thousands of pages, and the
     # person who tapped Print may be nowhere near the printer.
@@ -34,6 +38,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$Color = ($Ink -eq "colour")
+
+# Loaded here, before anything reaches for a type inside it. The image branch
+# opens the picture before it builds the document, so leaving this to the
+# document helper meant every image print failed with "Unable to find type".
+if (-not $List -and $Strategy -ne "verb") {
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+}
 
 if ($List) {
     # Win32_Printer knows which one is the default; Get-Printer does not.
@@ -58,7 +70,6 @@ if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
 }
 
 function New-Document([string]$PrinterName, [string]$Name) {
-    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     $document = New-Object System.Drawing.Printing.PrintDocument
     $document.PrinterSettings.PrinterName = $PrinterName
     if (-not $document.PrinterSettings.IsValid) {
@@ -171,8 +182,12 @@ switch ($Strategy) {
                 Set-PrintConfiguration @settings -ErrorAction Stop
                 $applied = $true
             } catch {
-                Write-Output ("warning: changing the paper size for this file type needs " +
-                    "administrator rights, so the printer's own setting was used.")
+                # Both settings go through the same call, so both are lost when it
+                # is refused. Saying only "paper size" would leave someone
+                # wondering why a colour page came out grey.
+                Write-Output ("warning: the paper size and colour choice need " +
+                    "administrator rights for this file type, so the printer's own " +
+                    "settings were used.")
             }
         }
         try {
