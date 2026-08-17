@@ -6,6 +6,7 @@ import time
 from ctypes import wintypes
 import tempfile
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, QTimer, QUrl, Qt, Signal
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QStackedWidget,
+    QSpinBox,
     QSystemTrayIcon,
     QTabWidget,
     QTableWidget,
@@ -86,6 +89,16 @@ from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
+from .watchers import (
+    FOLDER_NEW as WATCHER_FOLDER_NEW,
+    KINDS as WATCHER_KINDS,
+    Watcher,
+    from_dict as watcher_from_dict,
+    kind_by_key as watcher_kind_by_key,
+    new_watcher,
+    to_dict as watcher_to_dict,
+    toggled as watcher_toggled,
+)
 from .telegram_routing import CommandRefused, parse_allowed_chat_ids, parse_message, select_command
 from .transform_client import TransformError, transform_text
 from .startup import is_start_with_windows_enabled, set_start_with_windows
@@ -624,6 +637,256 @@ class CommandsPage(QWidget):
         self._render()
 
 
+class WatcherDialog(QDialog):
+    """Create or edit one watcher.
+
+    The unit and the target field follow the kind, because "20" means percent
+    for a battery and gigabytes for a disk, and a folder has no number at all.
+    """
+
+    def __init__(self, watcher: Watcher, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Watcher")
+        self.setMinimumWidth(430)
+        self._watcher = watcher
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        self.kind = QComboBox()
+        for kind in WATCHER_KINDS:
+            self.kind.addItem(kind.label, kind.key)
+        index = self.kind.findData(watcher.kind)
+        self.kind.setCurrentIndex(max(index, 0))
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        layout.addWidget(QLabel("Tell me when"))
+        layout.addWidget(self.kind)
+
+        self.threshold = QSpinBox()
+        self.threshold.setRange(0, 100000)
+        self.threshold.setValue(int(watcher.threshold))
+        self.threshold_label = QLabel("")
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(self.threshold)
+        threshold_row.addWidget(self.threshold_label, 1)
+        layout.addLayout(threshold_row)
+
+        self.target = QLineEdit(watcher.target)
+        self.browse = QPushButton("Choose…")
+        self.browse.clicked.connect(self._choose_folder)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target, 1)
+        target_row.addWidget(self.browse)
+        self.target_label = QLabel("")
+        layout.addWidget(self.target_label)
+        layout.addLayout(target_row)
+
+        self.cooldown = QSpinBox()
+        self.cooldown.setRange(0, 1440)
+        self.cooldown.setValue(int(watcher.cooldown_minutes))
+        cooldown_row = QHBoxLayout()
+        cooldown_row.addWidget(self.cooldown)
+        cooldown_row.addWidget(
+            QLabel("minutes before saying it again (0 = say it once)"), 1
+        )
+        layout.addLayout(cooldown_row)
+
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save")
+        save.setProperty("primary", True)
+        save.clicked.connect(self.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        self._kind_changed()
+
+    def _kind_changed(self) -> None:
+        kind = watcher_kind_by_key(str(self.kind.currentData()))
+        if kind is None:
+            return
+        wants_number = kind.key != WATCHER_FOLDER_NEW
+        self.threshold.setVisible(wants_number)
+        self.threshold_label.setVisible(wants_number)
+        self.threshold_label.setText(kind.unit)
+        self.target.setVisible(kind.needs_target)
+        self.target_label.setVisible(kind.needs_target)
+        self.browse.setVisible(kind.key == WATCHER_FOLDER_NEW)
+        self.target_label.setText(
+            "Folder to watch" if kind.key == WATCHER_FOLDER_NEW else "Drive, for example C:\\"
+        )
+        if wants_number and not self.threshold.value():
+            self.threshold.setValue(int(kind.default_threshold))
+
+    def _choose_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Folder to watch", self.target.text())
+        if chosen:
+            self.target.setText(chosen)
+
+    def result_watcher(self) -> Watcher:
+        kind = str(self.kind.currentData())
+        return replace(
+            self._watcher,
+            kind=kind,
+            threshold=float(self.threshold.value()),
+            target=self.target.text().strip(),
+            cooldown_minutes=int(self.cooldown.value()),
+        )
+
+
+class NotificationsPage(QWidget):
+    """Watchers: conditions about this PC that send a message to Telegram."""
+
+    updated = Signal()
+
+    def __init__(self, store: ConfigStore, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.store = store
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(18)
+        root.addWidget(page_header(
+            "Notifications",
+            "Tell me when something happens on this PC, in Telegram.",
+            "WATCHERS",
+        ))
+
+        toolbar_card = Card(variant="InsetCard")
+        toolbar = QHBoxLayout(toolbar_card)
+        toolbar.setContentsMargins(14, 12, 14, 12)
+        toolbar.setSpacing(10)
+        self.state_label = QLabel("")
+        self.state_label.setObjectName("Muted")
+        self.state_label.setWordWrap(True)
+        add = QPushButton("＋  New watcher")
+        add.setProperty("primary", True)
+        add.clicked.connect(self._add)
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.clicked.connect(self._edit)
+        self.delete_button = QPushButton("Delete")
+        self.delete_button.setProperty("danger", True)
+        self.delete_button.clicked.connect(self._delete)
+        toolbar.addWidget(self.state_label, 1)
+        toolbar.addWidget(self.edit_button)
+        toolbar.addWidget(self.delete_button)
+        toolbar.addWidget(add)
+        root.addWidget(toolbar_card)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Tell me when", "Repeat", "On"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.doubleClicked.connect(self._edit)
+        self.table.itemSelectionChanged.connect(self._sync_actions)
+        # Pausing is the most frequent edit, so it is a checkbox in the row
+        # rather than a trip through the dialog.
+        self.table.itemChanged.connect(self._on_item_changed)
+        root.addWidget(self.table, 1)
+
+        self.empty_label = QLabel(
+            "No watchers yet. Add one to be told when the battery runs low, a disk "
+            "fills up, the PC sits idle, or a file lands in a folder."
+        )
+        self.empty_label.setObjectName("Muted")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        root.addWidget(self.empty_label)
+
+        self.watchers: list[Watcher] = []
+        self._loading = False
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.watchers = [
+            w for w in (watcher_from_dict(item) for item in self.store.load_watchers()) if w
+        ]
+        config = self.store.load()
+        on = bool(config.get("watchers_enabled", False))
+        telegram_on = bool(config.get("telegram_enabled", False))
+        if not telegram_on:
+            self.state_label.setText("Watchers need the Telegram bridge, which is off.")
+        elif not on:
+            self.state_label.setText("Watchers are off. Turn them on in Preferences → Telegram.")
+        else:
+            self.state_label.setText("Watching. Alerts go to your allowed chats.")
+        self._loading = True
+        try:
+            self.table.setRowCount(len(self.watchers))
+            for row, watcher in enumerate(self.watchers):
+                label = QTableWidgetItem(watcher.label)
+                label.setFlags(label.flags() & ~Qt.ItemIsEditable)
+                repeat = QTableWidgetItem(
+                    "once" if watcher.cooldown_minutes == 0 else f"every {watcher.cooldown_minutes} min"
+                )
+                repeat.setFlags(repeat.flags() & ~Qt.ItemIsEditable)
+                switch = QTableWidgetItem("")
+                switch.setFlags(
+                    (switch.flags() | Qt.ItemIsUserCheckable) & ~Qt.ItemIsEditable
+                )
+                switch.setCheckState(Qt.Checked if watcher.enabled else Qt.Unchecked)
+                self.table.setItem(row, 0, label)
+                self.table.setItem(row, 1, repeat)
+                self.table.setItem(row, 2, switch)
+        finally:
+            self._loading = False
+        self.empty_label.setVisible(not self.watchers)
+        self.table.setVisible(bool(self.watchers))
+        self._sync_actions()
+
+    def _sync_actions(self) -> None:
+        chosen = self.table.currentRow() >= 0 and bool(self.watchers)
+        self.edit_button.setEnabled(chosen)
+        self.delete_button.setEnabled(chosen)
+
+    def _save(self) -> None:
+        self.store.save_watchers([watcher_to_dict(w) for w in self.watchers])
+        self.refresh()
+        self.updated.emit()
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._loading or item.column() != 2:
+            return
+        row = item.row()
+        if 0 <= row < len(self.watchers):
+            self.watchers[row] = watcher_toggled(
+                self.watchers[row], item.checkState() == Qt.Checked
+            )
+            self._save()
+
+    def _add(self) -> None:
+        dialog = WatcherDialog(new_watcher(WATCHER_KINDS[0].key), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.watchers.append(dialog.result_watcher())
+        self._save()
+
+    def _edit(self) -> None:
+        row = self.table.currentRow()
+        if not 0 <= row < len(self.watchers):
+            return
+        dialog = WatcherDialog(self.watchers[row], self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.watchers[row] = dialog.result_watcher()
+        self._save()
+
+    def _delete(self) -> None:
+        row = self.table.currentRow()
+        if not 0 <= row < len(self.watchers):
+            return
+        del self.watchers[row]
+        self._save()
+
+
 class SettingsPage(QWidget):
     updated = Signal(str, bool, str, str)
     update_available = Signal(str, str)
@@ -931,6 +1194,17 @@ class SettingsPage(QWidget):
             self.telegram_inbox,
             "✈",
         )
+        self.watchers_enabled = ToggleSwitch()
+        self._setting_row(
+            telegram_layout,
+            "PC watchers",
+            "Sends an alert when the battery runs low, a disk fills up, memory runs "
+            "high, the PC sits idle, or a file lands in a watched folder. Add them on "
+            "the Notifications page.",
+            self.watchers_enabled,
+            "✈",
+        )
+
         self.telegram_print = ToggleSwitch()
         self._setting_row(
             telegram_layout,
@@ -1100,6 +1374,7 @@ class SettingsPage(QWidget):
             self.telegram_notifications,
             self.telegram_files,
             self.telegram_print,
+            self.watchers_enabled,
             self.telegram_control,
             self.telegram_power,
             self.telegram_send_menu,
@@ -1275,6 +1550,7 @@ class SettingsPage(QWidget):
         ):
             widget.setEnabled(telegram_on)
         # Printing needs the file-saving side: what it prints is what was saved.
+        self.watchers_enabled.setChecked(bool(config.get("watchers_enabled", False)))
         self.telegram_print.setChecked(bool(config.get("telegram_print_enabled", False)))
         self.telegram_print.setEnabled(telegram_on and files_on)
         control_on = bool(config.get("telegram_control_enabled", False))
@@ -1344,6 +1620,7 @@ class SettingsPage(QWidget):
                 "telegram_files_root": self.telegram_files_root.text().strip(),
                 "telegram_inbox": self.telegram_inbox.text().strip(),
                 "telegram_print_enabled": self.telegram_print.isChecked(),
+                "watchers_enabled": self.watchers_enabled.isChecked(),
                 "telegram_control_enabled": self.telegram_control.isChecked(),
                 "telegram_power_enabled": self.telegram_power.isChecked(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
@@ -1414,6 +1691,7 @@ class SettingsPage(QWidget):
         for widget in (self.telegram_files_root, self.telegram_inbox):
             widget.setEnabled(telegram_on and files_on)
         self.telegram_print.setEnabled(telegram_on and files_on)
+        self.watchers_enabled.setEnabled(telegram_on)
         self.telegram_power.setEnabled(telegram_on and self.telegram_control.isChecked())
         self.palette_auto_show.setEnabled(self.mind_palette.isChecked())
         self.palette_shortcut.setEnabled(self.mind_palette.isChecked())
@@ -1695,6 +1973,7 @@ class MindWindow(QMainWindow):
             ("▦", "Dashboard", "home overview engine workspace"),
             ("◇", "Providers", "api key gemini groq ollama lm studio connection model"),
             ("⌘", "Commands", "trigger automation writing actions"),
+            ("◔", "Notifications", "watchers alerts battery disk memory idle folder telegram"),
             ("⚙", "Preferences", "settings behavior typing spelling definition dictionary tooltip theme startup palette shortcut"),
             ("▥", "Diagnostics", "logs troubleshooting system health data folder"),
         ]
@@ -1740,9 +2019,17 @@ class MindWindow(QMainWindow):
         self.dashboard = DashboardPage(self.store)
         self.providers = ProvidersPage(self.store)
         self.commands = CommandsPage(self.store)
+        self.notifications = NotificationsPage(self.store)
         self.settings = SettingsPage(self.store)
         self.diagnostics = DiagnosticsPage(self.store.root)
-        for page in [self.dashboard, self.providers, self.commands, self.settings, self.diagnostics]:
+        for page in [
+            self.dashboard,
+            self.providers,
+            self.commands,
+            self.notifications,
+            self.settings,
+            self.diagnostics,
+        ]:
             page.setObjectName("Page")
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)

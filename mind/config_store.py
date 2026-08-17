@@ -84,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "telegram_allowed_chat_ids": [],
     "telegram_default_command": "fix",
     "telegram_notifications": False,
+    "watchers_enabled": False,
     # File browsing and transfer over the bridge. Off by default: a bot token is
     # a bearer credential, so this must never be something a user ends up with
     # without choosing it. Browsing is confined to telegram_files_root, which
@@ -128,6 +129,7 @@ class ConfigStore:
         self.source = Path(source) if source else SOURCE_DIR
         self.config_path = self.root / "config.json"
         self.commands_path = self.root / "commands.json"
+        self.watchers_path = self.root / "watchers.json"
         self.root.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -274,6 +276,26 @@ class ConfigStore:
         if not isinstance(items, list):
             return []
         return [item for item in items if isinstance(item, dict)]
+
+    def load_watchers(self) -> list[dict[str, Any]]:
+        """The saved PC watchers, or an empty list when there are none.
+
+        A missing file is the ordinary case rather than an error: watchers only
+        exist once someone adds one.
+        """
+        try:
+            with self.watchers_path.open("r", encoding="utf-8-sig") as handle:
+                items = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def save_watchers(self, watchers: list[dict[str, Any]]) -> None:
+        # Written through the same atomic path as the rest, so a crash mid-write
+        # cannot leave a half-file that reads as no watchers at all.
+        self._atomic_json_write(self.watchers_path, list(watchers)[:100])
 
     def save_commands(self, commands: list[dict[str, Any]]) -> None:
         clean: list[dict[str, Any]] = []

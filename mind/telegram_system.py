@@ -211,3 +211,28 @@ def press_media_key(name: str) -> None:
     user32 = ctypes.windll.user32
     user32.keybd_event(key, 0, 0, 0)
     user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
+
+
+class _LastInput(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
+
+
+def read_idle_minutes() -> float:
+    """How long since the last key or mouse input, in minutes.
+
+    Windows measures this for the whole session rather than per process, which
+    is what "the PC is idle" should mean. Both this and the tick counter wrap
+    after about 49 days, so the difference is masked to 32 bits rather than
+    being allowed to go negative.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        info = _LastInput()
+        info.cbSize = ctypes.sizeof(_LastInput)
+        if not user32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        elapsed = (kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+    except (AttributeError, OSError):
+        return 0.0
+    return elapsed / (1000 * 60)

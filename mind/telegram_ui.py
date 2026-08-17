@@ -300,6 +300,53 @@ def build_print_summary(job, max_copies: int) -> dict:
     return {"inline_keyboard": rows}
 
 
+# Watchers. "v:3" pauses or resumes the fourth one in the list shown.
+CB_WATCH = "v"
+
+
+def build_watcher_keyboard(watchers) -> dict:
+    """One row per watcher, saying what tapping it will do.
+
+    The label carries the action rather than the state, because a button that
+    reads "On" leaves you guessing whether tapping it turns it off or confirms
+    it is on.
+    """
+    rows = [
+        [
+            {
+                "text": ("⏸  Pause  " if watcher.enabled else "▶  Resume  ") + watcher.label[:34],
+                "callback_data": f"{CB_WATCH}:{index}",
+            }
+        ]
+        for index, watcher in enumerate(watchers[:10])
+    ]
+    rows.append([{"text": "☰  Menu", "callback_data": callback(CB_MENU, None)}])
+    return {"inline_keyboard": rows}
+
+
+def watcher_list_text(watchers, enabled: bool) -> str:
+    """What the /watch panel says above its buttons."""
+    if not enabled:
+        return (
+            "👁  PC watchers are switched off.\n\n"
+            "Turn on 'PC watchers' in Mind's Preferences to be told when the "
+            "battery runs low, a disk fills up, or a file lands in a folder."
+        )
+    if not watchers:
+        return (
+            "👁  No watchers yet.\n\n"
+            "Add one on Mind's Notifications page - low battery, low disk space, "
+            "high memory, an idle PC, or a new file in a folder."
+        )
+    lines = ["👁  Watching this PC", ""]
+    for watcher in watchers[:10]:
+        lines.append(("• " if watcher.enabled else "◦ ") + watcher.label)
+    paused = sum(1 for watcher in watchers if not watcher.enabled)
+    if paused:
+        lines += ["", f"{paused} paused."]
+    return "\n".join(lines)
+
+
 def build_menu_keyboard() -> dict:
     """A single way back, for a message that replaced the menu it came from."""
     return {"inline_keyboard": [[{"text": "☰  Menu", "callback_data": callback(CB_MENU, None)}]]}
@@ -323,6 +370,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("clip", "Send this PC's clipboard here", None),
     ("save", "Store text in the clipboard history", None),
     ("commands", "List Mind's text commands", None),
+    ("watch", "Alerts about this PC", "watchers_enabled"),
     ("files", "Browse this PC's files", "telegram_files_enabled"),
     ("find", "Search for a file by name", "telegram_files_enabled"),
     ("status", "Battery, memory, uptime, disk", "telegram_control_enabled"),

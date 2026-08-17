@@ -8,6 +8,7 @@ process would repeat both problems for no benefit.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -62,6 +63,7 @@ from .telegram_ui import (
     CB_MENU,
     CB_PRINT,
     CB_REFRESH,
+    CB_WATCH,
     PRINT_CANCEL,
     PRINT_PAPER,
     PRINT_PRINTER,
@@ -75,6 +77,8 @@ from .telegram_ui import (
     build_printer_keyboard,
     build_colour_keyboard,
     build_print_summary,
+    build_watcher_keyboard,
+    watcher_list_text,
     parse_print_callback,
     REACTION_SAVED,
     REACTION_WORKING,
@@ -90,12 +94,22 @@ from .telegram_ui import (
     menu_action_at,
     menu_text,
 )
+from .watchers import (
+    Reading as WatcherReading,
+    to_dict as watcher_to_dict,
+    toggled as watcher_toggled,
+    evaluate as evaluate_watchers,
+    from_dict as watcher_from_dict,
+    watched_drives,
+    watched_folders,
+)
 from .telegram_system import (
     SystemActionError,
     abort_shutdown,
     format_status,
     lock_workstation,
     press_media_key,
+    read_idle_minutes,
     read_status,
     restart,
     shutdown,
@@ -124,6 +138,7 @@ PANEL_SCREEN = "screen"
 PANEL_MEDIA = "media"
 PANEL_COMMANDS = "commands"
 PANEL_HINT = "hint"
+PANEL_WATCH = "watch"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
@@ -178,6 +193,9 @@ class TelegramBridge(QObject):
         # so two files can be arranged independently and a stale message cannot
         # print the wrong one.
         self._print_jobs: dict[tuple[int, int], PrintJob] = {}
+        # What each watcher knew last time it was checked: whether it is armed,
+        # when it last spoke, and for a folder the names already seen.
+        self._watcher_state: dict[str, dict] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -247,6 +265,9 @@ class TelegramBridge(QObject):
                     # republished rather than assumed to still be right.
                     self._published_commands = ""
                 self._publish_commands(self._client, config)
+                # Checked on the poll's own tick: no timer, no second thread, and
+                # the loop is already awake every twenty-five seconds.
+                self._check_watchers(self._client, config)
                 updates = self._client.get_updates(self._offset, timeout=POLL_TIMEOUT_SECONDS)
             except TelegramError as exc:
                 self.log.emit(f"Telegram: {exc}")
@@ -293,6 +314,105 @@ class TelegramBridge(QObject):
         client.set_chat_menu_button()
         self._published_commands = signature
         self.log.emit("Telegram: updated the command menu.")
+
+    def _load_watchers(self) -> list:
+        return [w for w in (watcher_from_dict(i) for i in self.store.load_watchers()) if w]
+
+    def _send_watcher_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        watchers = self._load_watchers()
+        enabled = bool(config.get("watchers_enabled", False))
+        text = watcher_list_text(watchers, enabled)
+        keyboard = build_watcher_keyboard(watchers) if watchers and enabled else build_menu_keyboard()
+        if self._replace_panel(client, chat_id, message_id, PANEL_WATCH, text, keyboard):
+            return
+        self._send_panel(client, chat_id, PANEL_WATCH, text, keyboard)
+
+    def _handle_watcher_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Pause or resume the watcher that was tapped, and redraw the list."""
+        watchers = self._load_watchers()
+        if index is None or not 0 <= index < len(watchers):
+            # The list has changed since the message was drawn.
+            client.answer_callback_query(callback_id, "Send /watch again.", alert=True)
+            return
+        watcher = watchers[index]
+        watchers[index] = watcher_toggled(watcher, not watcher.enabled)
+        self.store.save_watchers([watcher_to_dict(w) for w in watchers])
+        client.answer_callback_query(
+            callback_id, "Paused." if watcher.enabled else "Watching again."
+        )
+        self._send_watcher_panel(client, chat_id, config, message_id)
+
+    def _watcher_reading(self, watchers: list) -> WatcherReading:
+        """Read only what the enabled watchers actually ask about.
+
+        A folder is scanned because something watches it, never speculatively:
+        this runs every twenty-five seconds, and walking somewhere large for a
+        watcher nobody created would be a waste all day long.
+        """
+        drives = watched_drives(watchers)
+        status = read_status(drives or [])
+        free = {drive: free_gb for drive, free_gb, _total in status.disks}
+        folders: dict[str, tuple[str, ...]] = {}
+        for folder in watched_folders(watchers):
+            try:
+                with os.scandir(folder) as entries:
+                    folders[folder] = tuple(
+                        sorted(entry.name for entry in entries if entry.is_file())
+                    )
+            except OSError:
+                # A folder that has gone, or one that cannot be read. Left out of
+                # the reading, which the evaluation treats as nothing to say.
+                continue
+        return WatcherReading(
+            battery_percent=status.battery_percent,
+            on_mains=status.on_mains,
+            memory_used_percent=status.memory_used_percent,
+            idle_minutes=read_idle_minutes(),
+            free_gb=free,
+            folder_files=folders,
+        )
+
+    def _check_watchers(self, client: TelegramClient, config: dict) -> None:
+        """Send whatever the watchers have to say this time round."""
+        if not bool(config.get("watchers_enabled", False)):
+            return
+        watchers = [w for w in (watcher_from_dict(i) for i in self.store.load_watchers()) if w]
+        if not watchers:
+            return
+        try:
+            reading = self._watcher_reading(watchers)
+        except Exception as exc:  # a reading must never stop the bridge polling
+            self.log.emit(f"Telegram: could not read the PC for watchers ({exc})")
+            return
+        firings, self._watcher_state = evaluate_watchers(
+            watchers, reading, self._watcher_state, time.time()
+        )
+        if not firings:
+            return
+        allowed = parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids"))
+        for firing in firings:
+            self.log.emit(f"Telegram: watcher fired - {firing.message}")
+            for chat_id in allowed:
+                try:
+                    # Content, not a panel: an alert is the reason the chat
+                    # exists, and must not be taken away by the next one.
+                    client.send_message(int(chat_id), firing.message)
+                except TelegramError as exc:
+                    self.log.emit(f"Telegram: could not send an alert ({exc})")
 
     # -- dispatch --------------------------------------------------------
 
@@ -367,6 +487,9 @@ class TelegramBridge(QObject):
             return
         if trigger == "clip":
             self.clipboard_requested.emit(chat_id)
+            return
+        if trigger in {"watch", "watchers", "alerts"}:
+            self._send_watcher_panel(client, chat_id, config)
             return
         if trigger in {"commands", "list"}:
             self._send_panel(
@@ -486,6 +609,10 @@ class TelegramBridge(QObject):
 
         if action == CB_MEDIA:
             self._handle_media_tap(client, chat_id, callback_id, index, config)
+            return
+
+        if action == CB_WATCH:
+            self._handle_watcher_tap(client, chat_id, callback_id, message_id, index, config)
             return
 
         if action == CB_PRINT:
