@@ -32,6 +32,7 @@ a = Analysis(
         (str(project_dir / "mind" / "install_update.ps1"), "mind"),
         (str(project_dir / "mind" / "windows_ocr.ps1"), "mind"),
         (str(project_dir / "mind" / "windows_print.ps1"), "mind"),
+        (str(project_dir / "mind" / "windows_toast.ps1"), "mind"),
     ] + spellchecker_data + shell_menu_data,
     hiddenimports=["spellchecker"] + mind_submodules,
     hookspath=[],
