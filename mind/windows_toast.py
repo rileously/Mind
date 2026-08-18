@@ -18,6 +18,7 @@ message; the notification is the convenience, not the feature.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import winreg
 from pathlib import Path
@@ -35,10 +36,22 @@ CREATE_NO_WINDOW = 0x08000000
 CALL_TAG = "mind-call"
 TOAST_GROUP = "mind"
 
-ANSWER_URI = f"{PROTOCOL}://call/answer"
-REJECT_URI = f"{PROTOCOL}://call/reject"
-MUTE_URI = f"{PROTOCOL}://call/mute"
 KNOWN_ACTIONS = frozenset({"call/answer", "call/reject", "call/mute", "call/show"})
+
+
+def uri(action: str, phone_id: str = "") -> str:
+    """The address a notification button carries.
+
+    The phone is named in it because a house has more than one and both are
+    watched: a button meaning "answer whichever" would answer the wrong handset
+    the first time two of them rang.
+    """
+    return f"{PROTOCOL}://{action}/{phone_id}" if phone_id else f"{PROTOCOL}://{action}"
+
+
+ANSWER_URI = uri("call/answer")
+REJECT_URI = uri("call/reject")
+MUTE_URI = uri("call/mute")
 # Where a button press waits until the running copy of Mind reads it. A file
 # because the press arrives as a whole new process, which has nothing else in
 # common with the one that will act on it.
@@ -116,7 +129,7 @@ def _run(arguments: list[str], timeout: float = 20.0) -> str:
     return (done.stdout or "").strip()
 
 
-def show_call(who: str, model: str = "") -> bool:
+def show_call(who: str, model: str = "", phone_id: str = "") -> bool:
     """Show the ringing phone. False if Windows would not show it."""
     body = who or "Unknown number"
     return _run(
@@ -125,37 +138,12 @@ def show_call(who: str, model: str = "") -> bool:
             "-Title", "Incoming call",
             "-Body", body,
             "-Attribution", model or "Phone",
-            "-AnswerUri", ANSWER_URI,
-            "-MuteUri", MUTE_URI,
-            "-RejectUri", REJECT_URI,
+            "-AnswerUri", uri("call/answer", phone_id),
+            "-MuteUri", uri("call/mute", phone_id),
+            "-RejectUri", uri("call/reject", phone_id),
             "-Tag", CALL_TAG,
             "-Group", TOAST_GROUP,
             "-Ringing",
-        ]
-    ) == "shown"
-
-
-def show_in_call(who: str, model: str = "", muted: bool = False) -> bool:
-    """Show the call that is under way, with the two things left to do.
-
-    A notification is spent the moment a button on it is pressed, so answering
-    from one takes it off the screen. Muting would be unreachable a second
-    later if nothing replaced it - and mute is the button somebody reaches for
-    in the middle of a call, not at the start of it.
-    """
-    body = who or "Unknown number"
-    return _run(
-        [
-            "-Aumid", AUMID,
-            "-Title", "Muted" if muted else "In a call",
-            "-Body", body,
-            "-Attribution", model or "Phone",
-            "-MuteUri", MUTE_URI,
-            "-MuteLabel", "Unmute" if muted else "Mute",
-            "-RejectUri", REJECT_URI,
-            "-RejectLabel", "Hang up",
-            "-Tag", CALL_TAG,
-            "-Group", TOAST_GROUP,
         ]
     ) == "shown"
 
@@ -165,7 +153,9 @@ def show_in_call(who: str, model: str = "", muted: bool = False) -> bool:
 _live: subprocess.Popen | None = None
 
 
-def start_in_call(who: str, model: str = "", muted: bool = False) -> bool:
+def start_in_call(
+    who: str, model: str = "", muted: bool = False, phone_id: str = ""
+) -> bool:
     """Put the call on screen and leave it there, counting.
 
     A separate process rather than a timer here: the counting is a second of
@@ -189,9 +179,9 @@ def start_in_call(who: str, model: str = "", muted: bool = False) -> bool:
         # the phone does not know who this is.
         "-Body", who,
         "-Attribution", model or "Phone",
-        "-MuteUri", MUTE_URI,
+        "-MuteUri", uri("call/mute", phone_id),
         "-MuteLabel", "Unmute" if muted else "Mute",
-        "-RejectUri", REJECT_URI,
+        "-RejectUri", uri("call/reject", phone_id),
         "-Tag", CALL_TAG,
         "-Group", TOAST_GROUP,
         "-Live",
@@ -229,16 +219,24 @@ def dismiss_call() -> None:
 
 
 def parse_action(argument: str) -> str:
-    """What a "mind://" launch is asking for, or "" if it is asking for nothing.
+    """What a "mind://" launch is asking for, and of which phone.
 
-    Anything unrecognised is nothing. This arrives from a command line, which is
-    the one place on this machine where a stranger's text could turn up.
+    Comes back as "call/answer p2", or "" for anything unrecognised. This
+    arrives from a command line, which is the one place on this machine where a
+    stranger's text could turn up, so the action must be one of the few Mind
+    knows and the phone must look like one of Mind's own names for one.
     """
     text = (argument or "").strip().strip('"').lower()
     if not text.startswith(f"{PROTOCOL}://"):
         return ""
-    what = text[len(PROTOCOL) + 3 :].strip("/")
-    return what if what in KNOWN_ACTIONS else ""
+    parts = text[len(PROTOCOL) + 3 :].strip("/").split("/")
+    action = "/".join(parts[:2])
+    if action not in KNOWN_ACTIONS:
+        return ""
+    phone = parts[2] if len(parts) > 2 else ""
+    if phone and not re.fullmatch(r"p\d{1,3}", phone):
+        return ""
+    return f"{action} {phone}".strip()
 
 
 def remember_action(action: str) -> bool:
@@ -254,15 +252,24 @@ def remember_action(action: str) -> bool:
     return True
 
 
-def take_action() -> str:
-    """Read the waiting action and clear it, so it is acted on once only."""
+def take_action() -> tuple[str, str]:
+    """Read the waiting action and clear it, so it is acted on once only.
+
+    Comes back as the action and the phone it is about, either of which is
+    empty when there is nothing waiting.
+    """
     path = action_path()
     try:
-        action = path.read_text(encoding="utf-8").strip()
+        waiting = path.read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        return "", ""
     try:
         path.unlink()
     except OSError:
         pass
-    return action if action in KNOWN_ACTIONS else ""
+    action, _, phone = waiting.partition(" ")
+    if action not in KNOWN_ACTIONS:
+        return "", ""
+    if phone and not re.fullmatch(r"p\d{1,3}", phone):
+        phone = ""
+    return action, phone

@@ -320,25 +320,49 @@ class CallerCarriesOverTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         return PhoneWatcher(ConfigStore(root=Path(temp.name) / "config"))
 
+    def poll(self, watch, call):
+        from mind.phone_watch import PhoneEntry, PhoneStatus
+
+        entry = PhoneEntry(id="p1", serial="192.168.18.8:45217", label="Pixel 10")
+        watch._polled([PhoneStatus(entry, call, "Pixel 10", 80, "")])
+        return watch.status("p1")
+
     def test_the_name_survives_the_call_being_answered(self):
         # Android clears the incoming number when the call connects, which
-        # turned "Dhipoz" into "an unknown number" one poll later - on the
-        # notification counting the call out.
+        # turned "Dhipoz" into nobody one poll later - on the notification
+        # counting the call out.
         from mind.adb_client import CallState
 
         watch = self.watcher()
-        watch._polled(CallState("ringing", "9322011", "Dhipoz"), "Pixel 10", 80, "")
-        watch._polled(CallState("in a call", "", ""), "Pixel 10", 80, "")
-        self.assertEqual(watch.call.caller, "Dhipoz")
+        self.poll(watch, CallState("ringing", "9322011", "Dhipoz"))
+        after = self.poll(watch, CallState("in a call", "", ""))
+        self.assertEqual(after.call.caller, "Dhipoz")
 
     def test_a_call_that_ends_does_not_keep_the_name(self):
         from mind.adb_client import CallState
 
         watch = self.watcher()
-        watch._polled(CallState("ringing", "9322011", "Dhipoz"), "Pixel 10", 80, "")
-        watch._polled(CallState("idle", "", ""), "Pixel 10", 80, "")
-        self.assertFalse(watch.call.busy)
-        self.assertEqual(watch.call.number, "")
+        self.poll(watch, CallState("ringing", "9322011", "Dhipoz"))
+        after = self.poll(watch, CallState("idle", "", ""))
+        self.assertFalse(after.call.busy)
+        self.assertEqual(after.call.number, "")
+
+    def test_two_phones_keep_their_own_calls(self):
+        # The whole point of watching both: one ringing must not be read as
+        # the other ringing, and answering one must not reach the other.
+        from mind.adb_client import CallState
+        from mind.phone_watch import PhoneEntry, PhoneStatus
+
+        watch = self.watcher()
+        ten = PhoneEntry(id="p1", serial="192.168.18.8:45217", label="Pixel 10")
+        six = PhoneEntry(id="p2", serial="adb-2B031JEGR06967-x._adb-tls-connect._tcp", label="Pixel 6a")
+        watch._polled([
+            PhoneStatus(ten, CallState("ringing", "9322011", "Dhipoz"), "Pixel 10", 80, ""),
+            PhoneStatus(six, CallState("idle"), "Pixel 6a", 55, ""),
+        ])
+        self.assertTrue(watch.status("p1").call.ringing)
+        self.assertFalse(watch.status("p2").call.busy)
+        self.assertEqual(watch.busy_status.entry.id, "p1")
 
 
 if __name__ == "__main__":

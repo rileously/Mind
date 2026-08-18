@@ -100,7 +100,16 @@ from .network_scanner import (
     RouterFilterProbe,
     RouterTest,
 )
-from .phone_watch import ContactLookup, PhoneWatcher, phone_for
+from .phone_watch import (
+    ContactLookup,
+    PhoneEntry,
+    PhoneWatcher,
+    configured_phones,
+    hardware_from_serial,
+    merge_phone,
+    phone_for,
+    save_phones,
+)
 from .telegram_ui import call_alert_text
 from .windows_toast import (
     dismiss_call,
@@ -1513,6 +1522,14 @@ class PhonePage(QWidget):
         connect.addWidget(self.dial_button)
         root.addWidget(connect_card)
 
+        # One line per phone: which it is, how it is, and what it is doing.
+        # The chosen one is what Answer, Mute and Call act on; a ringing phone
+        # chooses itself, because that is the one being asked about.
+        self.phone_list = QListWidget()
+        self.phone_list.setMaximumHeight(120)
+        self.phone_list.currentRowChanged.connect(lambda _row: self._sync_actions())
+        root.addWidget(self.phone_list)
+
         self.detail = QLabel("")
         self.detail.setObjectName("Muted")
         self.detail.setWordWrap(True)
@@ -1537,8 +1554,48 @@ class PhonePage(QWidget):
             self._loading = False
         self._show_state()
 
+    def _chosen_id(self) -> str:
+        """The phone the buttons act on: the ringing one, or the picked one."""
+        watcher = self.watcher
+        if watcher is not None:
+            busy = watcher.busy_status
+            if busy is not None:
+                return busy.entry.id
+        item = self.phone_list.currentItem()
+        return item.data(Qt.UserRole) if item else ""
+
+    def _chosen_status(self):
+        watcher = self.watcher
+        return watcher.status(self._chosen_id()) if watcher else None
+
+    def _show_phones(self) -> None:
+        watcher = self.watcher
+        statuses = list(watcher.statuses) if watcher else []
+        keeping = self._chosen_id()
+        self.phone_list.blockSignals(True)
+        self.phone_list.clear()
+        for status in statuses:
+            if status.away:
+                doing = "away"
+            elif status.call.ringing:
+                doing = f"ringing - {status.call.caller or 'unknown number'}"
+            elif status.call.busy:
+                doing = "in a call"
+            else:
+                doing = "idle"
+            charge = f"{status.battery}%" if status.battery >= 0 else "battery unknown"
+            item = QListWidgetItem(f"{status.name} - {doing} - {charge}")
+            item.setData(Qt.UserRole, status.entry.id)
+            self.phone_list.addItem(item)
+            if status.entry.id == keeping:
+                self.phone_list.setCurrentItem(item)
+        if self.phone_list.currentRow() < 0 and self.phone_list.count():
+            self.phone_list.setCurrentRow(0)
+        self.phone_list.blockSignals(False)
+
     def _show_state(self) -> None:
         watcher = self.watcher
+        self._show_phones()
         if watcher is None:
             self.status_label.setText("No phone watcher is running.")
             self._sync_actions()
@@ -1549,25 +1606,31 @@ class PhonePage(QWidget):
             )
         elif not bool(self.store.load().get("phone_enabled", False)):
             self.status_label.setText("Watching is off.")
-        elif watcher.trouble:
-            self.status_label.setText(watcher.trouble)
         else:
-            call = watcher.call
-            if call.ringing:
-                self.status_label.setText(f"Ringing — {call.caller or 'unknown number'}")
-            elif call.busy:
-                self.status_label.setText("In a call")
+            status = self._chosen_status()
+            if status is None:
+                self.status_label.setText("No phone is set up yet.")
+            elif status.trouble:
+                self.status_label.setText(f"{status.name}: {status.trouble}")
+            elif status.call.ringing:
+                who = status.call.caller or "unknown number"
+                self.status_label.setText(f"{status.name} is ringing — {who}")
+            elif status.call.busy:
+                self.status_label.setText(f"{status.name} is in a call")
             else:
-                self.status_label.setText("Idle")
-        name = watcher.model or "No phone"
-        charge = f"{watcher.battery}%" if watcher.battery >= 0 else "battery unknown"
-        self.detail.setText(f"{name} · {charge}")
+                self.status_label.setText(f"{status.name} is idle")
+        watching = len(watcher.statuses)
+        self.detail.setText(
+            f"Watching {watching} phone{'s' if watching != 1 else ''}."
+            if watching
+            else "Pair a phone to start."
+        )
         self._sync_actions()
 
     def _sync_actions(self) -> None:
-        watcher = self.watcher
-        ringing = bool(watcher and watcher.call.ringing)
-        busy = bool(watcher and watcher.call.busy)
+        status = self._chosen_status()
+        ringing = bool(status and status.call.ringing)
+        busy = bool(status and status.call.busy)
         self.answer_button.setEnabled(ringing and not self._busy)
         self.hangup_button.setEnabled(busy and not self._busy)
         self.dial_button.setEnabled(not busy and not self._busy)
@@ -1580,7 +1643,7 @@ class PhonePage(QWidget):
     def _call_changed(self, _call) -> None:
         self._show_state()
 
-    def _state_changed(self, _model: str, _battery: int, _trouble: str) -> None:
+    def _state_changed(self, _statuses: list) -> None:
         self._show_state()
 
     # -- doing things ----------------------------------------------------
@@ -1626,21 +1689,22 @@ class PhonePage(QWidget):
 
     def _toggle_mute(self) -> None:
         def flip():
-            self._muted = phone_for(self.store).toggle_mute()
+            self._muted = phone_for(self.store, self._chosen_id()).toggle_mute()
             self.status_label.setText("Muted" if self._muted else "In a call")
 
         self._act("Muting", flip)
 
     def _mirror(self) -> None:
-        serial = str(self.store.load().get("phone_serial", "")).strip()
+        status = self._chosen_status()
+        serial = status.entry.serial if status else str(self.store.load().get("phone_serial", "")).strip()
         if not mirror(serial):
             self.status_label.setText("scrcpy could not be started.")
 
     def _answer(self) -> None:
-        self._act("Answering", lambda: phone_for(self.store).answer())
+        self._act("Answering", lambda: phone_for(self.store, self._chosen_id()).answer())
 
     def _hang_up(self) -> None:
-        self._act("Hanging up", lambda: phone_for(self.store).hang_up())
+        self._act("Hanging up", lambda: phone_for(self.store, self._chosen_id()).hang_up())
 
     def _dial(self) -> None:
         number = self.dial_box.text().strip()
@@ -1661,7 +1725,12 @@ class PhonePage(QWidget):
             # An outgoing call has no incoming number for the watcher to read,
             # and the one thing on this machine that knows who is being called
             # is the box it was typed into.
-            start_in_call(phone.contact_name(number) or number, self.watcher.model if self.watcher else "")
+            status = self.watcher.status() if self.watcher else None
+            start_in_call(
+                phone.contact_name(number) or number,
+                status.name if status else "",
+                phone_id=status.entry.id if status else "",
+            )
 
         self._act("Dialling", dial_and_show)
 
@@ -1685,13 +1754,33 @@ class PhonePage(QWidget):
         def connect_and_remember():
             phone = Phone()
             phone.connect(address)
-            config = self.store.load()
-            config["phone_address"] = address
-            found = [device for device in phone.devices() if device.ready]
-            if found:
-                config["phone_serial"] = found[0].serial
-            self.store.save(config)
-            self.status_label.setText(f"Connected to {address}.")
+            # Added to the list rather than replacing what is there: a second
+            # phone is a second phone, and the same phone arriving on a new
+            # address is the same phone.
+            entries = configured_phones(self.store)
+            attached = [device for device in phone.devices() if device.ready]
+            serial = next(
+                (device.serial for device in attached if device.serial == address),
+                address,
+            )
+            label = next(
+                (device.display_name for device in attached if device.serial == serial),
+                "",
+            )
+            hardware = hardware_from_serial(serial)
+            if not hardware:
+                try:
+                    hardware = Phone(serial=serial).hardware_serial()
+                except AdbError:
+                    hardware = ""
+            entries = merge_phone(
+                entries,
+                PhoneEntry(id="", serial=serial, address=address, label=label, hardware=hardware),
+            )
+            save_phones(self.store, entries)
+            self.status_label.setText(f"Connected to {label or address}.")
+            if self.watcher is not None:
+                self.watcher.poll_now()
 
         self._act("Connecting", connect_and_remember)
 
@@ -3198,7 +3287,12 @@ class MindWindow(QMainWindow):
             self._log(f"Dialling failed: {exc}")
             return
         self._log(f"Dialling {number} on the phone")
-        start_in_call(phone.contact_name(number) or number, self.phone_watcher.model)
+        status = self.phone_watcher.status()
+        start_in_call(
+            phone.contact_name(number) or number,
+            status.name if status else "",
+            phone_id=status.entry.id if status else "",
+        )
         self.phone_watcher.poll_now()
 
     def _register_notifications(self) -> None:
@@ -3236,13 +3330,16 @@ class MindWindow(QMainWindow):
         as it is read, so a second press cannot act twice on a call that has
         already been dealt with.
         """
-        action = take_action()
+        action, phone_id = take_action()
         if not action:
             return
         if action == "call/show":
             self.show_window()
             return
-        phone = phone_for(self.store)
+        # The phone named on the button, or the one with a call on it - a
+        # notification from before this version carries no name.
+        status = self.phone_watcher.status(phone_id) or self.phone_watcher.busy_status
+        phone = phone_for(self.store, phone_id)
         try:
             if action == "call/answer":
                 phone.answer()
@@ -3252,7 +3349,12 @@ class MindWindow(QMainWindow):
                 # place saying which way the microphone now is.
                 muted = phone.toggle_mute()
                 self._log("Muted the call" if muted else "Unmuted the call")
-                start_in_call(self.phone_watcher.call.caller, self.phone_watcher.model, muted)
+                start_in_call(
+                    status.call.caller if status else "",
+                    status.name if status else "",
+                    muted,
+                    phone_id=phone_id or (status.entry.id if status else ""),
+                )
                 self.phone_watcher.poll_now()
                 return
             elif action == "call/reject":
@@ -3265,27 +3367,31 @@ class MindWindow(QMainWindow):
         stop_in_call()
         self.phone_watcher.poll_now()
 
-    def _on_call_changed(self, call) -> None:
-        """Say that the phone is ringing, wherever the user is.
+    def _on_call_changed(self, status) -> None:
+        """Say that a phone is ringing, wherever the user is, and say which.
 
         Only the arrival is announced. A call being answered or ending is
         something the person already knows about, having done it.
         """
+        call = status.call
         if call.busy and not call.ringing:
             # Answered - by the notification, by Telegram, or by picking the
             # phone up. Either way there is still a call, and the two things
             # worth doing to one are not the two things worth doing to a ring.
-            start_in_call(call.caller, self.phone_watcher.model)
+            start_in_call(call.caller, status.name, phone_id=status.entry.id)
             return
         if not call.ringing:
-            # The call is over, one way or another, and a notification about a
-            # phone that has stopped ringing is only in the way.
-            stop_in_call()
+            # Over, one way or another. A notification about a phone that has
+            # stopped ringing is only in the way - but only if it was this
+            # phone's notification, since another may still be in a call.
+            busy = self.phone_watcher.busy_status
+            if busy is None:
+                stop_in_call()
             return
-        show_call(call.caller, self.phone_watcher.model)
+        show_call(call.caller, status.name, phone_id=status.entry.id)
         self.notify_telegram(
-            call_alert_text(call.caller, self.phone_watcher.model),
-            self.telegram.call_keyboard(),
+            call_alert_text(call.caller, status.name),
+            self.telegram.call_keyboard(status.entry.id),
         )
 
     def configure_network_scan(self) -> None:

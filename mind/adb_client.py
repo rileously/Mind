@@ -462,6 +462,15 @@ class Phone:
         found = re.search(r"level:\s*(\d+)", self.shell("dumpsys", "battery"))
         return int(found.group(1)) if found else -1
 
+    def hardware_serial(self) -> str:
+        """What the handset itself calls itself.
+
+        The same phone answers on an address and on the name it advertises, and
+        on a different address after every restart. This is the one thing about
+        it that does not change.
+        """
+        return self.shell("getprop", "ro.serialno").strip()
+
     def model(self) -> str:
         return self.shell("getprop", "ro.product.model").strip()
 

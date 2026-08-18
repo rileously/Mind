@@ -560,7 +560,7 @@ def build_device_alert_keyboard(mac: str, name: str) -> dict:
     }
 
 
-def build_call_keyboard() -> dict:
+def build_call_keyboard(phone_id: str = "") -> dict:
     """Answer or refuse the call that is ringing.
 
     One tap each, and no confirmation: a ringing phone is a few seconds long,
@@ -569,14 +569,20 @@ def build_call_keyboard() -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "📞  Answer", "callback_data": CB_CALL_ANSWER},
-                {"text": "✕  Reject", "callback_data": CB_CALL_REJECT},
+                {
+                    "text": "📞  Answer",
+                    "callback_data": f"{CB_CALL_ANSWER}:{phone_id}" if phone_id else CB_CALL_ANSWER,
+                },
+                {
+                    "text": "✕  Reject",
+                    "callback_data": f"{CB_CALL_REJECT}:{phone_id}" if phone_id else CB_CALL_REJECT,
+                },
             ]
         ]
     }
 
 
-def build_in_call_keyboard(muted: bool = False) -> dict:
+def build_in_call_keyboard(muted: bool = False, phone_id: str = "") -> dict:
     """What is left to do once the call is connected.
 
     Mute is the button somebody reaches for in the middle of a call rather
@@ -587,9 +593,12 @@ def build_in_call_keyboard(muted: bool = False) -> dict:
             [
                 {
                     "text": "🔊  Unmute" if muted else "🔇  Mute",
-                    "callback_data": CB_CALL_MUTE,
+                    "callback_data": f"{CB_CALL_MUTE}:{phone_id}" if phone_id else CB_CALL_MUTE,
                 },
-                {"text": "✕  Hang up", "callback_data": CB_CALL_REJECT},
+                {
+                    "text": "✕  Hang up",
+                    "callback_data": f"{CB_CALL_REJECT}:{phone_id}" if phone_id else CB_CALL_REJECT,
+                },
             ]
         ]
     }

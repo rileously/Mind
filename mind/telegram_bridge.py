@@ -123,7 +123,8 @@ from dataclasses import replace as replace_device
 
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
-from .adb_client import AdbError, Phone
+from .adb_client import AdbError
+from .phone_watch import phone_for
 from .router_client import RouterError, set_blocked
 from .watchers import (
     Reading as WatcherReading,
@@ -526,11 +527,15 @@ class TelegramBridge(QObject):
         """
         return isinstance(message_id, int) and self._panels.get((chat_id, kind)) == message_id
 
-    def call_keyboard(self) -> dict | None:
-        """The buttons for a ringing phone, when there is a phone to act on."""
+    def call_keyboard(self, phone_id: str = "") -> dict | None:
+        """The buttons for a ringing phone, when there is a phone to act on.
+
+        The phone is named on the buttons: a tap arriving from a message about
+        one handset must not reach another that happens to be ringing now.
+        """
         if not bool(self.store.load().get("phone_enabled", False)):
             return None
-        return build_call_keyboard()
+        return build_call_keyboard(phone_id)
 
     def _handle_call_tap(
         self,
@@ -540,6 +545,7 @@ class TelegramBridge(QObject):
         message_id: object,
         doing: str,
         config: dict,
+        phone_id: str = "",
     ) -> None:
         """Answer or refuse the call, and say in the message what happened.
 
@@ -551,8 +557,7 @@ class TelegramBridge(QObject):
         if not bool(config.get("phone_enabled", False)):
             client.send_message(chat_id, "The phone is not switched on in Mind.")
             return
-        serial = str(self.store.load().get("phone_serial", "")).strip()
-        phone = Phone(serial=serial)
+        phone = phone_for(self.store, phone_id)
         keyboard = None
         try:
             if doing == "answer":
@@ -560,11 +565,11 @@ class TelegramBridge(QObject):
                 said = "Answered." if took else "The phone would not take it."
                 # Still a call to act on, so the message keeps buttons: the
                 # ones that make sense once somebody is talking.
-                keyboard = build_in_call_keyboard(False) if took else None
+                keyboard = build_in_call_keyboard(False, phone_id) if took else None
             elif doing == "mute":
                 muted = phone.toggle_mute()
                 said = "Muted." if muted else "Unmuted."
-                keyboard = build_in_call_keyboard(muted)
+                keyboard = build_in_call_keyboard(muted, phone_id)
             else:
                 phone.hang_up()
                 said = "Hung up."
@@ -1051,8 +1056,10 @@ class TelegramBridge(QObject):
                 CB_CALL_MUTE: "mute",
                 CB_CALL_REJECT: "hang up",
             }[action]
+            # The phone rides on the button: "d:p2" means that handset.
+            _code, _, phone_id = str(callback.get("data", "")).partition(":")
             self._handle_call_tap(
-                client, chat_id, callback_id, message_id, doing, config
+                client, chat_id, callback_id, message_id, doing, config, phone_id
             )
             return
 
