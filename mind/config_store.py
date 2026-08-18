@@ -120,6 +120,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Shutdown and restart, kept behind their own switch because they are the
     # only controls that can lose unsaved work.
     "telegram_power_enabled": False,
+    # Sharing this PC's connection over its own Wi-Fi, for the end of the
+    # house the router does not reach. Off until asked for: it changes the
+    # radio this PC is using to stay online.
+    "telegram_hotspot_enabled": False,
+    # Give the hotspot the home network's name and password, so a phone
+    # moves onto it without being told to.
+    "hotspot_match_home_wifi": True,
     # "Send to Telegram" in the Explorer right-click menu, and the chat those
     # sends go to. The chat must still be one of the allowed ids.
     "telegram_send_menu_enabled": False,

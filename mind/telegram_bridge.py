@@ -118,9 +118,17 @@ from .telegram_ui import (
     media_key_at,
     menu_action_at,
     menu_text,
+    build_hotspot_keyboard,
+    hotspot_text,
+    CB_HOTSPOT,
+    HOTSPOT_REFRESH,
+    HOTSPOT_START,
+    HOTSPOT_STOP,
+    HOTSPOT_MATCH,
 )
 from dataclasses import replace as replace_device
 
+from .hotspot import Hotspot, HotspotError, current_wifi
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
 from .adb_client import AdbError
@@ -167,6 +175,10 @@ from .transform_client import TransformError, transform_text
 
 
 POLL_TIMEOUT_SECONDS = 25
+# How long a hotspot stays up with nothing connected before Mind takes it
+# down. Long enough to walk to the other end of the house and for a phone
+# to decide to move, short enough that a forgotten tap costs nothing.
+HOTSPOT_IDLE_SECONDS = 300
 # Panel kinds. A message is a panel when only its newest copy is useful; two of
 # them in the chat is a scrolling problem, never extra information.
 PANEL_MENU = "menu"
@@ -182,6 +194,7 @@ PANEL_WATCH = "watch"
 PANEL_POWER = "power"
 PANEL_APPS = "apps"
 PANEL_DEVICES = "devices"
+PANEL_HOTSPOT = "hotspot"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
@@ -248,6 +261,12 @@ class TelegramBridge(QObject):
         # The apps /apps last listed per chat, so a button means the one whose
         # name was written on it.
         self._listed_apps: dict[int, tuple[str, ...]] = {}
+        # The hotspot is only watched once Mind has been asked to turn it on,
+        # so a PC that never shares its connection never pays for the check.
+        # The chat is kept so the message saying it turned itself off goes
+        # back to whoever asked for it.
+        self._hotspot_chat: int | None = None
+        self._hotspot_idle_since: float | None = None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -320,6 +339,7 @@ class TelegramBridge(QObject):
                 # Checked on the poll's own tick: no timer, no second thread, and
                 # the loop is already awake every twenty-five seconds.
                 self._check_watchers(self._client, config)
+                self._check_hotspot(self._client, config)
                 updates = self._client.get_updates(self._offset, timeout=POLL_TIMEOUT_SECONDS)
             except TelegramError as exc:
                 self.log.emit(f"Telegram: {exc}")
@@ -721,6 +741,163 @@ class TelegramBridge(QObject):
         # Redrawn either way, so the list shows what is actually still running.
         self._send_apps_panel(client, chat_id, config, message_id)
 
+    # -- hotspot ---------------------------------------------------------
+
+    def _hotspot_panel_parts(self, config: dict) -> tuple[str, dict]:
+        """The panel's words and buttons, for whatever state the radio is in."""
+        if not bool(config.get("telegram_hotspot_enabled", False)):
+            return hotspot_text("off", 0, "", enabled=False), build_menu_keyboard()
+        home_ssid, _key = current_wifi()
+        try:
+            state = Hotspot().state()
+        except HotspotError as exc:
+            return f"📡 {exc}", build_menu_keyboard()
+        matched = bool(home_ssid) and state.ssid == home_ssid
+        text = hotspot_text(
+            state.state,
+            state.clients,
+            state.ssid,
+            home_ssid,
+            idle_minutes=HOTSPOT_IDLE_SECONDS // 60,
+        )
+        return text, build_hotspot_keyboard(state.state, matched, state.clients)
+
+    def _send_hotspot_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        text, keyboard = self._hotspot_panel_parts(config)
+        if self._replace_panel(
+            client, chat_id, message_id, PANEL_HOTSPOT, text, keyboard, html=True
+        ):
+            return
+        self._send_panel(client, chat_id, PANEL_HOTSPOT, text, keyboard, html=True)
+
+    def _handle_hotspot_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        index: int | None,
+        config: dict,
+    ) -> None:
+        """Turn the hotspot on or off, then show what actually happened."""
+        if not bool(config.get("telegram_hotspot_enabled", False)):
+            client.answer_callback_query(
+                callback_id, "Sharing this PC's Wi-Fi is switched off.", alert=True
+            )
+            return
+
+        radio = Hotspot()
+        try:
+            if index == HOTSPOT_START:
+                client.answer_callback_query(callback_id, "Starting the hotspot…")
+                # Named after the home network before it comes up, so a phone
+                # that is already looking for that name finds this one too.
+                self._match_home_wifi(radio, config)
+                state = radio.start()
+                if state.is_on:
+                    self._hotspot_chat = chat_id
+                    self._hotspot_idle_since = time.monotonic()
+                    self.log.emit(f"Telegram: hotspot on as {state.ssid or 'the saved name'}")
+            elif index == HOTSPOT_STOP:
+                client.answer_callback_query(callback_id, "Stopping the hotspot…")
+                radio.stop()
+                self._hotspot_chat = None
+                self._hotspot_idle_since = None
+                self.log.emit("Telegram: hotspot off")
+            elif index == HOTSPOT_MATCH:
+                client.answer_callback_query(callback_id, "Renaming…")
+                if not self._match_home_wifi(radio, config):
+                    client.answer_callback_query(
+                        callback_id,
+                        "Windows would not say what this PC's Wi-Fi password is. "
+                        "Set the hotspot name yourself in Windows Settings.",
+                        alert=True,
+                    )
+            else:
+                client.answer_callback_query(callback_id)
+        except HotspotError as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+
+        # Redrawn whatever happened, so the panel shows the radio's real state
+        # rather than the one the tap asked for.
+        self._send_hotspot_panel(client, chat_id, config, message_id)
+
+    def _match_home_wifi(self, radio: Hotspot, config: dict) -> bool:
+        """Give the hotspot the name and password of the Wi-Fi this PC is on.
+
+        Two access points with one name and one password is what a phone
+        already knows how to handle: it moves to whichever is stronger without
+        being asked. Windows hands out its own addresses behind the hotspot
+        rather than the router's, so this is not a true extender - a connection
+        held open across the move will drop - but for picking up a page in a
+        room the router does not reach, it is the difference between working
+        and not.
+        """
+        if not bool(config.get("hotspot_match_home_wifi", True)):
+            return True
+        ssid, key = current_wifi()
+        if not ssid or len(key) < 8:
+            return False
+        try:
+            if radio.state().ssid == ssid:
+                return True
+            radio.configure(ssid, key)
+        except HotspotError:
+            return False
+        return True
+
+    def _check_hotspot(self, client: TelegramClient, config: dict) -> None:
+        """Take the hotspot down once nothing has been using it for a while.
+
+        There is no "off" button while it is carrying somebody, because the
+        phone tapping it is usually the one being carried. This is the ending
+        instead: the radio goes quiet on its own, some minutes after the last
+        device leaves.
+        """
+        if self._hotspot_chat is None:
+            return
+        if not bool(config.get("telegram_hotspot_enabled", False)):
+            self._hotspot_chat = None
+            self._hotspot_idle_since = None
+            return
+        try:
+            state = Hotspot().state()
+        except HotspotError:
+            return
+        if not state.is_on:
+            self._hotspot_chat = None
+            self._hotspot_idle_since = None
+            return
+        if state.clients > 0:
+            self._hotspot_idle_since = None
+            return
+        now = time.monotonic()
+        if self._hotspot_idle_since is None:
+            self._hotspot_idle_since = now
+            return
+        if now - self._hotspot_idle_since < HOTSPOT_IDLE_SECONDS:
+            return
+        chat_id = self._hotspot_chat
+        self._hotspot_chat = None
+        self._hotspot_idle_since = None
+        try:
+            Hotspot().stop()
+        except HotspotError as exc:
+            self.log.emit(f"Telegram: could not stop the hotspot ({exc})")
+            return
+        self.log.emit("Telegram: hotspot off after nothing used it")
+        client.send_message(
+            chat_id,
+            f"📡 Hotspot off. Nothing had connected for "
+            f"{HOTSPOT_IDLE_SECONDS // 60} minutes.",
+        )
+
     def _load_watchers(self) -> list:
         return [w for w in (watcher_from_dict(i) for i in self.store.load_watchers()) if w]
 
@@ -922,6 +1099,10 @@ class TelegramBridge(QObject):
         if trigger in {"apps", "running", "tasks"}:
             self._send_apps_panel(client, chat_id, config)
             return
+        # Not "wifi": that already means the devices on it.
+        if trigger in {"hotspot", "share", "tether"}:
+            self._send_hotspot_panel(client, chat_id, config)
+            return
         if trigger in {"watch", "watchers", "alerts"}:
             self._send_watcher_panel(client, chat_id, config)
             return
@@ -1075,6 +1256,12 @@ class TelegramBridge(QObject):
 
         if action == CB_APP_KILL:
             self._handle_apps_tap(client, chat_id, callback_id, message_id, index, config)
+            return
+
+        if action == CB_HOTSPOT:
+            self._handle_hotspot_tap(
+                client, chat_id, callback_id, message_id, index, config
+            )
             return
 
         if action == CB_APP_CLOSE:
@@ -1417,6 +1604,8 @@ class TelegramBridge(QObject):
                 )
         elif action.key == "apps":
             self._send_apps_panel(client, chat_id, config, message_id)
+        elif action.key == "hotspot":
+            self._send_hotspot_panel(client, chat_id, config, message_id)
         elif action.key == "files":
             # The listing takes the menu's place, which is also how the browsing
             # buttons already behave once you are inside a folder.
@@ -2218,6 +2407,11 @@ class TelegramBridge(QObject):
             ]
             if config.get("telegram_power_enabled", False):
                 lines += ["/shutdown, /restart, /abort"]
+        if config.get("telegram_hotspot_enabled", False):
+            lines += [
+                "",
+                "/hotspot      share this PC's Wi-Fi with the far end of the house",
+            ]
         lines += ["", "Shell commands are not available from Telegram."]
         return "\n".join(lines)
 

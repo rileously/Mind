@@ -2134,6 +2134,26 @@ class SettingsPage(QWidget):
             self.telegram_power,
             "✈",
         )
+        self.telegram_hotspot = ToggleSwitch()
+        self._setting_row(
+            telegram_layout,
+            "Share this PC's Wi-Fi from Telegram",
+            "Turns this PC into an access point for the rooms the router does not "
+            "reach. On a PC that is itself on Wi-Fi the speed roughly halves, and it "
+            "switches itself off once nothing has used it for five minutes.",
+            self.telegram_hotspot,
+            "✈",
+        )
+        self.hotspot_match = ToggleSwitch()
+        self._setting_row(
+            telegram_layout,
+            "Give it the home Wi-Fi name",
+            "The hotspot takes the name and password of the network this PC is on, so "
+            "a phone moves onto it by itself when it is the stronger of the two. Turn "
+            "this off to keep the name Windows was given.",
+            self.hotspot_match,
+            "✈",
+        )
         for widget in (
             self.telegram_token,
             self.telegram_chat_ids,
@@ -2155,6 +2175,8 @@ class SettingsPage(QWidget):
             "✈",
         )
         self.telegram_control.toggled.connect(self.telegram_power.setEnabled)
+        self.telegram_enabled.toggled.connect(self.telegram_hotspot.setEnabled)
+        self.telegram_hotspot.toggled.connect(self.hotspot_match.setEnabled)
         self.telegram_enabled.toggled.connect(self.telegram_send_menu.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
@@ -2277,6 +2299,8 @@ class SettingsPage(QWidget):
             self.watchers_enabled,
             self.telegram_control,
             self.telegram_power,
+            self.telegram_hotspot,
+            self.hotspot_match,
             self.telegram_send_menu,
             self.secret_shield,
             self.url_peek,
@@ -2460,6 +2484,11 @@ class SettingsPage(QWidget):
             widget.setEnabled(telegram_on and files_on)
         self.telegram_control.setEnabled(telegram_on)
         self.telegram_power.setEnabled(telegram_on and control_on)
+        hotspot_on = bool(config.get("telegram_hotspot_enabled", False))
+        self.telegram_hotspot.setChecked(hotspot_on)
+        self.telegram_hotspot.setEnabled(telegram_on)
+        self.hotspot_match.setChecked(bool(config.get("hotspot_match_home_wifi", True)))
+        self.hotspot_match.setEnabled(telegram_on and hotspot_on)
         self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
         self.telegram_send_menu.setEnabled(telegram_on)
         self.secret_shield.setChecked(bool(config.get("secret_shield_enabled", True)))
@@ -2523,6 +2552,8 @@ class SettingsPage(QWidget):
                 "watchers_enabled": self.watchers_enabled.isChecked(),
                 "telegram_control_enabled": self.telegram_control.isChecked(),
                 "telegram_power_enabled": self.telegram_power.isChecked(),
+                "telegram_hotspot_enabled": self.telegram_hotspot.isChecked(),
+                "hotspot_match_home_wifi": self.hotspot_match.isChecked(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
@@ -2593,6 +2624,8 @@ class SettingsPage(QWidget):
         self.telegram_print.setEnabled(telegram_on and files_on)
         self.watchers_enabled.setEnabled(telegram_on)
         self.telegram_power.setEnabled(telegram_on and self.telegram_control.isChecked())
+        self.telegram_hotspot.setEnabled(telegram_on)
+        self.hotspot_match.setEnabled(telegram_on and self.telegram_hotspot.isChecked())
         self.palette_auto_show.setEnabled(self.mind_palette.isChecked())
         self.palette_shortcut.setEnabled(self.mind_palette.isChecked())
         self.snip_shortcut.setEnabled(self.screen_snip.isChecked())

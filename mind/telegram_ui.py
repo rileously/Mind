@@ -71,6 +71,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("print", "🖨  Print", "telegram_print_enabled"),
     MenuAction("power", "⏻  Power", "telegram_power_enabled"),
     MenuAction("help", "❓  Help"),
+    MenuAction("hotspot", "📡  Hotspot", "telegram_hotspot_enabled"),
 )
 
 # Label, and the argument press_media_key already understands.
@@ -374,6 +375,13 @@ CB_CALL_REJECT = "i"
 CB_CALL_MUTE = "t"
 CB_DEVICE_ASK = "b"
 CB_DEVICE_BLOCK = "c"
+# The hotspot panel. "w:1" turns it on, "w:2" off, "w:3" gives it the name of
+# the Wi-Fi this PC is on, and "w:0" draws the panel again.
+CB_HOTSPOT = "w"
+HOTSPOT_REFRESH = 0
+HOTSPOT_START = 1
+HOTSPOT_STOP = 2
+HOTSPOT_MATCH = 3
 
 
 # Enough that the phone in question is almost certainly on the panel, few
@@ -715,6 +723,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("shutdown", "Shut this PC down", "telegram_power_enabled"),
     ("restart", "Restart this PC", "telegram_power_enabled"),
     ("abort", "Call off a shutdown", "telegram_power_enabled"),
+    ("hotspot", "Share this PC's Wi-Fi", "telegram_hotspot_enabled"),
 )
 
 # Telegram's own limit, and it rejects the whole list if it is exceeded.
@@ -762,3 +771,86 @@ def commands_signature(config: dict, commands: list[dict] | None = None) -> str:
     settings change and not once every twenty-five seconds.
     """
     return "|".join(f"{entry['command']}:{entry['description']}" for entry in bot_commands(config, commands))
+
+
+def build_hotspot_keyboard(state: str, matched: bool = True, clients: int = 0) -> dict:
+    """On or off, and a way to make the hotspot look like the home network.
+
+    The off button says how many devices are on it, because the phone reading
+    this panel is quite likely one of them and the tap would be cutting its own
+    connection. That is survivable - a hotspot named after the home network is
+    one the phone simply falls back off - so this warns rather than refuses.
+    """
+    rows: list[list[dict]] = []
+    if state == "on":
+        label = "⏹  Turn off"
+        if clients:
+            label = f"⏹  Turn off ({clients} connected)"
+        rows.append([{"text": label, "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_STOP}"}])
+    elif state == "intransition":
+        rows.append([{"text": "…  Working", "callback_data": CB_NOOP}])
+    else:
+        rows.append([{"text": "📡  Turn on", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_START}"}])
+    if not matched:
+        rows.append(
+            [{"text": "🏠  Use the home Wi-Fi name", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_MATCH}"}]
+        )
+    rows.append(
+        [
+            {"text": "⟳  Refresh", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_REFRESH}"},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def hotspot_text(
+    state: str,
+    clients: int,
+    ssid: str,
+    home_ssid: str = "",
+    idle_minutes: int = 0,
+    enabled: bool = True,
+) -> str:
+    """What the hotspot panel says.
+
+    It reports the name rather than the password. A hotspot that carries the
+    home network's name also carries its password, which is already on the
+    phone reading this, and a chat message is not where the other one belongs.
+    """
+    if not enabled:
+        return (
+            "The hotspot is switched off. Turn on 'Share this PC's Wi-Fi from "
+            "Telegram' in Mind's Preferences to use it."
+        )
+    name = ssid or "the hotspot"
+    if state == "on":
+        lines = [f"📡 <b>{name}</b> is on."]
+        if clients:
+            lines.append(f"{clients} device{'s' if clients != 1 else ''} connected.")
+        else:
+            lines.append("Nothing has connected yet.")
+        if idle_minutes:
+            lines.append(
+                f"It turns itself off after {idle_minutes} minutes with nothing connected."
+            )
+        if home_ssid and ssid == home_ssid:
+            lines += [
+                "",
+                "It carries the same name and password as the home Wi-Fi, so a "
+                "phone moves onto it by itself once this one is the stronger of "
+                "the two.",
+            ]
+        return "\n".join(lines)
+    if state == "intransition":
+        return f"📡 {name} is still coming up. Refresh in a moment."
+    lines = [f"📡 <b>{name}</b> is off."]
+    if home_ssid and ssid and ssid != home_ssid:
+        lines += [
+            "",
+            f"It is named <b>{ssid}</b> rather than <b>{home_ssid}</b>, so a phone "
+            "will not move onto it without being told to.",
+        ]
+    lines += ["", "This PC is on Wi-Fi, so sharing it halves the speed. It is the "
+              "reach that is worth having, not the speed."]
+    return "\n".join(lines)

@@ -101,6 +101,44 @@ class BridgeHarness:
         self.bridge._show_menu(self.client, 7, "cb", message_id, index, self.config)
 
 
+class HotspotPanelTests(BridgeHarness, unittest.TestCase):
+    """The hotspot panel, without a radio to bring up.
+
+    Only the paths that never reach Windows are exercised here: the refusal
+    when the setting is off, and the idle check declining to run at all. What
+    the script itself says is covered in test_hotspot.
+    """
+
+    def test_the_button_is_hidden_until_the_setting_is_on(self):
+        from mind.telegram_ui import available_menu_actions
+
+        keys = {action.key for _index, action in available_menu_actions(self.config)}
+        self.assertNotIn("hotspot", keys)
+        self.config["telegram_hotspot_enabled"] = True
+        keys = {action.key for _index, action in available_menu_actions(self.config)}
+        self.assertIn("hotspot", keys)
+
+    def test_a_tap_with_it_switched_off_says_so_rather_than_starting_a_radio(self):
+        self.bridge._send_hotspot_panel(self.client, 7, self.config)
+        self.assertIn("switched off", str(self.client.sent[0]["text"]))
+
+    def test_a_button_press_with_it_switched_off_is_refused(self):
+        self.bridge._handle_hotspot_tap(self.client, 7, "cb", None, 1, self.config)
+        self.assertIn("switched off", " ".join(self.client.answered))
+
+    def test_nothing_is_watched_until_a_hotspot_has_been_started(self):
+        # The check spawns PowerShell, so a PC that never shares its connection
+        # should never reach it.
+        self.assertIsNone(self.bridge._hotspot_chat)
+        self.bridge._check_hotspot(self.client, self.config)
+        self.assertEqual(self.client.sent, [])
+
+    def test_switching_the_setting_off_stops_the_watching(self):
+        self.bridge._hotspot_chat = 7
+        self.bridge._check_hotspot(self.client, self.config)
+        self.assertIsNone(self.bridge._hotspot_chat)
+
+
 class MenuFlowTests(BridgeHarness, unittest.TestCase):
     """The menu itself: replaced when sent again, reused when tapped."""
 
