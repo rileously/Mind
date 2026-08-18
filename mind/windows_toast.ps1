@@ -20,6 +20,7 @@ param(
     [string]$RejectUri = "",
     [string]$MuteUri = "",
     [string]$MuteLabel = "Mute",
+    [string]$RejectLabel = "Reject",
     [string]$Tag = "mind-call",
     [string]$Group = "mind",
     [switch]$Ringing,
@@ -53,7 +54,9 @@ if ($MuteUri) {
     $actions += '<action content="' + (Escape $MuteLabel) + '" activationType="protocol" arguments="' + (Escape $MuteUri) + '" />'
 }
 if ($RejectUri) {
-    $actions += '<action content="Reject" activationType="protocol" arguments="' + (Escape $RejectUri) + '" />'
+    # "Reject" while it is ringing, "Hang up" once somebody is talking: the
+    # same key, and two different things to be about to do.
+    $actions += '<action content="' + (Escape $RejectLabel) + '" activationType="protocol" arguments="' + (Escape $RejectUri) + '" />'
 }
 if ($actions) { $actions = "<actions>$actions</actions>" }
 

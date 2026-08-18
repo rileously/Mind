@@ -282,5 +282,23 @@ class MuteTests(unittest.TestCase):
         self.assertIn(["adb.exe", "shell", "input", "tap", "60", "70"], recorder.calls)
 
 
+class NotificationLabelTests(unittest.TestCase):
+    """What the same key is called at two different moments."""
+
+    def test_a_ringing_call_is_rejected_and_a_connected_one_is_hung_up(self):
+        # One keycode, two words. "Reject" once you are already talking reads
+        # as though it would do something else.
+        from mind.windows_toast import REJECT_URI
+
+        self.assertTrue(REJECT_URI.endswith("call/reject"))
+
+    def test_the_script_takes_a_label_for_it(self):
+        from pathlib import Path
+
+        script = Path("mind/windows_toast.ps1").read_text(encoding="utf-8")
+        self.assertIn("$RejectLabel", script)
+        self.assertIn("$MuteLabel", script)
+
+
 if __name__ == "__main__":
     unittest.main()

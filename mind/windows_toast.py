@@ -153,6 +153,7 @@ def show_in_call(who: str, model: str = "", muted: bool = False) -> bool:
             "-MuteUri", MUTE_URI,
             "-MuteLabel", "Unmute" if muted else "Mute",
             "-RejectUri", REJECT_URI,
+            "-RejectLabel", "Hang up",
             "-Tag", CALL_TAG,
             "-Group", TOAST_GROUP,
         ]

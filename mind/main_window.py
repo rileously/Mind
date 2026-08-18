@@ -1654,7 +1654,15 @@ class PhonePage(QWidget):
         )
         if confirmed != QMessageBox.Yes:
             return
-        self._act("Dialling", lambda: phone_for(self.store).dial(number))
+        def dial_and_show():
+            phone = phone_for(self.store)
+            phone.dial(number)
+            # An outgoing call has no incoming number for the watcher to read,
+            # and the one thing on this machine that knows who is being called
+            # is the box it was typed into.
+            show_in_call(phone.contact_name(number) or number, self.watcher.model if self.watcher else "")
+
+        self._act("Dialling", dial_and_show)
 
     def _pair(self) -> None:
         address = self.pair_address.text().strip()
