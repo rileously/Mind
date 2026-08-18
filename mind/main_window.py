@@ -106,7 +106,8 @@ from .windows_toast import (
     dismiss_call,
     register as register_toasts,
     show_call,
-    show_in_call,
+    start_in_call,
+    stop_in_call,
     take_action,
 )
 from .telegram_system import read_running_apps, read_visible_apps
@@ -1660,7 +1661,7 @@ class PhonePage(QWidget):
             # An outgoing call has no incoming number for the watcher to read,
             # and the one thing on this machine that knows who is being called
             # is the box it was typed into.
-            show_in_call(phone.contact_name(number) or number, self.watcher.model if self.watcher else "")
+            start_in_call(phone.contact_name(number) or number, self.watcher.model if self.watcher else "")
 
         self._act("Dialling", dial_and_show)
 
@@ -3209,7 +3210,7 @@ class MindWindow(QMainWindow):
                 # place saying which way the microphone now is.
                 muted = phone.toggle_mute()
                 self._log("Muted the call" if muted else "Unmuted the call")
-                show_in_call(self.phone_watcher.call.caller, self.phone_watcher.model, muted)
+                start_in_call(self.phone_watcher.call.caller, self.phone_watcher.model, muted)
                 self.phone_watcher.poll_now()
                 return
             elif action == "call/reject":
@@ -3219,7 +3220,7 @@ class MindWindow(QMainWindow):
             self._log(f"The phone could not be reached: {exc}")
         except Exception as exc:
             self._log(f"The call action failed: {exc}")
-        dismiss_call()
+        stop_in_call()
         self.phone_watcher.poll_now()
 
     def _on_call_changed(self, call) -> None:
@@ -3232,12 +3233,12 @@ class MindWindow(QMainWindow):
             # Answered - by the notification, by Telegram, or by picking the
             # phone up. Either way there is still a call, and the two things
             # worth doing to one are not the two things worth doing to a ring.
-            show_in_call(call.caller, self.phone_watcher.model)
+            start_in_call(call.caller, self.phone_watcher.model)
             return
         if not call.ringing:
             # The call is over, one way or another, and a notification about a
             # phone that has stopped ringing is only in the way.
-            dismiss_call()
+            stop_in_call()
             return
         show_call(call.caller, self.phone_watcher.model)
         self.notify_telegram(

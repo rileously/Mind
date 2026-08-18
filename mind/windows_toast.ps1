@@ -24,7 +24,10 @@ param(
     [string]$Tag = "mind-call",
     [string]$Group = "mind",
     [switch]$Ringing,
-    [switch]$Dismiss
+    [switch]$Dismiss,
+    # Stays on screen and counts, until this process is ended.
+    [switch]$Live,
+    [int]$MaxMinutes = 240
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +47,69 @@ if ($Dismiss) {
 
 function Escape([string]$value) {
     return [System.Security.SecurityElement]::Escape($value)
+}
+
+function NewData([string]$caller, [string]$duration, [int]$sequence) {
+    # Built from a dictionary rather than by writing into Values: PowerShell
+    # sees that map as a bare COM object with no methods it can reach.
+    $pairs = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $pairs.Add("caller", $caller)
+    $pairs.Add("duration", $duration)
+    $data = New-Object Windows.UI.Notifications.NotificationData($pairs)
+    $data.SequenceNumber = $sequence
+    return $data
+}
+
+function Spoken([timespan]$span) {
+    if ($span.TotalHours -ge 1) {
+        return "{0}:{1:d2}:{2:d2}" -f [int]$span.TotalHours, $span.Minutes, $span.Seconds
+    }
+    return "{0:d2}:{1:d2}" -f $span.Minutes, $span.Seconds
+}
+
+if ($Live) {
+    # A call on screen for as long as it lasts, with the time it has taken so
+    # far. The text is updated in place rather than the notification being
+    # shown again: shown again, it would re-announce itself once a second.
+    [void][Windows.UI.Notifications.NotificationData, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    $liveActions = '<action content="' + (Escape $MuteLabel) + '" activationType="protocol" arguments="' + (Escape $MuteUri) + '" />'
+    $liveActions += '<action content="Hang up" activationType="protocol" arguments="' + (Escape $RejectUri) + '" />'
+    $liveXml = @"
+<toast scenario="incomingCall" launch="mind://call/show" activationType="protocol">
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$(Escape $Title)</text>
+      <text>{caller} · {duration}</text>
+      <text placement="attribution">$(Escape $Attribution)</text>
+    </binding>
+  </visual>
+  <actions>$liveActions</actions>
+  <audio silent="true" />
+</toast>
+"@
+    $liveDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $liveDoc.LoadXml($liveXml)
+    $liveToast = New-Object Windows.UI.Notifications.ToastNotification $liveDoc
+    $liveToast.Tag = $Tag
+    $liveToast.Group = $Group
+    $liveToast.Data = NewData $Body "00:00" 1
+    $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($Aumid)
+    $notifier.Show($liveToast)
+    "shown"
+
+    $started = Get-Date
+    $sequence = 2
+    while (((Get-Date) - $started).TotalMinutes -lt $MaxMinutes) {
+        Start-Sleep -Seconds 1
+        $elapsed = (Get-Date) - $started
+        $result = $notifier.Update((NewData $Body (Spoken $elapsed) $sequence), $Tag, $Group)
+        $sequence++
+        # Gone from the screen and from the action centre: the call it was
+        # about has been dealt with somewhere else, and there is nothing left
+        # to count for.
+        if ("$result" -eq "NotificationNotFound") { break }
+    }
+    exit 0
 }
 
 $actions = ""

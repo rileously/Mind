@@ -300,5 +300,46 @@ class NotificationLabelTests(unittest.TestCase):
         self.assertIn("$MuteLabel", script)
 
 
+class CallerCarriesOverTests(unittest.TestCase):
+    """Who is on the line does not change when the call is answered."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
+    def watcher(self):
+        import tempfile
+        from pathlib import Path
+
+        from mind.config_store import ConfigStore
+        from mind.phone_watch import PhoneWatcher
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return PhoneWatcher(ConfigStore(root=Path(temp.name) / "config"))
+
+    def test_the_name_survives_the_call_being_answered(self):
+        # Android clears the incoming number when the call connects, which
+        # turned "Dhipoz" into "an unknown number" one poll later - on the
+        # notification counting the call out.
+        from mind.adb_client import CallState
+
+        watch = self.watcher()
+        watch._polled(CallState("ringing", "9322011", "Dhipoz"), "Pixel 10", 80, "")
+        watch._polled(CallState("in a call", "", ""), "Pixel 10", 80, "")
+        self.assertEqual(watch.call.caller, "Dhipoz")
+
+    def test_a_call_that_ends_does_not_keep_the_name(self):
+        from mind.adb_client import CallState
+
+        watch = self.watcher()
+        watch._polled(CallState("ringing", "9322011", "Dhipoz"), "Pixel 10", 80, "")
+        watch._polled(CallState("idle", "", ""), "Pixel 10", 80, "")
+        self.assertFalse(watch.call.busy)
+        self.assertEqual(watch.call.number, "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -160,6 +160,66 @@ def show_in_call(who: str, model: str = "", muted: bool = False) -> bool:
     ) == "shown"
 
 
+# The one process counting out the call on screen. One at a time, because
+# there is one notification and one call.
+_live: subprocess.Popen | None = None
+
+
+def start_in_call(who: str, model: str = "", muted: bool = False) -> bool:
+    """Put the call on screen and leave it there, counting.
+
+    A separate process rather than a timer here: the counting is a second of
+    sleeping and a call into Windows, and doing it in Mind would mean a new
+    PowerShell every second for as long as the call lasts.
+    """
+    stop_in_call(dismiss=False)
+    global _live
+    arguments = [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(TOAST_SCRIPT),
+        "-Aumid", AUMID,
+        "-Title", "Muted" if muted else "In a call",
+        "-Body", who or "Unknown number",
+        "-Attribution", model or "Phone",
+        "-MuteUri", MUTE_URI,
+        "-MuteLabel", "Unmute" if muted else "Mute",
+        "-RejectUri", REJECT_URI,
+        "-Tag", CALL_TAG,
+        "-Group", TOAST_GROUP,
+        "-Live",
+    ]
+    try:
+        _live = subprocess.Popen(
+            arguments,
+            creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        _live = None
+        return False
+    return True
+
+
+def stop_in_call(dismiss: bool = True) -> None:
+    """Stop counting, and take the notification away with it."""
+    global _live
+    process = _live
+    _live = None
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    if dismiss:
+        dismiss_call()
+
+
 def dismiss_call() -> None:
     """Take the notification away, because the call it was about is over."""
     _run(["-Aumid", AUMID, "-Tag", CALL_TAG, "-Group", TOAST_GROUP, "-Dismiss"], timeout=10.0)

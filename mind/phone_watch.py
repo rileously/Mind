@@ -17,6 +17,8 @@ it happened to have last time.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from .adb_client import AdbError, CallState, Phone, find_adb
@@ -157,6 +159,12 @@ class PhoneWatcher(QObject):
 
     def _polled(self, call, model: str, battery: int, trouble: str) -> None:
         was_ringing = self.call.ringing
+        # Android clears the incoming number the moment a call connects, so a
+        # call that arrived as Dhipoz would become an unknown number one poll
+        # later - on the notification counting it out, of all places. Whoever
+        # was ringing is still who is on the line.
+        if call.busy and not call.number and self.call.busy and self.call.number:
+            call = replace(call, number=self.call.number, name=self.call.name)
         changed = (call.state, call.number) != (self.call.state, self.call.number)
         self.call = call
         self.model = model or self.model
