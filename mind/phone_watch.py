@@ -59,7 +59,11 @@ class PhonePoll(QObject):
         serial, address = phone_settings(self.store)
         phone = Phone(serial=serial)
         try:
+            # The name costs a second visit, so it is asked for only when there
+            # is a call to put it against.
             state = phone.call_state()
+            if state.busy:
+                state = phone.call_state(with_name=True)
         except AdbError as exc:
             # One reconnection attempt, because the usual reason a phone stops
             # answering is that wireless debugging came back on another port.
@@ -163,7 +167,7 @@ class PhoneWatcher(QObject):
         if changed:
             self.call_changed.emit(call)
             if call.ringing and not was_ringing:
-                who = call.number or "someone"
+                who = call.caller
                 self.log.emit(f"The phone is ringing: {who}")
 
     def _tidy_thread(self) -> None:

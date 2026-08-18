@@ -371,6 +371,7 @@ CB_DEVICES = "y"
 # old message reach a call that has since been replaced by another.
 CB_CALL_ANSWER = "e"
 CB_CALL_REJECT = "i"
+CB_CALL_MUTE = "t"
 CB_DEVICE_ASK = "b"
 CB_DEVICE_BLOCK = "c"
 
@@ -575,10 +576,34 @@ def build_call_keyboard() -> dict:
     }
 
 
-def call_alert_text(number: str, model: str = "") -> str:
-    who = number or "an unknown number"
+def build_in_call_keyboard(muted: bool = False) -> dict:
+    """What is left to do once the call is connected.
+
+    Mute is the button somebody reaches for in the middle of a call rather
+    than at the start of one, so it only appears once there is a call.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🔊  Unmute" if muted else "🔇  Mute",
+                    "callback_data": CB_CALL_MUTE,
+                },
+                {"text": "✕  Hang up", "callback_data": CB_CALL_REJECT},
+            ]
+        ]
+    }
+
+
+def call_alert_text(who: str, model: str = "") -> str:
+    """Who is calling, and on which phone.
+
+    ``who`` is a name where the phone knows one and a number where it does not,
+    because "Dhipoz is calling" is the thing somebody wants to read and
+    "9322011 is calling" is a puzzle to solve first.
+    """
     where = f"\n{model}" if model else ""
-    return f"☎  The phone is ringing — {who}{where}"
+    return f"☎  The phone is ringing — {who or 'an unknown number'}{where}"
 
 
 def build_watcher_files_keyboard(names) -> dict:

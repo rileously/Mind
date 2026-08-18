@@ -37,6 +37,8 @@ TOAST_GROUP = "mind"
 
 ANSWER_URI = f"{PROTOCOL}://call/answer"
 REJECT_URI = f"{PROTOCOL}://call/reject"
+MUTE_URI = f"{PROTOCOL}://call/mute"
+KNOWN_ACTIONS = frozenset({"call/answer", "call/reject", "call/mute", "call/show"})
 # Where a button press waits until the running copy of Mind reads it. A file
 # because the press arrives as a whole new process, which has nothing else in
 # common with the one that will act on it.
@@ -114,9 +116,9 @@ def _run(arguments: list[str], timeout: float = 20.0) -> str:
     return (done.stdout or "").strip()
 
 
-def show_call(number: str, model: str = "") -> bool:
+def show_call(who: str, model: str = "") -> bool:
     """Show the ringing phone. False if Windows would not show it."""
-    body = number or "Unknown number"
+    body = who or "Unknown number"
     return _run(
         [
             "-Aumid", AUMID,
@@ -124,10 +126,35 @@ def show_call(number: str, model: str = "") -> bool:
             "-Body", body,
             "-Attribution", model or "Phone",
             "-AnswerUri", ANSWER_URI,
+            "-MuteUri", MUTE_URI,
             "-RejectUri", REJECT_URI,
             "-Tag", CALL_TAG,
             "-Group", TOAST_GROUP,
             "-Ringing",
+        ]
+    ) == "shown"
+
+
+def show_in_call(who: str, model: str = "", muted: bool = False) -> bool:
+    """Show the call that is under way, with the two things left to do.
+
+    A notification is spent the moment a button on it is pressed, so answering
+    from one takes it off the screen. Muting would be unreachable a second
+    later if nothing replaced it - and mute is the button somebody reaches for
+    in the middle of a call, not at the start of it.
+    """
+    body = who or "Unknown number"
+    return _run(
+        [
+            "-Aumid", AUMID,
+            "-Title", "Muted" if muted else "In a call",
+            "-Body", body,
+            "-Attribution", model or "Phone",
+            "-MuteUri", MUTE_URI,
+            "-MuteLabel", "Unmute" if muted else "Mute",
+            "-RejectUri", REJECT_URI,
+            "-Tag", CALL_TAG,
+            "-Group", TOAST_GROUP,
         ]
     ) == "shown"
 
@@ -147,7 +174,7 @@ def parse_action(argument: str) -> str:
     if not text.startswith(f"{PROTOCOL}://"):
         return ""
     what = text[len(PROTOCOL) + 3 :].strip("/")
-    return what if what in {"call/answer", "call/reject", "call/show"} else ""
+    return what if what in KNOWN_ACTIONS else ""
 
 
 def remember_action(action: str) -> bool:
@@ -174,4 +201,4 @@ def take_action() -> str:
         path.unlink()
     except OSError:
         pass
-    return action if action in {"call/answer", "call/reject", "call/show"} else ""
+    return action if action in KNOWN_ACTIONS else ""

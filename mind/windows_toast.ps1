@@ -18,6 +18,8 @@ param(
     [string]$Attribution = "",
     [string]$AnswerUri = "",
     [string]$RejectUri = "",
+    [string]$MuteUri = "",
+    [string]$MuteLabel = "Mute",
     [string]$Tag = "mind-call",
     [string]$Group = "mind",
     [switch]$Ringing,
@@ -46,6 +48,9 @@ function Escape([string]$value) {
 $actions = ""
 if ($AnswerUri) {
     $actions += '<action content="Answer" activationType="protocol" arguments="' + (Escape $AnswerUri) + '" />'
+}
+if ($MuteUri) {
+    $actions += '<action content="' + (Escape $MuteLabel) + '" activationType="protocol" arguments="' + (Escape $MuteUri) + '" />'
 }
 if ($RejectUri) {
     $actions += '<action content="Reject" activationType="protocol" arguments="' + (Escape $RejectUri) + '" />'

@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -50,6 +50,9 @@ ADB_LOCATIONS = (
 KEY_CALL = "5"
 KEY_ENDCALL = "6"
 KEY_HEADSETHOOK = "79"
+# The microphone, not the volume. KEYCODE_VOLUME_MUTE silences what comes out
+# of the phone; this is the one that stops the other person hearing the room.
+KEY_MUTE = "91"
 MEDIA_KEYS = {
     "play": "85",
     "next": "87",
@@ -66,6 +69,7 @@ CALL_STATES = {"0": "idle", "1": "ringing", "2": "in a call"}
 # than guessed at a position, because the dialer moves it and the lock screen
 # puts it somewhere else again.
 ANSWER_WORDS = ("answer", "accept", "pick up", "swipe up to answer")
+MUTE_WORDS = ("mute", "unmute")
 BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 
@@ -101,6 +105,7 @@ class CallState:
 
     state: str = "idle"
     number: str = ""
+    name: str = ""
 
     @property
     def ringing(self) -> bool:
@@ -109,6 +114,16 @@ class CallState:
     @property
     def busy(self) -> bool:
         return self.state in {"ringing", "in a call"}
+
+    @property
+    def caller(self) -> str:
+        """Who is calling, in the words the person being told would use.
+
+        A name if the phone knows one, the number if it does not, and a plain
+        admission if it knows neither - which is better than a blank space
+        where a person's name should be.
+        """
+        return self.name or self.number or "an unknown number"
 
 
 def find_adb() -> str:
@@ -177,6 +192,36 @@ def parse_call_state(payload: str) -> CallState:
             number = match.group(1).strip()
             break
     return CallState(state, number)
+
+
+def parse_contact_name(payload: str) -> str:
+    """The name a phone_lookup answered with, if it answered with one.
+
+    The provider returns a row per matching contact method, so the same person
+    can come back several times over; the first name is the answer and the rest
+    are the same answer again.
+    """
+    for line in (payload or "").splitlines():
+        found = re.search(r"display_name=([^,]+)", line)
+        if found:
+            name = found.group(1).strip()
+            if name and name.lower() != "null":
+                return name
+    return ""
+
+
+def parse_mic_mute(payload: str) -> bool:
+    """Whether the microphone is muted, as the audio service describes it.
+
+    One line carries the whole answer in several flags - switched off by hand,
+    by policy, or by whatever is holding the call - and any of them being true
+    means the other person cannot hear anything.
+    """
+    for line in (payload or "").splitlines():
+        if "mic mute" not in line.lower():
+            continue
+        return "=true" in line.lower().replace(" ", "")
+    return False
 
 
 def _default_runner(arguments: list[str], timeout: float) -> tuple[int, str, str]:
@@ -271,8 +316,40 @@ class Phone:
         """Every phone adb can see, whatever state it is in."""
         return parse_devices(self._adb("devices", "-l"))
 
-    def call_state(self) -> CallState:
-        return parse_call_state(self.shell("dumpsys", "telephony.registry"))
+    def call_state(self, with_name: bool = False) -> CallState:
+        """What the line is doing, and optionally who is on it.
+
+        The name costs another visit to the phone, so it is asked for only when
+        somebody is about to be told - not on every poll of a phone sitting
+        idle in a pocket.
+        """
+        state = parse_call_state(self.shell("dumpsys", "telephony.registry"))
+        if with_name and state.number and not state.name:
+            return replace(state, name=self.contact_name(state.number))
+        return state
+
+    def contact_name(self, number: str) -> str:
+        """What this number is called in the phone's contacts, if anything.
+
+        phone_lookup rather than a search through the contact list: it is the
+        provider's own matcher, and it knows that 932-2011 and 9322011 and
+        +9609322011 are one person.
+        """
+        digits = re.sub(r"[^\d+]", "", number or "")
+        if not digits:
+            return ""
+        try:
+            answer = self.shell(
+                "content",
+                "query",
+                "--uri",
+                f"content://com.android.contacts/phone_lookup/{digits}",
+                "--projection",
+                "display_name",
+            )
+        except AdbError:
+            return ""
+        return parse_contact_name(answer)
 
     def answer(self) -> bool:
         """Take the call that is ringing. True if the phone actually took it.
@@ -293,17 +370,48 @@ class Phone:
             return not self.call_state().ringing
         return False
 
+    def is_muted(self) -> bool:
+        """Whether the microphone is off right now."""
+        return parse_mic_mute(self.shell("dumpsys", "audio"))
+
+    def set_muted(self, muted: bool) -> bool:
+        """Mute or unmute the microphone. True when it ended up that way.
+
+        The key is a toggle, so it is only pressed when the phone is not
+        already where it is being asked to go - otherwise asking twice for mute
+        would unmute somebody mid-sentence. If the key does nothing, the
+        control is found on screen the same way the answer button is.
+        """
+        if self.is_muted() == muted:
+            return True
+        self.shell("input", "keyevent", KEY_MUTE)
+        if self.is_muted() == muted:
+            return True
+        if self._tap_words(MUTE_WORDS):
+            return self.is_muted() == muted
+        return False
+
+    def toggle_mute(self) -> bool:
+        """Flip the microphone, and say whether it is muted afterwards."""
+        wanted = not self.is_muted()
+        self.set_muted(wanted)
+        return self.is_muted()
+
     def screen_text(self) -> str:
         """What is on the screen now, as the accessibility tree describes it."""
         self.shell("uiautomator", "dump", "/sdcard/mind-window.xml", timeout=20.0)
         return self.shell("cat", "/sdcard/mind-window.xml", timeout=20.0)
 
     def tap_answer(self) -> bool:
-        """Find the answer control on screen and press it. True if one was found.
+        """Find the answer control on screen and press it. True if one was found."""
+        return self._tap_words(ANSWER_WORDS)
 
-        The node is matched on what it says rather than where it is: every
-        dialer puts the button somewhere different, and the lock screen puts it
-        somewhere different again.
+    def _tap_words(self, words: tuple[str, ...]) -> bool:
+        """Press the control that says one of these things.
+
+        Matched on what it says rather than where it is: every dialer puts its
+        buttons somewhere different, and the lock screen puts them somewhere
+        different again.
         """
         try:
             screen = self.screen_text()
@@ -311,7 +419,7 @@ class Phone:
             return False
         for node in re.findall(r"<node[^>]*>", screen):
             lowered = node.lower()
-            if not any(word in lowered for word in ANSWER_WORDS):
+            if not any(word in lowered for word in words):
                 continue
             if 'clickable="true"' not in lowered:
                 continue
@@ -378,6 +486,55 @@ class Phone:
         if "unable to connect" in answer.lower() or "failed" in answer.lower():
             raise AdbError(answer.strip().splitlines()[0])
         return answer
+
+
+SCRCPY_LOCATIONS = (
+    r"%LOCALAPPDATA%\Programs\scrcpy\scrcpy.exe",
+    r"%USERPROFILE%\Downloads\scrcpy-win64\scrcpy.exe",
+)
+
+
+def find_scrcpy() -> str:
+    """Where scrcpy is, or "" if it is not on this machine.
+
+    Mind does not ship it and does not need it: mirroring is a window scrcpy
+    opens over the same connection Mind already has, and a machine without it
+    simply does not offer the button.
+    """
+    import os
+
+    found = shutil.which("scrcpy")
+    if found:
+        return found
+    for candidate in SCRCPY_LOCATIONS:
+        expanded = Path(os.path.expandvars(candidate))
+        if "%" not in str(expanded) and expanded.is_file():
+            return str(expanded)
+    return ""
+
+
+def mirror(serial: str = "", scrcpy: str = "") -> bool:
+    """Open the phone's screen on this PC. True if it was started.
+
+    Left running on its own rather than waited for - it is a window the user
+    closes when they are done with it, not a command with an answer.
+    """
+    program = scrcpy or find_scrcpy()
+    if not program:
+        return False
+    command = [program]
+    if serial:
+        command += ["-s", serial]
+    try:
+        subprocess.Popen(
+            command,
+            creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def attached(adb: str = "", run=_default_runner) -> list[AndroidDevice]:

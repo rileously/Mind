@@ -87,6 +87,7 @@ from .telegram_ui import (
     build_app_alert_keyboard,
     build_apps_keyboard,
     CB_CALL_ANSWER,
+    CB_CALL_MUTE,
     CB_CALL_REJECT,
     CB_DEVICE_ASK,
     CB_DEVICE_BLOCK,
@@ -95,6 +96,7 @@ from .telegram_ui import (
     power_prompt,
     PRINT_PROMPT,
     build_call_keyboard,
+    build_in_call_keyboard,
     build_device_alert_keyboard,
     build_devices_keyboard,
     build_power_menu_keyboard,
@@ -536,7 +538,7 @@ class TelegramBridge(QObject):
         chat_id: int,
         callback_id: str,
         message_id: object,
-        answering: bool,
+        doing: str,
         config: dict,
     ) -> None:
         """Answer or refuse the call, and say in the message what happened.
@@ -545,30 +547,38 @@ class TelegramBridge(QObject):
         is written into it rather than sent underneath: what matters afterwards
         is what became of that call, not that it was once ringing.
         """
-        client.answer_callback_query(
-            callback_id, "Answering…" if answering else "Rejecting…"
-        )
+        client.answer_callback_query(callback_id, doing.title() + "…")
         if not bool(config.get("phone_enabled", False)):
             client.send_message(chat_id, "The phone is not switched on in Mind.")
             return
         serial = str(self.store.load().get("phone_serial", "")).strip()
         phone = Phone(serial=serial)
+        keyboard = None
         try:
-            if answering:
+            if doing == "answer":
                 took = phone.answer()
                 said = "Answered." if took else "The phone would not take it."
+                # Still a call to act on, so the message keeps buttons: the
+                # ones that make sense once somebody is talking.
+                keyboard = build_in_call_keyboard(False) if took else None
+            elif doing == "mute":
+                muted = phone.toggle_mute()
+                said = "Muted." if muted else "Unmuted."
+                keyboard = build_in_call_keyboard(muted)
             else:
                 phone.hang_up()
-                said = "Rejected."
+                said = "Hung up."
         except AdbError as exc:
             said = str(exc)
         except Exception as exc:  # a tap must never take the bridge down
             said = f"The phone could not be reached: {exc}"
         self.log.emit(f"Telegram: {said}")
         if isinstance(message_id, int):
-            client.edit_message_text(chat_id, message_id, f"☎  {said}")
+            client.edit_message_text(
+                chat_id, message_id, f"☎  {said}", reply_markup=keyboard
+            )
         else:
-            client.send_message(chat_id, f"☎  {said}")
+            client.send_message(chat_id, f"☎  {said}", reply_markup=keyboard)
 
     def _handle_device_ask_tap(
         self,
@@ -1035,9 +1045,14 @@ class TelegramBridge(QObject):
             self._send_devices_panel(client, chat_id, config, message_id)
             return
 
-        if action in {CB_CALL_ANSWER, CB_CALL_REJECT}:
+        if action in {CB_CALL_ANSWER, CB_CALL_REJECT, CB_CALL_MUTE}:
+            doing = {
+                CB_CALL_ANSWER: "answer",
+                CB_CALL_MUTE: "mute",
+                CB_CALL_REJECT: "hang up",
+            }[action]
             self._handle_call_tap(
-                client, chat_id, callback_id, message_id, action == CB_CALL_ANSWER, config
+                client, chat_id, callback_id, message_id, doing, config
             )
             return
 

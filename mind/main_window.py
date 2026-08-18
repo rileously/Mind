@@ -91,7 +91,7 @@ from .selection_monitor import SelectionMonitor
 from .single_instance import action_message_id, show_message_id
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
-from .adb_client import AdbError, Phone
+from .adb_client import AdbError, Phone, find_scrcpy, mirror
 from .network_devices import local_ipv4
 from .network_scanner import (
     DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL,
@@ -102,7 +102,13 @@ from .network_scanner import (
 )
 from .phone_watch import PhoneWatcher, phone_for
 from .telegram_ui import call_alert_text
-from .windows_toast import dismiss_call, register as register_toasts, show_call, take_action
+from .windows_toast import (
+    dismiss_call,
+    register as register_toasts,
+    show_call,
+    show_in_call,
+    take_action,
+)
 from .telegram_system import read_running_apps, read_visible_apps
 from .watchers import (
     APP_KINDS as WATCHER_APP_KINDS,
@@ -1425,6 +1431,7 @@ class PhonePage(QWidget):
         self.store = store
         self.watcher = watcher
         self._busy = False
+        self._muted = False
         root = QVBoxLayout(self)
         root.setContentsMargins(30, 26, 30, 26)
         root.setSpacing(16)
@@ -1449,10 +1456,20 @@ class PhonePage(QWidget):
         self.hangup_button = QPushButton("Hang up")
         self.hangup_button.setProperty("danger", True)
         self.hangup_button.clicked.connect(self._hang_up)
+        self.mute_button = QPushButton("Mute")
+        self.mute_button.clicked.connect(self._toggle_mute)
+        # Mirroring is scrcpy's window, over the connection Mind already has.
+        # A machine without it does not get a button that cannot work.
+        self.mirror_button = QPushButton("Mirror screen")
+        self.mirror_button.setToolTip("Open the phone's screen on this PC")
+        self.mirror_button.clicked.connect(self._mirror)
+        self.mirror_button.setVisible(bool(find_scrcpy()))
         toolbar.addWidget(self.enabled_switch)
         toolbar.addWidget(self.status_label, 1)
         toolbar.addWidget(self.answer_button)
+        toolbar.addWidget(self.mute_button)
         toolbar.addWidget(self.hangup_button)
+        toolbar.addWidget(self.mirror_button)
         root.addWidget(toolbar_card)
 
         # Pairing is a one-off and the port it uses dies with the screen that
@@ -1536,8 +1553,7 @@ class PhonePage(QWidget):
         else:
             call = watcher.call
             if call.ringing:
-                who = call.number or "unknown number"
-                self.status_label.setText(f"Ringing — {who}")
+                self.status_label.setText(f"Ringing — {call.caller}")
             elif call.busy:
                 self.status_label.setText("In a call")
             else:
@@ -1554,6 +1570,11 @@ class PhonePage(QWidget):
         self.answer_button.setEnabled(ringing and not self._busy)
         self.hangup_button.setEnabled(busy and not self._busy)
         self.dial_button.setEnabled(not busy and not self._busy)
+        # Muting a phone nobody is talking on would be a setting rather than an
+        # action, and the label says which way the press goes.
+        in_a_call = busy and not ringing
+        self.mute_button.setEnabled(in_a_call and not self._busy)
+        self.mute_button.setText("Unmute" if self._muted else "Mute")
 
     def _call_changed(self, _call) -> None:
         self._show_state()
@@ -1601,6 +1622,18 @@ class PhonePage(QWidget):
         if self.watcher is not None:
             self.watcher.poll_now()
         self._sync_actions()
+
+    def _toggle_mute(self) -> None:
+        def flip():
+            self._muted = phone_for(self.store).toggle_mute()
+            self.status_label.setText("Muted" if self._muted else "In a call")
+
+        self._act("Muting", flip)
+
+    def _mirror(self) -> None:
+        serial = str(self.store.load().get("phone_serial", "")).strip()
+        if not mirror(serial):
+            self.status_label.setText("scrcpy could not be started.")
 
     def _answer(self) -> None:
         self._act("Answering", lambda: phone_for(self.store).answer())
@@ -3163,9 +3196,17 @@ class MindWindow(QMainWindow):
             if action == "call/answer":
                 phone.answer()
                 self._log("Answered the call from a notification")
+            elif action == "call/mute":
+                # The notification is spent by the press, so another takes its
+                # place saying which way the microphone now is.
+                muted = phone.toggle_mute()
+                self._log("Muted the call" if muted else "Unmuted the call")
+                show_in_call(self.phone_watcher.call.caller, self.phone_watcher.model, muted)
+                self.phone_watcher.poll_now()
+                return
             elif action == "call/reject":
                 phone.hang_up()
-                self._log("Rejected the call from a notification")
+                self._log("Hung up from a notification")
         except AdbError as exc:
             self._log(f"The phone could not be reached: {exc}")
         except Exception as exc:
@@ -3179,14 +3220,20 @@ class MindWindow(QMainWindow):
         Only the arrival is announced. A call being answered or ending is
         something the person already knows about, having done it.
         """
+        if call.busy and not call.ringing:
+            # Answered - by the notification, by Telegram, or by picking the
+            # phone up. Either way there is still a call, and the two things
+            # worth doing to one are not the two things worth doing to a ring.
+            show_in_call(call.caller, self.phone_watcher.model)
+            return
         if not call.ringing:
             # The call is over, one way or another, and a notification about a
             # phone that has stopped ringing is only in the way.
             dismiss_call()
             return
-        show_call(call.number, self.phone_watcher.model)
+        show_call(call.caller, self.phone_watcher.model)
         self.notify_telegram(
-            call_alert_text(call.number, self.phone_watcher.model),
+            call_alert_text(call.caller, self.phone_watcher.model),
             self.telegram.call_keyboard(),
         )
 

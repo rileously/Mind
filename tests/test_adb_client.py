@@ -243,5 +243,44 @@ class PairingTests(unittest.TestCase):
             device.connect("192.168.18.5:5555")
 
 
+class MuteTests(unittest.TestCase):
+    """The microphone, which is not the volume."""
+
+    UNMUTED = "  mic mute FromSwitch=false FromRestrictions=false FromApi=false"
+    MUTED = "  mic mute FromSwitch=false FromRestrictions=false FromApi=true"
+
+    def test_the_state_is_read_off_the_audio_service(self):
+        from mind.adb_client import parse_mic_mute
+
+        self.assertFalse(parse_mic_mute(self.UNMUTED))
+        self.assertTrue(parse_mic_mute(self.MUTED))
+
+    def test_a_dump_without_that_line_reads_as_not_muted(self):
+        from mind.adb_client import parse_mic_mute
+
+        self.assertFalse(parse_mic_mute("nothing about the microphone here"))
+
+    def test_muting_presses_the_microphone_key_and_not_the_volume_one(self):
+        # KEYCODE_VOLUME_MUTE silences what comes out of the phone. This has to
+        # be the one that stops the other person hearing the room.
+        device, recorder = phone(answers={"dumpsys audio": self.UNMUTED})
+        device.set_muted(True)
+        self.assertIn(["adb.exe", "shell", "input", "keyevent", "91"], recorder.calls)
+        self.assertNotIn(["adb.exe", "shell", "input", "keyevent", "164"], recorder.calls)
+
+    def test_a_phone_already_muted_is_not_pressed_again(self):
+        # The key is a toggle, so asking twice for mute would unmute somebody
+        # in the middle of a sentence.
+        device, recorder = phone(answers={"dumpsys audio": self.MUTED})
+        self.assertTrue(device.set_muted(True))
+        self.assertFalse([call for call in recorder.calls if "keyevent" in call])
+
+    def test_a_phone_that_ignores_the_key_gets_its_mute_button_tapped(self):
+        screen = '<node text="Mute" clickable="true" bounds="[10,20][110,120]" />'
+        device, recorder = phone(answers={"dumpsys audio": self.UNMUTED, "cat": screen})
+        device.set_muted(True)
+        self.assertIn(["adb.exe", "shell", "input", "tap", "60", "70"], recorder.calls)
+
+
 if __name__ == "__main__":
     unittest.main()
