@@ -74,6 +74,10 @@ class _AskAiWorker(QRunnable):
 
 
 class AskAiPopup(QDialog):
+    # Asked for when the phone should ring a number the user has selected.
+    # The popup does not know about phones; whoever owns one listens.
+    call_requested = Signal(str)
+
     """Floating pill button that expands into an answer tooltip card with Copy action."""
 
     def __init__(self, store: ConfigStore, parent: QWidget | None = None):
@@ -232,6 +236,16 @@ class AskAiPopup(QDialog):
         self.tel_button.hide()
         actions_layout.addWidget(self.tel_button)
 
+        # Ringing it on the phone in your pocket, rather than handing the
+        # number to whatever this PC thinks tel: means.
+        self.phone_call_button = QPushButton("📱 Call from phone")
+        self.phone_call_button.setObjectName("AskAiActionBtn")
+        self.phone_call_button.setCursor(Qt.PointingHandCursor)
+        self.phone_call_button.setFocusPolicy(Qt.NoFocus)
+        self.phone_call_button.clicked.connect(self._call_from_phone)
+        self.phone_call_button.hide()
+        actions_layout.addWidget(self.phone_call_button)
+
         actions_layout.addStretch()
 
         card_layout.addLayout(actions_layout)
@@ -242,6 +256,7 @@ class AskAiPopup(QDialog):
         self,
         phone_info: dict[str, str],
         avoid_rect: tuple[int, int, int, int] | None = None,
+        can_call: bool = False,
     ) -> None:
         self._question = phone_info.get("raw", "")
         self._answer = phone_info.get("formatted", "")
@@ -254,6 +269,8 @@ class AskAiPopup(QDialog):
 
         self.title_icon.setText("📞")
         self.title_label.setText("Maldivian Phone")
+        # Replaced by the name if the phone knows one, which is why this says
+        # what it says rather than naming the number twice.
         self.question_label.setText("Quick Contact Actions:")
         self.answer_label.setText(phone_info.get("formatted", ""))
         self.progress_bar.hide()
@@ -262,6 +279,7 @@ class AskAiPopup(QDialog):
         self.telegram_button.show()
         self.whatsapp_button.show()
         self.tel_button.show()
+        self.phone_call_button.setVisible(bool(can_call))
         self._reset_copy_button()
 
         self.adjustSize()
@@ -269,6 +287,31 @@ class AskAiPopup(QDialog):
         self.show()
         self._hide_timer.start(18000)
         self._dismiss_timer.start()
+
+    def set_contact_name(self, number: str, name: str) -> None:
+        """Put a name on the card, if the card is still about that number.
+
+        The lookup outlives the tooltip easily - a number is selected, the card
+        is dismissed, and the answer arrives afterwards - so what it is about
+        is checked before anything is written.
+        """
+        info = getattr(self, "_phone_info", None)
+        if not name or not info:
+            return
+        if number not in {info.get("local", ""), info.get("digits", ""), info.get("international", "")}:
+            return
+        # Only the heading. The number is already on the card, and writing it
+        # into the line above it would print it twice.
+        self.title_label.setText(name)
+        self.adjustSize()
+        self._position_popup()
+
+    def _call_from_phone(self) -> None:
+        info = getattr(self, "_phone_info", None)
+        if not info:
+            return
+        self.call_requested.emit(info.get("international", "") or info.get("local", ""))
+        self.dismiss()
 
     def _open_viber(self) -> None:
         if hasattr(self, "_phone_info") and self._phone_info.get("viber_url"):
@@ -291,6 +334,7 @@ class AskAiPopup(QDialog):
         self.telegram_button.hide()
         self.whatsapp_button.hide()
         self.tel_button.hide()
+        self.phone_call_button.hide()
 
     def show_local_math_result(
         self,

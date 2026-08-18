@@ -92,6 +92,29 @@ class PhonePoll(QObject):
         self.finished.emit(state, model, battery, "")
 
 
+class ContactLookup(QObject):
+    """Asks the phone who a number belongs to, off the drawing thread.
+
+    A second at worst, and the tooltip it is for appears the instant a number
+    is selected - so the card is shown first with the number, and the name
+    arrives into it if there is one.
+    """
+
+    found = Signal(str, str)  # the number asked about, and the name
+
+    def __init__(self, store: ConfigStore, number: str, parent: QObject | None = None):
+        super().__init__(parent)
+        self.store = store
+        self.number = number
+
+    def run(self) -> None:
+        try:
+            name = phone_for(self.store).contact_name(self.number)
+        except Exception:  # a tooltip must never take anything down
+            name = ""
+        self.found.emit(self.number, name)
+
+
 class PhoneWatcher(QObject):
     """Keeps an eye on the phone, and says when the call state changes.
 

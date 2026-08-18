@@ -100,7 +100,7 @@ from .network_scanner import (
     RouterFilterProbe,
     RouterTest,
 )
-from .phone_watch import PhoneWatcher, phone_for
+from .phone_watch import ContactLookup, PhoneWatcher, phone_for
 from .telegram_ui import call_alert_text
 from .windows_toast import (
     dismiss_call,
@@ -2681,6 +2681,7 @@ class MindWindow(QMainWindow):
         self.phone_watcher = PhoneWatcher(self.store, self)
         self.phone_watcher.log.connect(self._log)
         self.phone_watcher.call_changed.connect(self._on_call_changed)
+        self.ask_ai_popup.call_requested.connect(self._call_from_tooltip)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -3159,6 +3160,47 @@ class MindWindow(QMainWindow):
         if not sent_any:
             self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
 
+    def _phone_is_ready(self) -> bool:
+        """Whether there is a phone set up to ring a number with."""
+        config = self.store.load()
+        return bool(config.get("phone_enabled", False)) and bool(
+            str(config.get("phone_serial", "")).strip()
+        )
+
+    def _look_up_contact(self, number: str) -> None:
+        """Ask the phone who a number belongs to, without holding anything up."""
+        if not number or not self._phone_is_ready():
+            return
+        thread = QThread(self)
+        worker = ContactLookup(self.store, number)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.found.connect(self.ask_ai_popup.set_contact_name)
+        worker.found.connect(lambda *_: thread.quit())
+        thread.finished.connect(thread.deleteLater)
+        # Kept alive until it finishes; a worker whose thread is collected
+        # mid-lookup takes the process with it.
+        self._contact_worker = worker
+        self._contact_thread = thread
+        thread.start()
+
+    def _call_from_tooltip(self, number: str) -> None:
+        """Ring a number that was selected somewhere on this PC."""
+        if not number:
+            return
+        phone = phone_for(self.store)
+        try:
+            phone.dial(number)
+        except AdbError as exc:
+            self._log(f"The phone could not dial: {exc}")
+            return
+        except Exception as exc:
+            self._log(f"Dialling failed: {exc}")
+            return
+        self._log(f"Dialling {number} on the phone")
+        start_in_call(phone.contact_name(number) or number, self.phone_watcher.model)
+        self.phone_watcher.poll_now()
+
     def _register_notifications(self) -> None:
         """Claim the name Windows shows notifications under, and the protocol.
 
@@ -3620,7 +3662,13 @@ class MindWindow(QMainWindow):
         if phone_info is not None and not is_notion_input(target_hwnd):
             if self.palette and self.palette.isVisible():
                 self.palette.close()
-            self.ask_ai_popup.show_phone_actions(phone_info, avoid_rect)
+            self.ask_ai_popup.show_phone_actions(
+                phone_info, avoid_rect, can_call=self._phone_is_ready()
+            )
+            # The card is up already; the name arrives into it if the phone
+            # knows one, because asking takes about a second and a tooltip
+            # that waited a second for anything would be a worse tooltip.
+            self._look_up_contact(phone_info.get("local", ""))
             return
 
         local_math_result = solve_math_locally(session.text)
