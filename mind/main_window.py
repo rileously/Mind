@@ -1554,7 +1554,7 @@ class PhonePage(QWidget):
         else:
             call = watcher.call
             if call.ringing:
-                self.status_label.setText(f"Ringing — {call.caller}")
+                self.status_label.setText(f"Ringing — {call.caller or 'unknown number'}")
             elif call.busy:
                 self.status_label.setText("In a call")
             else:

@@ -49,35 +49,15 @@ function Escape([string]$value) {
     return [System.Security.SecurityElement]::Escape($value)
 }
 
-function LiveToast([string]$caller, [string]$duration, [string]$title, [string]$attribution, [string]$muteLabel, [string]$muteUri, [string]$rejectUri, [string]$tag, [string]$group) {
-    # Written into the XML rather than bound with {placeholders}. Windows
-    # accepts a bound update and reports Succeeded, and leaves the braces on
-    # screen: the substitution never happens for text. Showing it again under
-    # the same tag replaces the one already there.
-    $acts = '<action content="' + (Escape $muteLabel) + '" activationType="protocol" arguments="' + (Escape $muteUri) + '" />'
-    $acts += '<action content="Hang up" activationType="protocol" arguments="' + (Escape $rejectUri) + '" />'
-    $body = if ($duration) { "$caller - $duration" } else { $caller }
-    $liveXml = @"
-<toast scenario="incomingCall" launch="mind://call/show" activationType="protocol">
-  <visual>
-    <binding template="ToastGeneric">
-      <text>$(Escape $title)</text>
-      <text>$(Escape $body)</text>
-      <text placement="attribution">$(Escape $attribution)</text>
-    </binding>
-  </visual>
-  <actions>$acts</actions>
-  <audio silent="true" />
-</toast>
-"@
-    $liveDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
-    $liveDoc.LoadXml($liveXml)
-    $made = New-Object Windows.UI.Notifications.ToastNotification $liveDoc
-    $made.Tag = $tag
-    $made.Group = $group
-    # Nothing new has happened; it is the same call one second later.
-    $made.SuppressPopup = $false
-    return $made
+function CallData([string]$duration, [int]$sequence) {
+    # Built from a dictionary: PowerShell sees the map on NotificationData as a
+    # bare COM object with no methods it can reach.
+    $pairs = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    $pairs.Add("duration", $duration)
+    $pairs.Add("progressValue", "indeterminate")
+    $data = New-Object Windows.UI.Notifications.NotificationData($pairs)
+    $data.SequenceNumber = $sequence
+    return $data
 }
 
 function Spoken([timespan]$span) {
@@ -88,18 +68,50 @@ function Spoken([timespan]$span) {
 }
 
 if ($Live) {
-    # A call on screen for as long as it lasts, with the time it has taken so
-    # far. The text is updated in place rather than the notification being
-    # shown again: shown again, it would re-announce itself once a second.
+    # The duration is carried by a progress element rather than by text.
+    # Windows substitutes {placeholders} there and does not substitute them in
+    # text - it accepts the update either way and answers Succeeded, which is
+    # how the braces ended up on screen. And it is updated in place rather than
+    # shown again: shown again, the notification hides and reappears once a
+    # second, which is what it did.
+    [void][Windows.UI.Notifications.NotificationData, Windows.UI.Notifications, ContentType = WindowsRuntime]
+    $liveActions = '<action content="' + (Escape $MuteLabel) + '" activationType="protocol" arguments="' + (Escape $MuteUri) + '" />'
+    $liveActions += '<action content="Hang up" activationType="protocol" arguments="' + (Escape $RejectUri) + '" />'
+    $whoLine = if ($Body) { '<text>' + (Escape $Body) + '</text>' } else { "" }
+    $liveXml = @"
+<toast scenario="incomingCall" launch="mind://call/show" activationType="protocol">
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$(Escape $Title)</text>
+      $whoLine
+      <progress value="{progressValue}" status="{duration}" />
+      <text placement="attribution">$(Escape $Attribution)</text>
+    </binding>
+  </visual>
+  <actions>$liveActions</actions>
+  <audio silent="true" />
+</toast>
+"@
+    $liveDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $liveDoc.LoadXml($liveXml)
+    $liveToast = New-Object Windows.UI.Notifications.ToastNotification $liveDoc
+    $liveToast.Tag = $Tag
+    $liveToast.Group = $Group
+    $liveToast.Data = CallData "00:00" 1
     $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($Aumid)
-    $notifier.Show((LiveToast $Body "00:00" $Title $Attribution $MuteLabel $MuteUri $RejectUri $Tag $Group))
+    $notifier.Show($liveToast)
     "shown"
 
     $started = Get-Date
+    $sequence = 2
     while (((Get-Date) - $started).TotalMinutes -lt $MaxMinutes) {
         Start-Sleep -Seconds 1
         $elapsed = (Get-Date) - $started
-        $notifier.Show((LiveToast $Body (Spoken $elapsed) $Title $Attribution $MuteLabel $MuteUri $RejectUri $Tag $Group))
+        $result = $notifier.Update((CallData (Spoken $elapsed) $sequence), $Tag, $Group)
+        $sequence++
+        # Gone from the screen and from the action centre: whatever it was
+        # counting has been dealt with somewhere else.
+        if ("$result" -eq "NotificationNotFound") { break }
     }
     exit 0
 }

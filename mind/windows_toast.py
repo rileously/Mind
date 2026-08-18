@@ -184,7 +184,10 @@ def start_in_call(who: str, model: str = "", muted: bool = False) -> bool:
         str(TOAST_SCRIPT),
         "-Aumid", AUMID,
         "-Title", "Muted" if muted else "In a call",
-        "-Body", who or "Unknown number",
+        # Empty rather than "Unknown number": the line is left out entirely
+        # when nobody is known, which reads better than being told twice that
+        # the phone does not know who this is.
+        "-Body", who,
         "-Attribution", model or "Phone",
         "-MuteUri", MUTE_URI,
         "-MuteLabel", "Unmute" if muted else "Mute",

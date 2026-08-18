@@ -117,13 +117,14 @@ class CallState:
 
     @property
     def caller(self) -> str:
-        """Who is calling, in the words the person being told would use.
+        """Who is calling: a name, or the number, or nothing at all.
 
-        A name if the phone knows one, the number if it does not, and a plain
-        admission if it knows neither - which is better than a blank space
-        where a person's name should be.
+        Nothing, rather than a phrase standing in for it. A call placed on the
+        handset carries no number for the shell to read, and "an unknown
+        number - 00:18" on a notification says less than "00:18" does while
+        taking a line to say it.
         """
-        return self.name or self.number or "an unknown number"
+        return self.name or self.number
 
 
 def find_adb() -> str:
