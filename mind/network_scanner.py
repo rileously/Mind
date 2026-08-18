@@ -181,7 +181,7 @@ class RouterFilterProbe(QObject):
             return
         message = " ".join(survey_summary(pages))
         if notes:
-            message += " " + " ".join(notes) + "."
+            message += f" Details are in {probe.name}."
         self.done.emit(message)
 
 

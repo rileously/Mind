@@ -538,25 +538,39 @@ def harvest_paths(body: str, from_path: str) -> list[str]:
 
 
 def survey_summary(pages: list[FilterPage]) -> list[str]:
-    """What the survey found, in the words whoever reads it needs.
+    """What the survey found, in one line a person can read at a glance.
 
-    The promising pages by name, because that is the answer; everything else as
-    a count, because forty lines of "404" is not information.
+    The name of the page and nothing else. Every marker and every form it
+    submits to is worth keeping, but on a status line four of them run to five
+    wrapped lines and say less than one - so the detail goes to the file, which
+    is where anyone acting on it will be looking anyway.
     """
+    promising = [page.path for page in pages if page.promising]
+    if not promising:
+        answered = sum(1 for page in pages if page.status == 200)
+        return [
+            f"No page looked like a block list. {answered} of {len(pages)} paths answered."
+        ]
+    first, rest = promising[0], promising[1:]
+    line = f"Found the block list: {first}"
+    if rest:
+        line += f" (and {len(rest)} more)"
+    return [line + "."]
+
+
+def survey_report(pages: list[FilterPage]) -> str:
+    """The whole of what was found, for the file rather than the window."""
     lines = []
     for page in pages:
         if not page.promising:
             continue
-        detail = f"{page.path} — {', '.join(page.markers[:4])}"
-        if page.endpoints:
-            detail += f"; submits to {', '.join(page.endpoints[:3])}"
-        lines.append(detail)
-    if not lines:
-        answered = sum(1 for page in pages if page.status == 200)
-        lines.append(
-            f"No page looked like a block list. {answered} of {len(pages)} paths answered."
-        )
-    return lines
+        lines.append(f"{page.path}")
+        lines.append(f"    markers: {', '.join(page.markers)}")
+        for endpoint in page.endpoints:
+            lines.append(f"    submits: {endpoint}")
+    answered = [page for page in pages if page.status == 200]
+    lines.append(f"{len(answered)} of {len(pages)} paths answered.")
+    return "\n".join(lines)
 
 
 class FilterSurvey:
@@ -584,7 +598,16 @@ class FilterSurvey:
                 # router publishes hundreds, and this is a look, not a crawl.
                 if found not in self.seen and FILTER_WORDS.search(found):
                     queue.append(found)
-        self.pages.sort(key=lambda page: (not page.promising, page.path))
+        # The Wi-Fi list first among the pages that qualify. This router keeps
+        # two - one for the wired side, one for the wireless - and the one
+        # asked about is the one that puts a phone off the Wi-Fi.
+        self.pages.sort(
+            key=lambda page: (
+                not page.promising,
+                "wlan" not in page.path.lower(),
+                page.path,
+            )
+        )
         return self.pages
 
     def _fetch(self, path: str) -> str | None:
@@ -605,12 +628,23 @@ class FilterSurvey:
         return body
 
     def write_probe(self, probe_into: Path) -> bool:
-        """Keep what the pages returned, so this can be read without the router."""
+        """Keep what the pages returned, so this can be read without the router.
+
+        What was found goes at the top, because the pages themselves are tens of
+        thousands of characters and the answer should not have to be dug for.
+        """
         if not self.bodies:
             return False
+        report = survey_report(self.pages)
         try:
             probe_into.parent.mkdir(parents=True, exist_ok=True)
-            probe_into.write_text("\n".join(self.bodies), encoding="utf-8")
+            probe_into.write_text(
+                "----- what this survey found -----\n"
+                + report
+                + "\n\n"
+                + "\n".join(self.bodies),
+                encoding="utf-8",
+            )
         except OSError:
             return False
         return True

@@ -18,6 +18,7 @@ from mind.router_client import (
     find_endpoints,
     find_markers,
     harvest_paths,
+    survey_report,
     survey_summary,
 )
 
@@ -127,6 +128,13 @@ class SurveyTests(unittest.TestCase):
         self.assertTrue(found[0].promising)
         self.assertEqual(found[0].path, "/html/bbsp/wlanfilter/wlanfilter.asp")
 
+    def test_the_wireless_list_is_named_before_the_wired_one(self):
+        # A router keeps both, and the question being asked is about Wi-Fi.
+        pages = dict(self.pages)
+        pages["/html/bbsp/macfilter/macfilter.asp"] = FILTER_PAGE
+        found = FilterSurvey(FakeSession(pages)).run()
+        self.assertIn("wlan", found[0].path)
+
     def test_a_page_named_in_the_menu_is_followed(self):
         # The link is relative and the page is not in the guessed list, so
         # finding it proves the menu was read rather than guessed past - and
@@ -155,11 +163,20 @@ class SurveyTests(unittest.TestCase):
         # reaches the method that can carry a form body.
         FilterSurvey(FakeSession(self.pages)).run()
 
-    def test_what_it_found_is_said_in_words(self):
+    def test_what_it_found_is_said_in_one_line(self):
+        # It goes on a status line in the window. Four markers and three form
+        # targets wrap to five lines there and say less than the name does.
         found = FilterSurvey(FakeSession(self.pages)).run()
-        summary = " ".join(survey_summary(found))
-        self.assertIn("wlanfilter.asp", summary)
-        self.assertIn("set.cgi", summary)
+        summary = survey_summary(found)
+        self.assertEqual(len(summary), 1)
+        self.assertIn("wlanfilter.asp", summary[0])
+        self.assertLess(len(summary[0]), 120)
+
+    def test_the_detail_is_kept_where_someone_acting_on_it_would_look(self):
+        found = FilterSurvey(FakeSession(self.pages)).run()
+        report = survey_report(found)
+        self.assertIn("set.cgi", report)
+        self.assertIn("MacFilter", report)
 
     def test_finding_nothing_says_so_rather_than_saying_nothing(self):
         found = FilterSurvey(FakeSession({"/": ORDINARY_PAGE})).run()
