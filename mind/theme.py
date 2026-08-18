@@ -2,8 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import (
+    QColor,
+    QIcon,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygon,
+)
+
+from .paths import data_dir
 
 
 PALETTES = {
@@ -100,6 +112,54 @@ def qt_palette(choice: str, accent: str = "teal") -> QPalette:
     palette.setColor(QPalette.Highlight, QColor(colors["accent"]))
     palette.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
     return palette
+
+
+def chevron_file(colour: str) -> str:
+    """A downward chevron on disk, for the one thing QSS cannot draw.
+
+    Styling QComboBox::drop-down stops Qt drawing its own arrow, and nothing in
+    a stylesheet puts one back: a border-drawn triangle renders as a square, and
+    Qt's QSS reads image: url() from a file rather than from data. Without this
+    every picker in Mind looked like a plain text box - which is exactly how the
+    application field on a watcher read, with a hundred programs behind it that
+    nobody could see were there.
+
+    Painted once per colour and kept, so switching themes does not repaint it.
+    Returns "" if it cannot be written, and the caller simply leaves the arrow
+    out rather than failing to draw a window.
+    """
+    target = data_dir() / "cache" / f"chevron-{colour.lstrip('#').lower()}.png"
+    if target.exists():
+        return target.as_posix()
+    image = QImage(24, 24, QImage.Format_ARGB32)
+    image.fill(Qt.transparent)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(colour))
+    pen.setWidth(2)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.drawPolyline(QPolygon([QPoint(7, 10), QPoint(12, 15), QPoint(17, 10)]))
+    painter.end()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not image.save(str(target)):
+            return ""
+    except OSError:
+        return ""
+    return target.as_posix()
+
+
+def _chevron_rules(colour: str) -> str:
+    """The arrow, when one could be painted; nothing at all when it could not."""
+    path = chevron_file(colour)
+    if not path:
+        return ""
+    return (
+        "QComboBox::down-arrow { image: url(%s); width: 14px; height: 14px; }\n"
+        "QComboBox::down-arrow:disabled { image: none; }" % path
+    )
 
 
 def stylesheet(choice: str, accent: str = "teal") -> str:
@@ -551,6 +611,7 @@ def stylesheet(choice: str, accent: str = "teal") -> str:
     }}
     QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: {p['accent']}; }}
     QComboBox::drop-down {{ border: 0; width: 28px; }}
+    {_chevron_rules(p['muted'])}
     QFrame#ProviderSelectorShell {{
         background: transparent; border: 0; border-radius: 12px;
     }}

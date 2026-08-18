@@ -692,6 +692,11 @@ class WatcherDialog(QDialog):
         self.app_picker.setEditable(True)
         self.app_picker.setInsertPolicy(QComboBox.NoInsert)
         self.app_picker.setMinimumWidth(240)
+        # An editable combo shows nothing when no row is chosen, and with the
+        # list behind the arrow rather than in front of it the field read as an
+        # empty text box. The placeholder says there is something to open.
+        if self.app_picker.lineEdit() is not None:
+            self.app_picker.lineEdit().setPlaceholderText("Pick one, or type a name")
         completer = self.app_picker.completer()
         if completer is not None:
             completer.setCaseSensitivity(Qt.CaseInsensitive)
