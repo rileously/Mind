@@ -88,9 +88,10 @@ from .selection import (
 )
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
-from .single_instance import show_message_id
+from .single_instance import action_message_id, show_message_id
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
+from .adb_client import AdbError, Phone
 from .network_devices import local_ipv4
 from .network_scanner import (
     DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL,
@@ -99,6 +100,9 @@ from .network_scanner import (
     RouterFilterProbe,
     RouterTest,
 )
+from .phone_watch import PhoneWatcher, phone_for
+from .telegram_ui import call_alert_text
+from .windows_toast import dismiss_call, register as register_toasts, show_call, take_action
 from .telegram_system import read_running_apps, read_visible_apps
 from .watchers import (
     APP_KINDS as WATCHER_APP_KINDS,
@@ -1405,6 +1409,251 @@ class NetworkDevicesPage(QWidget):
         self.scanner.forget(device.mac)
 
 
+
+class PhonePage(QWidget):
+    """The phone, and the few things worth doing to it from a desk.
+
+    Answering is the point. Everything else here exists to make answering
+    possible: the pairing, the connection, and enough of the phone's state to
+    tell whether it is listening at all.
+    """
+
+    updated = Signal()
+
+    def __init__(self, store: ConfigStore, watcher=None, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.store = store
+        self.watcher = watcher
+        self._busy = False
+        root = QVBoxLayout(self)
+        root.setContentsMargins(30, 26, 30, 26)
+        root.setSpacing(16)
+        root.addWidget(page_header(
+            "Phone",
+            "Answer, hang up and dial an Android phone from here.",
+            "PHONE",
+        ))
+
+        toolbar_card = Card(variant="InsetCard")
+        toolbar = QHBoxLayout(toolbar_card)
+        toolbar.setContentsMargins(14, 12, 14, 12)
+        toolbar.setSpacing(10)
+        self.enabled_switch = ToggleSwitch()
+        self.enabled_switch.toggled.connect(self._set_enabled)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        self.answer_button = QPushButton("Answer")
+        self.answer_button.setProperty("primary", True)
+        self.answer_button.clicked.connect(self._answer)
+        self.hangup_button = QPushButton("Hang up")
+        self.hangup_button.setProperty("danger", True)
+        self.hangup_button.clicked.connect(self._hang_up)
+        toolbar.addWidget(self.enabled_switch)
+        toolbar.addWidget(self.status_label, 1)
+        toolbar.addWidget(self.answer_button)
+        toolbar.addWidget(self.hangup_button)
+        root.addWidget(toolbar_card)
+
+        # Pairing is a one-off and the port it uses dies with the screen that
+        # shows it, so the two fields sit together and are cleared after use.
+        pair_card = Card(variant="InsetCard")
+        pair = QHBoxLayout(pair_card)
+        pair.setContentsMargins(14, 12, 14, 12)
+        pair.setSpacing(10)
+        self.pair_address = QLineEdit()
+        self.pair_address.setPlaceholderText("Pairing address, e.g. 192.168.18.8:42299")
+        self.pair_code = QLineEdit()
+        self.pair_code.setPlaceholderText("Six-digit code")
+        self.pair_code.setMaximumWidth(130)
+        self.pair_button = QPushButton("Pair")
+        self.pair_button.clicked.connect(self._pair)
+        pair.addWidget(QLabel("Pair a phone"))
+        pair.addWidget(self.pair_address, 1)
+        pair.addWidget(self.pair_code)
+        pair.addWidget(self.pair_button)
+        root.addWidget(pair_card)
+
+        connect_card = Card(variant="InsetCard")
+        connect = QHBoxLayout(connect_card)
+        connect.setContentsMargins(14, 12, 14, 12)
+        connect.setSpacing(10)
+        self.address = QLineEdit()
+        self.address.setPlaceholderText("Phone address, e.g. 192.168.18.8:45217")
+        self.address.editingFinished.connect(self._save_address)
+        self.connect_button = QPushButton("Connect")
+        self.connect_button.clicked.connect(self._connect)
+        self.dial_box = QLineEdit()
+        self.dial_box.setPlaceholderText("Number to call")
+        self.dial_box.setMaximumWidth(180)
+        self.dial_button = QPushButton("Call")
+        self.dial_button.clicked.connect(self._dial)
+        connect.addWidget(QLabel("Connection"))
+        connect.addWidget(self.address, 1)
+        connect.addWidget(self.connect_button)
+        connect.addWidget(self.dial_box)
+        connect.addWidget(self.dial_button)
+        root.addWidget(connect_card)
+
+        self.detail = QLabel("")
+        self.detail.setObjectName("Muted")
+        self.detail.setWordWrap(True)
+        root.addWidget(self.detail)
+        root.addStretch()
+
+        self._loading = False
+        if watcher is not None:
+            watcher.call_changed.connect(self._call_changed)
+            watcher.state_changed.connect(self._state_changed)
+        self.refresh()
+
+    # -- reading the page ------------------------------------------------
+
+    def refresh(self) -> None:
+        config = self.store.load()
+        self._loading = True
+        try:
+            self.enabled_switch.setChecked(bool(config.get("phone_enabled", False)))
+            self.address.setText(str(config.get("phone_address", "")))
+        finally:
+            self._loading = False
+        self._show_state()
+
+    def _show_state(self) -> None:
+        watcher = self.watcher
+        if watcher is None:
+            self.status_label.setText("No phone watcher is running.")
+            self._sync_actions()
+            return
+        if not watcher.ready:
+            self.status_label.setText(
+                "adb is not installed. Mind needs the Android platform tools to talk to a phone."
+            )
+        elif not bool(self.store.load().get("phone_enabled", False)):
+            self.status_label.setText("Watching is off.")
+        elif watcher.trouble:
+            self.status_label.setText(watcher.trouble)
+        else:
+            call = watcher.call
+            if call.ringing:
+                who = call.number or "unknown number"
+                self.status_label.setText(f"Ringing — {who}")
+            elif call.busy:
+                self.status_label.setText("In a call")
+            else:
+                self.status_label.setText("Idle")
+        name = watcher.model or "No phone"
+        charge = f"{watcher.battery}%" if watcher.battery >= 0 else "battery unknown"
+        self.detail.setText(f"{name} · {charge}")
+        self._sync_actions()
+
+    def _sync_actions(self) -> None:
+        watcher = self.watcher
+        ringing = bool(watcher and watcher.call.ringing)
+        busy = bool(watcher and watcher.call.busy)
+        self.answer_button.setEnabled(ringing and not self._busy)
+        self.hangup_button.setEnabled(busy and not self._busy)
+        self.dial_button.setEnabled(not busy and not self._busy)
+
+    def _call_changed(self, _call) -> None:
+        self._show_state()
+
+    def _state_changed(self, _model: str, _battery: int, _trouble: str) -> None:
+        self._show_state()
+
+    # -- doing things ----------------------------------------------------
+
+    def _set_enabled(self, on: bool) -> None:
+        if self._loading:
+            return
+        config = self.store.load()
+        config["phone_enabled"] = on
+        self.store.save(config)
+        if self.watcher is not None:
+            self.watcher.start() if on else self.watcher.stop()
+        self.refresh()
+        self.updated.emit()
+
+    def _save_address(self) -> None:
+        if self._loading:
+            return
+        config = self.store.load()
+        config["phone_address"] = self.address.text().strip()
+        self.store.save(config)
+
+    def _act(self, what: str, action) -> None:
+        """Run one phone command, and say what came back.
+
+        These are quick - a keypress and an answer - so they run here rather
+        than on a thread of their own; a phone that has gone away answers with
+        a sentence rather than a wait, because adb gives up on its own.
+        """
+        self._busy = True
+        self._sync_actions()
+        try:
+            action()
+        except AdbError as exc:
+            self.status_label.setText(str(exc))
+        except Exception as exc:
+            self.status_label.setText(f"{what} failed: {exc}")
+        finally:
+            self._busy = False
+        if self.watcher is not None:
+            self.watcher.poll_now()
+        self._sync_actions()
+
+    def _answer(self) -> None:
+        self._act("Answering", lambda: phone_for(self.store).answer())
+
+    def _hang_up(self) -> None:
+        self._act("Hanging up", lambda: phone_for(self.store).hang_up())
+
+    def _dial(self) -> None:
+        number = self.dial_box.text().strip()
+        if not number:
+            return
+        confirmed = QMessageBox.question(
+            self,
+            "Place a call",
+            f"Call {number} from the phone?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+        self._act("Dialling", lambda: phone_for(self.store).dial(number))
+
+    def _pair(self) -> None:
+        address = self.pair_address.text().strip()
+        code = self.pair_code.text().strip()
+
+        def pair_and_remember():
+            phone = Phone()
+            phone.pair(address, code)
+            # The pairing port is not the one to talk on afterwards, and the
+            # phone shows the other on the same screen.
+            self.status_label.setText("Paired. Now connect on the phone's own address.")
+            self.pair_code.clear()
+
+        self._act("Pairing", pair_and_remember)
+
+    def _connect(self) -> None:
+        address = self.address.text().strip()
+
+        def connect_and_remember():
+            phone = Phone()
+            phone.connect(address)
+            config = self.store.load()
+            config["phone_address"] = address
+            found = [device for device in phone.devices() if device.ready]
+            if found:
+                config["phone_serial"] = found[0].serial
+            self.store.save(config)
+            self.status_label.setText(f"Connected to {address}.")
+
+        self._act("Connecting", connect_and_remember)
+
+
 class SettingsPage(QWidget):
     updated = Signal(str, bool, str, str)
     update_available = Signal(str, str)
@@ -2387,6 +2636,9 @@ class MindWindow(QMainWindow):
         self.scanner = NetworkScanner(self.store, self)
         self.scanner.log.connect(self._log)
         self.scanner.arrived.connect(self._on_devices_arrived)
+        self.phone_watcher = PhoneWatcher(self.store, self)
+        self.phone_watcher.log.connect(self._log)
+        self.phone_watcher.call_changed.connect(self._on_call_changed)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
         self._pasted_texts: set[str] = set()
@@ -2437,6 +2689,9 @@ class MindWindow(QMainWindow):
         )
         QTimer.singleShot(0, self.configure_telegram)
         QTimer.singleShot(0, self.configure_network_scan)
+        QTimer.singleShot(0, self.configure_phone_watch)
+        QTimer.singleShot(0, self._register_notifications)
+        QTimer.singleShot(300, self._do_pending_action)
         QTimer.singleShot(0, self.sync_shell_menu)
         if self.config.get("start_engine_on_launch", False):
             QTimer.singleShot(300, self.engine.start)
@@ -2499,6 +2754,7 @@ class MindWindow(QMainWindow):
             ("⌘", "Commands", "trigger automation writing actions"),
             ("◔", "Notifications", "watchers alerts battery disk memory idle folder telegram"),
             ("◈", "Wi-Fi devices", "network devices wifi lan ip mac vendor who is connected"),
+            ("☎", "Phone", "android adb call answer hang up dial ring battery pair wireless debugging"),
             ("⚙", "Preferences", "settings behavior typing spelling definition dictionary tooltip theme startup palette shortcut"),
             ("▥", "Diagnostics", "logs troubleshooting system health data folder"),
         ]
@@ -2546,6 +2802,7 @@ class MindWindow(QMainWindow):
         self.commands = CommandsPage(self.store)
         self.notifications = NotificationsPage(self.store)
         self.network = NetworkDevicesPage(self.store, self.scanner)
+        self.phone = PhonePage(self.store, self.phone_watcher)
         self.settings = SettingsPage(self.store)
         self.diagnostics = DiagnosticsPage(self.store.root)
         for page in [
@@ -2554,6 +2811,7 @@ class MindWindow(QMainWindow):
             self.commands,
             self.notifications,
             self.network,
+            self.phone,
             self.settings,
             self.diagnostics,
         ]:
@@ -2607,14 +2865,23 @@ class MindWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         for button_index, button in enumerate(self.nav_buttons):
             button.setChecked(button_index == index)
-        if index == 0:
-            self.dashboard.refresh()
-        elif index == 1:
-            self.providers.refresh()
-        elif index == 2:
-            self.commands.refresh()
-        elif index == 3:
-            self.settings.refresh()
+        # By name rather than by number. The numbers had already drifted -
+        # opening Notifications refreshed Settings - and inserting a page in
+        # the middle would move every one below it again.
+        pages = [
+            self.dashboard,
+            self.providers,
+            self.commands,
+            self.notifications,
+            self.network,
+            self.phone,
+            self.settings,
+            self.diagnostics,
+        ]
+        if 0 <= index < len(pages):
+            refresh = getattr(pages[index], "refresh", None)
+            if callable(refresh):
+                refresh()
 
     def _filter_navigation(self, query: str) -> None:
         terms = query.strip().lower()
@@ -2850,6 +3117,79 @@ class MindWindow(QMainWindow):
         if not sent_any:
             self.telegram.send_text(target, "Windows would not let Mind capture the screen.")
 
+    def _register_notifications(self) -> None:
+        """Claim the name Windows shows notifications under, and the protocol.
+
+        Both live in the user's own part of the registry and are written every
+        launch rather than once, because Mind moves when it is installed and a
+        protocol pointing at a copy that is no longer there is worse than none.
+        """
+        import sys
+
+        target = sys.executable
+        if target.lower().endswith("python.exe") or target.lower().endswith("pythonw.exe"):
+            # Running from source: point at whatever launched this, so a button
+            # press reaches something that exists.
+            target = f'{target}" "{Path(sys.argv[0]).resolve()}'
+        register_toasts(target)
+
+    def configure_phone_watch(self) -> None:
+        """Start or stop watching the phone to match the saved setting."""
+        if self._quitting:
+            self.phone_watcher.stop()
+            return
+        wanted = bool(self.store.load().get("phone_enabled", False))
+        if wanted and not self.phone_watcher.is_running:
+            self.phone_watcher.start()
+        elif not wanted and self.phone_watcher.is_running:
+            self.phone_watcher.stop()
+
+    def _do_pending_action(self) -> None:
+        """Do whatever the notification button asked for.
+
+        Read from the file rather than from the message, because a window
+        message carries two numbers and an action needs a word. It is cleared
+        as it is read, so a second press cannot act twice on a call that has
+        already been dealt with.
+        """
+        action = take_action()
+        if not action:
+            return
+        if action == "call/show":
+            self.show_window()
+            return
+        phone = phone_for(self.store)
+        try:
+            if action == "call/answer":
+                phone.answer()
+                self._log("Answered the call from a notification")
+            elif action == "call/reject":
+                phone.hang_up()
+                self._log("Rejected the call from a notification")
+        except AdbError as exc:
+            self._log(f"The phone could not be reached: {exc}")
+        except Exception as exc:
+            self._log(f"The call action failed: {exc}")
+        dismiss_call()
+        self.phone_watcher.poll_now()
+
+    def _on_call_changed(self, call) -> None:
+        """Say that the phone is ringing, wherever the user is.
+
+        Only the arrival is announced. A call being answered or ending is
+        something the person already knows about, having done it.
+        """
+        if not call.ringing:
+            # The call is over, one way or another, and a notification about a
+            # phone that has stopped ringing is only in the way.
+            dismiss_call()
+            return
+        show_call(call.number, self.phone_watcher.model)
+        self.notify_telegram(
+            call_alert_text(call.number, self.phone_watcher.model),
+            self.telegram.call_keyboard(),
+        )
+
     def configure_network_scan(self) -> None:
         """Start or stop scanning to match the saved setting."""
         if self._quitting:
@@ -2870,16 +3210,17 @@ class MindWindow(QMainWindow):
         for device in devices[:5]:
             where = f" at {device.ip}" if device.ip else ""
             self.notify_telegram(
-                f"📶  New on the network: {device.display_name}{where}\n{device.mac}"
+                f"📶  New on the network: {device.display_name}{where}\n{device.mac}",
+                self.telegram.device_alert_keyboard(device.mac, device.display_name),
             )
 
-    def notify_telegram(self, message: str) -> None:
+    def notify_telegram(self, message: str, reply_markup: dict | None = None) -> None:
         """Push an alert to every allowed chat, when the user asked for that."""
         config = self.store.load()
         if not config.get("telegram_notifications", False) or not self.telegram.is_running:
             return
         for chat_id in parse_allowed_chat_ids(config.get("telegram_allowed_chat_ids")):
-            self.telegram.send_text(chat_id, message)
+            self.telegram.send_text(chat_id, message, reply_markup)
 
     def _settings_updated(self, theme: str, palette_enabled: bool, shortcut: str, accent: str) -> None:
         self.apply_theme(theme, accent)
@@ -3143,6 +3484,10 @@ class MindWindow(QMainWindow):
             # shown here, through Qt, rather than by the other process.
             if native_message.message and native_message.message == show_message_id():
                 self.show_window()
+                return True, 0
+            # A button on a notification was pressed, in another process.
+            if native_message.message and native_message.message == action_message_id():
+                self._do_pending_action()
                 return True, 0
             if native_message.message == WM_HOTKEY:
                 if native_message.wParam == MIND_PALETTE_HOTKEY_ID:

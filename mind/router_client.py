@@ -235,6 +235,16 @@ class RouterSession:
         cleaned = (address or "").strip().rstrip("/")
         if not cleaned:
             raise RouterError("Enter the router's address, for example 192.168.18.1.")
+        # A single dot is a valid string and not a valid host. Left to urllib it
+        # raises a UnicodeError out of the IDNA encoder rather than anything a
+        # person could act on, and that error travelled far enough to stop the
+        # network scan that does not need a router at all.
+        host = cleaned.split("//")[-1].split("/")[0].split(":")[0]
+        if not any(character.isalnum() for character in host):
+            raise RouterError(
+                f"{cleaned!r} is not a router address. It should look like "
+                "192.168.18.1."
+            )
         if cleaned.startswith(("http://", "https://")):
             return [cleaned]
         return [f"https://{cleaned}:80", f"https://{cleaned}", f"http://{cleaned}"]
@@ -698,6 +708,69 @@ FILTER_SWITCH = (
 )
 WLAN_LIST_PAGE = "/html/amp/common/wlan_list.asp"
 
+# The wired list. The same page written twice by the same people: the same
+# token, the same three forms, the same two settings - under different names,
+# with no SSID because a cable is not a network you choose, and with the fields
+# of a row in a different order.
+WIRED_PAGE = "/html/bbsp/macfilter/macfilter.asp"
+WIRED_ADD = (
+    "/html/bbsp/macfilter/add.cgi?x=InternetGatewayDevice.X_HW_Security.MacFilter"
+    "&RequestFile=html/bbsp/macfilter/macfilter.asp"
+)
+WIRED_DELETE = (
+    "/html/bbsp/macfilter/del.cgi?x=InternetGatewayDevice.X_HW_Security.MacFilter"
+    "&RequestFile=html/bbsp/macfilter/macfilter.asp"
+)
+WIRED_SWITCH = (
+    "/html/bbsp/macfilter/set.cgi?x=InternetGatewayDevice.X_HW_Security"
+    "&RequestFile=html/bbsp/macfilter/macfilter.asp"
+)
+
+
+@dataclass(frozen=True)
+class FilterKind:
+    """One block list on the router, and the names it happens to use.
+
+    Two of these exist and a device can arrive by either road, so blocking that
+    writes to one of them is a block that works until somebody plugs in a cable.
+    Everything that differs between them is a value here rather than a branch
+    somewhere in the writing.
+    """
+
+    key: str
+    label: str
+    page: str
+    add: str
+    delete: str
+    switch: str
+    right_field: str
+    name_field: str
+    per_ssid: bool = False
+
+
+WIFI_FILTER = FilterKind(
+    "wifi",
+    "Wi-Fi",
+    FILTER_PAGE,
+    FILTER_ADD,
+    FILTER_DELETE,
+    FILTER_SWITCH,
+    "x.WlanMacFilterRight",
+    "x.DeviceName",
+    per_ssid=True,
+)
+WIRED_FILTER = FilterKind(
+    "wired",
+    "wired",
+    WIRED_PAGE,
+    WIRED_ADD,
+    WIRED_DELETE,
+    WIRED_SWITCH,
+    "x.MacFilterRight",
+    "x.DeviceAlias",
+)
+FILTER_KINDS = (WIFI_FILTER, WIRED_FILTER)
+
 
 @dataclass(frozen=True)
 class Ssid:
@@ -801,12 +874,24 @@ def parse_block_state(payload: str) -> BlockState:
     entries: list[BlockEntry] = []
     for row in re.findall(r"new stMacFilter\(([^)]*)\)", text):
         fields = [field.strip().strip("\"'") for field in row.split(",")]
-        if len(fields) < 4:
-            continue
-        mac = normalise_mac(fields[3])
+        # Read by shape, not by position. The wireless page writes a row as
+        # (domain, SSID, name, address) and the wired one as (domain, address,
+        # name), so counting along the row finds the address on one page and a
+        # name on the other.
+        mac = next((normalise_mac(field) for field in fields if normalise_mac(field)), "")
         if not mac:
             continue
-        entries.append(BlockEntry(fields[0], mac, fields[1], fields[2]))
+        domain = next((field for field in fields if "InternetGatewayDevice" in field), "")
+        ssid = next((field for field in fields if re.fullmatch(r"(?i)ssid[-_]?\d+", field)), "")
+        name = next(
+            (
+                field
+                for field in fields
+                if field and field not in {domain, ssid} and not normalise_mac(field)
+            ),
+            "",
+        )
+        entries.append(BlockEntry(domain, mac, ssid, name))
     return BlockState(
         on=setting("enableFilter", "0") == "1",
         blacklist=setting("Mode", "0") != "1",
@@ -816,10 +901,15 @@ def parse_block_state(payload: str) -> BlockState:
 
 
 class BlockList:
-    """The router's Wi-Fi block list, on a session that is already signed in.
+    """The router's block lists, on a session that is already signed in.
+
+    Two of them: the wireless one and the wired one. A device reaches the
+    network by one road or the other, and a phone can change roads by being
+    plugged in, so blocking writes to both wherever both exist. A firmware that
+    publishes only one is not an error - the other is simply skipped.
 
     Every write quotes back the token from the page it was read from, so each
-    one begins by reading the page again. That is one extra request per change
+    one begins by reading that page again. That is one extra request per change
     and it is what makes a change either take or say why it did not.
     """
 
@@ -828,13 +918,21 @@ class BlockList:
 
     # -- reading ---------------------------------------------------------
 
-    def state(self) -> BlockState:
-        status, body = self.session.read(FILTER_PAGE)
-        if status != 200 or self.session.looks_like_login(body):
+    def state(self, kind: FilterKind = WIFI_FILTER) -> BlockState:
+        """One list as the router currently has it. Raises if it is not there."""
+        found = self.read_state(kind)
+        if found is None:
             raise RouterError(
-                "The router did not show its Wi-Fi filter page. The sign-in may have "
-                "expired, or this model keeps its block list somewhere else."
+                f"The router did not show its {kind.label} filter page. The sign-in may "
+                "have expired, or this model keeps its block list somewhere else."
             )
+        return found
+
+    def read_state(self, kind: FilterKind) -> BlockState | None:
+        """The same, but None where this firmware has no such page at all."""
+        status, body = self.session.read(kind.page)
+        if status != 200 or self.session.looks_like_login(body):
+            return None
         state = parse_block_state(body)
         if not state.token:
             raise RouterError(
@@ -842,6 +940,34 @@ class BlockList:
                 "safely. It refuses any write without one."
             )
         return state
+
+    def kinds(self) -> tuple[FilterKind, ...]:
+        """The lists this router actually publishes."""
+        return tuple(
+            kind for kind in FILTER_KINDS if self.read_state(kind) is not None
+        )
+
+    def blocked_macs(self) -> tuple[str, ...]:
+        """Every address that every list on this router is keeping off.
+
+        Every list, not any of them. A device named by one list and not the
+        other is a block that half happened, and the missing half is exactly
+        the road the device is on when it carries on working - a television on
+        a cable, refused on three Wi-Fi networks it was never using, reads as
+        blocked while it streams. Counting that as "not blocked" is what makes
+        the button offer to finish the job rather than to undo it.
+        """
+        live = [
+            state
+            for state in (self.read_state(kind) for kind in FILTER_KINDS)
+            if state is not None
+        ]
+        if not live:
+            return ()
+        common = set(live[0].blocked_macs)
+        for state in live[1:]:
+            common &= set(state.blocked_macs)
+        return tuple(sorted(common))
 
     def networks(self) -> tuple[Ssid, ...]:
         status, body = self.session.read(WLAN_LIST_PAGE)
@@ -854,73 +980,129 @@ class BlockList:
 
     # -- writing ---------------------------------------------------------
 
-    def _send(self, path: str, fields: dict[str, str]) -> None:
+    def _send(self, kind: FilterKind, path: str, fields: dict[str, str]) -> None:
         """One write, with the page it came from named as the referer.
 
         These pages are only ever reached from themselves, and the firmware
         checks that, so a write that does not say where it came from is thrown
         away without an error worth reading.
+
+        The token goes last, always. Anything after it in the body and the
+        router answers 403 - the same add is accepted with the fields in one
+        order and refused in another, whatever they contain. The page's own
+        script puts the token at the end and this is the rule behind that. It is
+        done here so that no caller has to remember it.
         """
-        body = urllib.parse.urlencode(fields).encode()
-        status, answer = self.session.post(path, body, referer=self.session.base + FILTER_PAGE)
+        ordered = [
+            (key, value) for key, value in fields.items() if key != "x.X_HW_Token"
+        ]
+        ordered.append(("x.X_HW_Token", fields.get("x.X_HW_Token", "")))
+        body = urllib.parse.urlencode(ordered).encode()
+        status, answer = self.session.post(
+            path, body, referer=self.session.base + kind.page
+        )
         if status >= 400:
             raise RouterError(f"The router refused the change ({status}).")
         if self.session.looks_like_login(answer):
             raise RouterError("The router asked for a sign-in again part way through.")
 
     def block(self, mac: str, name: str = "") -> BlockState:
-        """Keep this device off every network the router broadcasts."""
+        """Keep this device off, by wireless and by cable both.
+
+        Returns the wireless list, which is the one the rest of Mind asks about;
+        what was written to each is the router's business.
+        """
+        first: BlockState | None = None
+        for kind in FILTER_KINDS:
+            state = self.read_state(kind)
+            if state is None:
+                continue
+            written = self._block_one(kind, state, mac, name)
+            if first is None:
+                first = written
+        if first is None:
+            raise RouterError(
+                "This router published no block list that Mind recognises."
+            )
+        return first
+
+    def _block_one(
+        self, kind: FilterKind, state: BlockState, mac: str, name: str
+    ) -> BlockState:
         address = router_mac(mac)
-        state = self.state()
         if not state.blacklist:
             raise RouterError(
-                "This router's Wi-Fi filter is set to whitelist, where the list is what "
-                "is allowed rather than what is refused. Changing that mode deletes "
-                "every rule the router has, so Mind will not do it for you."
+                f"This router's {kind.label} filter is set to whitelist, where the list "
+                "is what is allowed rather than what is refused. Changing that mode "
+                "deletes every rule the router has, so Mind will not do it for you."
             )
+        # A wireless rule is per SSID; a wired one is not a network you choose.
+        targets = (
+            [network.field for network in self.networks()] if kind.per_ssid else [""]
+        )
         already = {entry.ssid for entry in state.rules_for(mac)}
-        for network in self.networks():
-            if network.field in already:
+        for target in targets:
+            if target in already:
                 continue
-            self._send(
-                FILTER_ADD,
-                {
-                    "x.SourceMACAddress": address,
-                    "x.SSIDName": network.field,
-                    "x.DeviceName": (name or "")[:32],
-                    "x.Enable": "1",
-                    "x.X_HW_Token": state.token,
-                },
-            )
-            state = self.state()  # each write spends the token it was given
+            fields = {
+                "x.SourceMACAddress": address,
+                kind.name_field: (name or "")[:32],
+                "x.Enable": "1",
+            }
+            if kind.per_ssid:
+                fields["x.SSIDName"] = target
+            # The token is added by _send, which puts it last where the router
+            # insists on having it.
+            fields["x.X_HW_Token"] = state.token
+            self._send(kind, kind.add, fields)
+            state = self.state(kind)  # each write spends the token it was given
 
         if not state.on:
             self._send(
-                FILTER_SWITCH,
-                {"x.WlanMacFilterRight": "1", "x.X_HW_Token": state.token},
+                kind,
+                kind.switch,
+                {kind.right_field: "1", "x.X_HW_Token": state.token},
             )
-            state = self.state()
+            state = self.state(kind)
 
         if not state.blocks(mac):
             raise RouterError(
-                "The router accepted the request but is not blocking that device. Its "
-                "filter list may be full."
+                f"The router accepted the request but is not blocking that device on "
+                f"{kind.label}. Its filter list may be full."
             )
         return state
 
     def unblock(self, mac: str) -> BlockState:
         """Let this device back on, by deleting the rules that named it."""
-        state = self.state()
+        first: BlockState | None = None
+        for kind in FILTER_KINDS:
+            state = self.read_state(kind)
+            if state is None:
+                continue
+            cleared = self._unblock_one(kind, state, mac)
+            if first is None:
+                first = cleared
+        if first is None:
+            raise RouterError(
+                "This router published no block list that Mind recognises."
+            )
+        return first
+
+    def _unblock_one(self, kind: FilterKind, state: BlockState, mac: str) -> BlockState:
         rules = state.rules_for(mac)
         if not rules:
             return state
         for rule in rules:
             # The delete form names the rule by its own path, with nothing on
             # the other side of the equals sign - the value is not read.
-            self._send(FILTER_DELETE, {rule.domain: "", "x.X_HW_Token": state.token})
-            state = self.state()
+            self._send(
+                kind, kind.delete, {rule.domain: "", "x.X_HW_Token": state.token}
+            )
+            state = self.state(kind)
         if state.rules_for(mac):
-            raise RouterError("The router kept the rule: that device is still blocked.")
+            raise RouterError(
+                f"The router kept the rule: that device is still blocked on {kind.label}."
+            )
         return state
 
 
@@ -933,7 +1115,7 @@ def blocked_macs(
     """Which devices the router is currently keeping off the Wi-Fi."""
     session = RouterSession(address, timeout)
     session.sign_in(username, password)
-    return BlockList(session).state().blocked_macs
+    return BlockList(session).blocked_macs()
 
 
 def set_blocked(
@@ -944,9 +1126,18 @@ def set_blocked(
     blocked: bool,
     name: str = "",
     timeout: float = DEFAULT_TIMEOUT,
-) -> BlockState:
-    """Block or unblock one device, and report the list as it ended up."""
+) -> tuple[str, ...]:
+    """Block or unblock one device, and report who is blocked afterwards.
+
+    What comes back is read from the router rather than assumed from what was
+    asked for, and it covers both lists - which is the only answer worth
+    writing down.
+    """
     session = RouterSession(address, timeout)
     session.sign_in(username, password)
     blocking = BlockList(session)
-    return blocking.block(mac, name) if blocked else blocking.unblock(mac)
+    if blocked:
+        blocking.block(mac, name)
+    else:
+        blocking.unblock(mac)
+    return blocking.blocked_macs()

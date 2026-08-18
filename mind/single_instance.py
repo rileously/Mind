@@ -24,6 +24,9 @@ WINDOW_TITLES = ("Mind • AI Writing Workspace", "Mind")
 # Registering the same string in any process returns the same number, which is
 # what makes this work across two copies of Mind without a shared channel.
 SHOW_MESSAGE_NAME = "MindDesktop.ShowWindow"
+# A button on a notification arrives as a whole new process. It leaves what it
+# wants in a file and posts this, and the copy that owns the phone reads it.
+ACTION_MESSAGE_NAME = "MindDesktop.Action"
 
 _user32 = ctypes.windll.user32 if hasattr(ctypes, "windll") else None
 _show_message: int = 0
@@ -38,6 +41,42 @@ def show_message_id() -> int:
     _user32.RegisterWindowMessageW.restype = wintypes.UINT
     _show_message = int(_user32.RegisterWindowMessageW(SHOW_MESSAGE_NAME) or 0)
     return _show_message
+
+
+_action_message: int = 0
+
+
+def action_message_id() -> int:
+    """The message number Mind uses to mean "something is waiting for you"."""
+    global _action_message
+    if _action_message or _user32 is None:
+        return _action_message
+    _user32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+    _user32.RegisterWindowMessageW.restype = wintypes.UINT
+    _action_message = int(_user32.RegisterWindowMessageW(ACTION_MESSAGE_NAME) or 0)
+    return _action_message
+
+
+def tell_running_instance(message: int) -> bool:
+    """Post one of Mind's own messages to the copy already running."""
+    if _user32 is None:
+        return False
+    handle = find_window()
+    if not handle or not message:
+        return False
+    pid = wintypes.DWORD(0)
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _user32.GetWindowThreadProcessId(wintypes.HWND(handle), ctypes.byref(pid))
+    if pid.value:
+        _user32.AllowSetForegroundWindow.argtypes = [wintypes.DWORD]
+        _user32.AllowSetForegroundWindow(pid)
+    _user32.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    return bool(_user32.PostMessageW(wintypes.HWND(handle), message, 0, 0))
 
 
 def find_window() -> int:

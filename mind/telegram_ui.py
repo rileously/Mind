@@ -366,6 +366,11 @@ CB_DEVICES = "y"
 # Blocking carries the address rather than a position in the list. A row index
 # would mean the wrong phone gets blocked whenever the list reorders between
 # the panel being drawn and the button being tapped, which it does every scan.
+# A ringing phone: two answers and no third. These carry nothing, because
+# there is only ever one call to act on and naming it would let a tap from an
+# old message reach a call that has since been replaced by another.
+CB_CALL_ANSWER = "e"
+CB_CALL_REJECT = "i"
 CB_DEVICE_ASK = "b"
 CB_DEVICE_BLOCK = "c"
 
@@ -532,6 +537,48 @@ def build_app_alert_keyboard(app: str) -> dict:
             [{"text": f"✕  Close {app}"[:40], "callback_data": CB_APP_CLOSE}]
         ]
     }
+
+
+def build_device_alert_keyboard(mac: str, name: str) -> dict:
+    """Offer to block the device the alert just announced.
+
+    Being told that something joined the network is half of what somebody away
+    from the house wants; the other half is being able to do something about it
+    from the same message. The tap asks before it acts, as it does everywhere
+    else, so this button is a way in rather than a trigger.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"🚫  Block {name}"[:40],
+                    "callback_data": f"{CB_DEVICE_ASK}:{mac_field(mac)}",
+                }
+            ]
+        ]
+    }
+
+
+def build_call_keyboard() -> dict:
+    """Answer or refuse the call that is ringing.
+
+    One tap each, and no confirmation: a ringing phone is a few seconds long,
+    and a question in the middle of it is the same as a missed call.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📞  Answer", "callback_data": CB_CALL_ANSWER},
+                {"text": "✕  Reject", "callback_data": CB_CALL_REJECT},
+            ]
+        ]
+    }
+
+
+def call_alert_text(number: str, model: str = "") -> str:
+    who = number or "an unknown number"
+    where = f"\n{model}" if model else ""
+    return f"☎  The phone is ringing — {who}{where}"
 
 
 def build_watcher_files_keyboard(names) -> dict:

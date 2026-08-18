@@ -90,6 +90,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # owner's to decide on a network they do not run.
     "network_scan_enabled": False,
     "network_scan_seconds": 60,
+    # Talking to an Android phone over adb. Off by default and deliberately so:
+    # it needs debugging switched on at the phone's end, which is the owner
+    # saying yes rather than a setting anybody else can turn on for them.
+    "phone_enabled": False,
+    "phone_serial": "",
+    "phone_address": "",
+    "phone_poll_seconds": 4,
     # The router's own device list is the only place a phone's real name lives,
     # and reaching it means signing in. The password is stored encrypted, like
     # the bot token; the address defaults to whatever the gateway turns out to be.

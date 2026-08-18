@@ -61,6 +61,13 @@ def router_facts(store: ConfigStore) -> tuple[dict[str, str], set[str]]:
     without it, and the Test button is where a person goes to find out why. The
     block list is allowed to fail on its own too - a firmware without that page
     still has names worth reading.
+
+    Anything at all, not only a RouterError. An address saved as "." reached
+    urllib as a hostname and came back as a UnicodeError from the IDNA encoder,
+    which travelled up and failed the whole scan - so the sweep of the network,
+    which needs no router and no password, stopped working because of a setting
+    it never reads. Whatever goes wrong with the router, the scan continues
+    without it.
     """
     address, username, password = router_credentials(store)
     if not (address and username and password):
@@ -69,12 +76,12 @@ def router_facts(store: ConfigStore) -> tuple[dict[str, str], set[str]]:
         session = RouterSession(address)
         session.sign_in(username, password)
         devices = session.devices()
-    except RouterError:
+    except Exception:
         return {}, set()
     names = {device.mac: device.hostname for device in devices if device.hostname}
     try:
-        blocked = set(BlockList(session).state().blocked_macs)
-    except RouterError:
+        blocked = set(BlockList(session).blocked_macs())
+    except Exception:
         blocked = set()
     return names, blocked
 

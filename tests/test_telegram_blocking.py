@@ -12,6 +12,7 @@ tap carries, and that a tap alone never blocks anything - it asks first.
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from mind.config_store import ConfigStore
@@ -116,6 +117,9 @@ class TapTests(unittest.TestCase):
         config = self.store.load()
         config["router_address"] = "192.168.18.1"
         config["router_username"] = "Epuser"
+        # Saved rather than only passed: an alert is sent from the app rather
+        # than in reply to a tap, so it reads the settings from the store.
+        config["telegram_control_enabled"] = True
         config = self.store.set_router_password(config, "not-a-real-password")
         self.store.save(config)
         self.config = {
@@ -184,6 +188,69 @@ class RememberedBlocksTests(unittest.TestCase):
         self.store.blocked_path.parent.mkdir(parents=True, exist_ok=True)
         self.store.blocked_path.write_text("{not json", encoding="utf-8")
         self.assertEqual(self.store.load_blocked(), [])
+
+
+class ArrivalAlertTests(TapTests):
+    """Blocking from the message that said something joined.
+
+    Mind already sends one alert per device that appears on the network, on the
+    grounds that a stranger is worth its own message. That message is content
+    rather than a panel, so a tap on it has to behave differently: the alert
+    says what happened, and replacing it with a listing would take that away.
+    """
+
+    def test_the_alert_carries_a_way_to_act_on_it(self):
+        keyboard = self.bridge.device_alert_keyboard(PHONE, "Redmi-Note-11")
+        self.assertIsNotNone(keyboard)
+        button = keyboard["inline_keyboard"][0][0]
+        self.assertIn("Redmi-Note-11", button["text"])
+        self.assertEqual(button["callback_data"], f"{CB_DEVICE_ASK}:{mac_field(PHONE)}")
+
+    def test_no_button_is_offered_when_it_could_only_fail(self):
+        config = self.store.load()
+        config["router_address"] = ""
+        self.store.save(config)
+        self.assertIsNone(self.bridge.device_alert_keyboard(PHONE, "Redmi-Note-11"))
+
+    def test_a_tap_on_an_alert_asks_in_the_alert_itself(self):
+        # 909 is not the devices panel, so it is an alert.
+        self.ask(message_id=909)
+        self.assertEqual([edit["id"] for edit in self.client.edited], [909])
+        self.assertIn("Block Redmi-Note-11", str(self.client.edited))
+
+    def test_an_alert_never_becomes_the_panel_that_the_next_listing_deletes(self):
+        # Otherwise asking for /devices later would remove the alert, which is
+        # the one message here worth keeping.
+        self.ask(message_id=909)
+        self.assertNotIn((7, "devices"), self.bridge._panels)
+
+    def test_the_outcome_is_written_into_the_alert_rather_than_a_new_listing(self):
+        blocked = []
+        self.bridge._device_block = blocked  # marker for readability only
+
+        def fake_set_blocked(*args, **kwargs):
+            blocked.append(args)
+            # What the router says afterwards, across both its lists.
+            return (PHONE,)
+
+        with unittest.mock.patch(
+            "mind.telegram_bridge.set_blocked", side_effect=fake_set_blocked
+        ):
+            self.bridge._handle_device_block_tap(
+                self.client, 7, "cb", 909, mac_field(PHONE), self.config
+            )
+        self.assertTrue(blocked)
+        self.assertIn("off the Wi-Fi", str(self.client.edited))
+        self.assertEqual(self.client.sent, [])
+
+    def test_what_the_router_says_afterwards_is_what_gets_remembered(self):
+        with unittest.mock.patch(
+            "mind.telegram_bridge.set_blocked", return_value=(PHONE,)
+        ):
+            self.bridge._handle_device_block_tap(
+                self.client, 7, "cb", 909, mac_field(PHONE), self.config
+            )
+        self.assertEqual(self.store.load_blocked(), [PHONE])
 
 
 if __name__ == "__main__":

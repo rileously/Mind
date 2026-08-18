@@ -86,12 +86,16 @@ from .telegram_ui import (
     build_watcher_files_keyboard,
     build_app_alert_keyboard,
     build_apps_keyboard,
+    CB_CALL_ANSWER,
+    CB_CALL_REJECT,
     CB_DEVICE_ASK,
     CB_DEVICE_BLOCK,
     block_confirm_text,
     build_block_confirm_keyboard,
     power_prompt,
     PRINT_PROMPT,
+    build_call_keyboard,
+    build_device_alert_keyboard,
     build_devices_keyboard,
     build_power_menu_keyboard,
     devices_text,
@@ -117,6 +121,7 @@ from dataclasses import replace as replace_device
 
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
+from .adb_client import AdbError, Phone
 from .router_client import RouterError, set_blocked
 from .watchers import (
     Reading as WatcherReading,
@@ -508,6 +513,63 @@ class TelegramBridge(QObject):
                 return device
         return None
 
+    def _is_panel(self, chat_id: int, message_id: object, kind: str) -> bool:
+        """Whether this message is the panel of that kind, rather than an alert.
+
+        The two want opposite things. A panel is spent the moment something is
+        picked from it, so the question takes its place. An alert is content -
+        it says a device joined, and that is worth keeping - so the question is
+        written into it without the message becoming a panel that the next
+        listing would delete.
+        """
+        return isinstance(message_id, int) and self._panels.get((chat_id, kind)) == message_id
+
+    def call_keyboard(self) -> dict | None:
+        """The buttons for a ringing phone, when there is a phone to act on."""
+        if not bool(self.store.load().get("phone_enabled", False)):
+            return None
+        return build_call_keyboard()
+
+    def _handle_call_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        answering: bool,
+        config: dict,
+    ) -> None:
+        """Answer or refuse the call, and say in the message what happened.
+
+        The alert is the thing that said the phone was ringing, so the outcome
+        is written into it rather than sent underneath: what matters afterwards
+        is what became of that call, not that it was once ringing.
+        """
+        client.answer_callback_query(
+            callback_id, "Answering…" if answering else "Rejecting…"
+        )
+        if not bool(config.get("phone_enabled", False)):
+            client.send_message(chat_id, "The phone is not switched on in Mind.")
+            return
+        serial = str(self.store.load().get("phone_serial", "")).strip()
+        phone = Phone(serial=serial)
+        try:
+            if answering:
+                took = phone.answer()
+                said = "Answered." if took else "The phone would not take it."
+            else:
+                phone.hang_up()
+                said = "Rejected."
+        except AdbError as exc:
+            said = str(exc)
+        except Exception as exc:  # a tap must never take the bridge down
+            said = f"The phone could not be reached: {exc}"
+        self.log.emit(f"Telegram: {said}")
+        if isinstance(message_id, int):
+            client.edit_message_text(chat_id, message_id, f"☎  {said}")
+        else:
+            client.send_message(chat_id, f"☎  {said}")
+
     def _handle_device_ask_tap(
         self,
         client: TelegramClient,
@@ -536,6 +598,12 @@ class TelegramBridge(QObject):
         blocking = mac not in set(self.store.load_blocked())
         text = block_confirm_text(device.display_name, blocking)
         keyboard = build_block_confirm_keyboard(mac, blocking)
+        if not self._is_panel(chat_id, message_id, PANEL_DEVICES):
+            # Tapped on an arrival alert. The question is added to what the
+            # alert already says rather than replacing it, so the message still
+            # reads as the thing that happened.
+            client.edit_message_text(chat_id, int(message_id), text, reply_markup=keyboard)
+            return
         if self._replace_panel(client, chat_id, message_id, PANEL_DEVICES, text, keyboard):
             return
         self._send_panel(client, chat_id, PANEL_DEVICES, text, keyboard)
@@ -563,7 +631,7 @@ class TelegramBridge(QObject):
         blocking = mac not in set(self.store.load_blocked())
         address, username, password = router_credentials(self.store)
         try:
-            state = set_blocked(
+            blocked_now = set_blocked(
                 address, username, password, mac, blocking, device.display_name
             )
         except RouterError as exc:
@@ -576,9 +644,15 @@ class TelegramBridge(QObject):
             return
         # The router is the authority on who is blocked, so what it said is
         # what gets written down rather than what was asked for.
-        self.store.save_blocked(list(state.blocked_macs))
+        self.store.save_blocked(list(blocked_now))
         said = "is off the Wi-Fi" if blocking else "can use the Wi-Fi again"
         self.log.emit(f"Telegram: {device.display_name} {said}")
+        if not self._is_panel(chat_id, message_id, PANEL_DEVICES):
+            mark = "🚫" if blocking else "✅"
+            client.edit_message_text(
+                chat_id, int(message_id), f"{mark}  {device.display_name} {said}."
+            )
+            return
         self._send_devices_panel(client, chat_id, config, message_id)
 
     def _send_apps_panel(
@@ -959,6 +1033,12 @@ class TelegramBridge(QObject):
         if action == CB_DEVICES:
             client.answer_callback_query(callback_id)
             self._send_devices_panel(client, chat_id, config, message_id)
+            return
+
+        if action in {CB_CALL_ANSWER, CB_CALL_REJECT}:
+            self._handle_call_tap(
+                client, chat_id, callback_id, message_id, action == CB_CALL_ANSWER, config
+            )
             return
 
         if action in {CB_DEVICE_ASK, CB_DEVICE_BLOCK}:
@@ -2026,14 +2106,25 @@ class TelegramBridge(QObject):
             else:
                 self._panels[key] = sent
 
-    def send_text(self, chat_id: int, text: str) -> None:
+    def send_text(self, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
         client = self._client
         if client is None:
             return
         try:
-            client.send_message(int(chat_id), text)
+            client.send_message(int(chat_id), text, reply_markup=reply_markup)
         except TelegramError as exc:
             self.log.emit(f"Telegram: could not send a reply ({exc})")
+
+    def device_alert_keyboard(self, mac: str, name: str) -> dict | None:
+        """The Block button for an arrival alert, when blocking is possible.
+
+        Nothing is offered without the router's sign-in and the PC-controls
+        switch, the same as on the devices panel: a button that can only fail is
+        worse than a message with no button on it.
+        """
+        if not self._can_block(self.store.load()):
+            return None
+        return build_device_alert_keyboard(mac, name)
 
     def send_clipboard(self, chat_id: int, text: str) -> None:
         """Send clipboard text with a button that copies it on the phone.

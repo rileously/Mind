@@ -89,6 +89,16 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(session.candidates[0], "https://192.168.18.1:80")
         self.assertIn("http://192.168.18.1", session.candidates)
 
+    def test_something_that_cannot_be_a_host_is_refused_with_a_sentence(self):
+        # A single dot is a valid string and not a valid address. Left to
+        # urllib it comes back as a UnicodeError from the IDNA encoder, which
+        # is neither readable nor catchable where a RouterError would be - and
+        # it stopped the network scan, which needs no router at all.
+        for written in (".", "..", "///", "  .  "):
+            with self.assertRaises(RouterError) as caught:
+                RouterSession(written)
+            self.assertIn("192.168.18.1", str(caught.exception))
+
     def test_an_address_typed_with_a_scheme_is_respected(self):
         self.assertEqual(RouterSession("http://10.0.0.1/").candidates, ["http://10.0.0.1"])
 
@@ -236,6 +246,52 @@ class OptiXstarTests(unittest.TestCase):
     def test_the_object_path_is_never_mistaken_for_a_name(self):
         for device in self.devices.values():
             self.assertNotIn("InternetGatewayDevice", device.hostname)
+
+
+class ScanSurvivesTheRouterTests(unittest.TestCase):
+    """The sweep of the network needs no router, and must not depend on one.
+
+    A router address saved as "." stopped the whole scan: the address reached
+    urllib as a hostname, came back as a UnicodeError rather than a RouterError,
+    and failed the worker. Every device then aged out and the Telegram panel
+    read "0 online of 14 known" while the house was full of phones.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+
+    def fill(self, address: str):
+        config = self.store.load()
+        config["router_address"] = address
+        config["router_username"] = "Epuser"
+        config = self.store.set_router_password(config, "not-a-real-password")
+        self.store.save(config)
+
+    def test_an_address_that_is_not_one_leaves_the_scan_alone(self):
+        from mind.network_scanner import router_facts
+
+        self.fill(".")
+        names, blocked = router_facts(self.store)
+        self.assertEqual(names, {})
+        self.assertEqual(blocked, set())
+
+    def test_a_router_that_cannot_be_reached_leaves_the_scan_alone(self):
+        # A port on this machine that nothing is listening on: refused at once,
+        # so this stays a real connection rather than a mock and still costs
+        # the suite nothing.
+        from mind.network_scanner import router_facts
+
+        self.fill("http://127.0.0.1:1")
+        names, blocked = router_facts(self.store)
+        self.assertEqual(names, {})
+        self.assertEqual(blocked, set())
+
+    def test_no_router_at_all_is_not_a_failure(self):
+        from mind.network_scanner import router_facts
+
+        self.assertEqual(router_facts(self.store), ({}, set()))
 
 
 if __name__ == "__main__":

@@ -20,7 +20,12 @@ from mind.main_window import MindWindow
 from mind.paths import data_dir, engine_path
 from mind.runtime_cleanup import prune_in_background
 from mind.setup_wizard import SetupWizard
-from mind.single_instance import ask_running_instance_to_show
+from mind.single_instance import (
+    action_message_id,
+    ask_running_instance_to_show,
+    tell_running_instance,
+)
+from mind.windows_toast import parse_action, remember_action
 from mind.theme import app_icon, stylesheet
 
 
@@ -166,9 +171,31 @@ def run_telegram_send(argv: list[str]) -> int:
     return 0
 
 
+def _handle_protocol_launch() -> bool:
+    """A button on a notification, arriving as a launch of its own.
+
+    Windows answers a "mind://" URI by starting Mind with it. The copy that
+    owns the phone is the one already running, so the action is written down
+    and that copy is told to look - and this process leaves without drawing
+    anything. If nothing is running, the action waits in the file and the
+    window picks it up once it is on its feet.
+    """
+    wanted = ""
+    for argument in sys.argv[1:]:
+        wanted = parse_action(argument)
+        if wanted:
+            break
+    if not wanted:
+        return False
+    remember_action(wanted)
+    return tell_running_instance(action_message_id())
+
+
 def main() -> int:
     if "--engine" in sys.argv:
         return run_engine()
+    if _handle_protocol_launch():
+        return 0
     if "--telegram-send" in sys.argv:
         return run_telegram_send(sys.argv)
     if not _acquire_app_singleton():
