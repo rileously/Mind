@@ -88,11 +88,15 @@ from .selection import (
 )
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
+from .single_instance import show_message_id
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
 from .telegram_bridge import PANEL_SCREEN, TelegramBridge
+from .network_devices import local_ipv4
 from .network_scanner import (
     DEFAULT_INTERVAL_SECONDS as NETWORK_DEFAULT_INTERVAL,
+    BlockDevice,
     NetworkScanner,
+    RouterFilterProbe,
     RouterTest,
 )
 from .telegram_system import read_running_apps, read_visible_apps
@@ -1044,11 +1048,17 @@ class NetworkDevicesPage(QWidget):
         self.forget_button = QPushButton("Forget")
         self.forget_button.setProperty("danger", True)
         self.forget_button.clicked.connect(self._forget)
+        # One button rather than two: a device is either on the Wi-Fi or it is
+        # not, and the label says which way this click goes.
+        self.block_button = QPushButton("Block")
+        self.block_button.setProperty("danger", True)
+        self.block_button.clicked.connect(self._toggle_block)
         toolbar.addWidget(self.enabled_switch)
         toolbar.addWidget(self.status_label, 1)
         toolbar.addWidget(self.interval)
         toolbar.addWidget(self.rename_button)
         toolbar.addWidget(self.forget_button)
+        toolbar.addWidget(self.block_button)
         toolbar.addWidget(self.scan_button)
         root.addWidget(toolbar_card)
 
@@ -1071,6 +1081,14 @@ class NetworkDevicesPage(QWidget):
         self.router_password.setMaximumWidth(150)
         self.router_test = QPushButton("Test")
         self.router_test.clicked.connect(self._test_router)
+        # Blocking a device has to happen on the router, and which page does it
+        # differs by firmware. This looks for that page without touching it, so
+        # what comes back is an answer rather than a changed setting.
+        self.router_filters = QPushButton("Find block controls")
+        self.router_filters.setToolTip(
+            "Ask the router which of its pages keeps a block list. Only reads."
+        )
+        self.router_filters.clicked.connect(self._probe_filters)
         self.router_status = QLabel("")
         self.router_status.setObjectName("Muted")
         self.router_status.setWordWrap(True)
@@ -1081,6 +1099,7 @@ class NetworkDevicesPage(QWidget):
         router.addWidget(self.router_username)
         router.addWidget(self.router_password)
         router.addWidget(self.router_test)
+        router.addWidget(self.router_filters)
         router.addWidget(self.router_status, 1)
         root.addWidget(router_card)
 
@@ -1111,8 +1130,11 @@ class NetworkDevicesPage(QWidget):
         root.addWidget(self.empty_label)
 
         self._loading = False
+        self._busy_blocking = False
+        self.blocked: set[str] = set(scanner.blocked) if scanner is not None else set()
         if scanner is not None:
             scanner.devices_changed.connect(self._show_devices)
+            scanner.blocked_changed.connect(self._show_blocked)
             scanner.scanning.connect(self._scanning)
         self.refresh()
 
@@ -1140,12 +1162,20 @@ class NetworkDevicesPage(QWidget):
         self.devices = list(devices)
         self.table.setRowCount(len(self.devices))
         for row, device in enumerate(self.devices):
+            # Blocked beats online: a device the router is refusing may still
+            # be there, trying, and "Online" would read as though it worked.
+            if device.mac in self.blocked:
+                status = "Blocked"
+            elif device.online:
+                status = "Online"
+            else:
+                status = "Offline"
             values = [
                 device.display_name,
                 device.ip or "—",
                 device.mac,
                 device.vendor or "Unknown",
-                "Online" if device.online else "Offline",
+                status,
                 device.seen_label(now),
             ]
             for column, value in enumerate(values):
@@ -1173,6 +1203,88 @@ class NetworkDevicesPage(QWidget):
         chosen = self.table.currentRow() >= 0 and bool(getattr(self, "devices", []))
         self.rename_button.setEnabled(chosen)
         self.forget_button.setEnabled(chosen)
+        device = self._selected()
+        blocked = device is not None and device.mac in self.blocked
+        self.block_button.setText("Unblock" if blocked else "Block")
+        self.block_button.setEnabled(chosen and not self._busy_blocking)
+        if device is not None and self._is_this_pc(device):
+            # Blocking the machine Mind is running on would cut the connection
+            # that undoes it.
+            self.block_button.setEnabled(False)
+            self.block_button.setToolTip("This is this PC. Mind will not block it.")
+        else:
+            self.block_button.setToolTip(
+                "Ask the router to refuse this device on every Wi-Fi network it has."
+            )
+
+    @staticmethod
+    def _is_this_pc(device) -> bool:
+        here = local_ipv4()
+        return bool(here and device.ip and device.ip == here)
+
+    def _show_blocked(self, blocked: list) -> None:
+        self.blocked = set(blocked)
+        self._show_devices(list(self.devices))
+
+    def _toggle_block(self) -> None:
+        """Block the selected device, or let it back on, after asking.
+
+        The router is the only thing that can do either, and both are worth a
+        question first: one takes a phone off the Wi-Fi, and the other puts it
+        back.
+        """
+        device = self._selected()
+        if device is None or self._busy_blocking:
+            return
+        if self._is_this_pc(device):
+            return
+        blocking = device.mac not in self.blocked
+        question = (
+            f"Block {device.display_name} from the Wi-Fi?\n\nThe router will refuse it "
+            "on every network it broadcasts until you unblock it here."
+            if blocking
+            else f"Let {device.display_name} back onto the Wi-Fi?"
+        )
+        confirmed = QMessageBox.question(
+            self,
+            "Block device" if blocking else "Unblock device",
+            question,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmed != QMessageBox.Yes:
+            return
+
+        self._busy_blocking = True
+        self.block_button.setEnabled(False)
+        self.status_label.setText(
+            f"Asking the router to {'block' if blocking else 'unblock'} {device.display_name}…"
+        )
+        self._block_thread = QThread(self)
+        self._block_worker = BlockDevice(
+            self.store, device.mac, device.display_name, blocking
+        )
+        self._block_worker.moveToThread(self._block_thread)
+        self._block_thread.started.connect(self._block_worker.run)
+        self._block_worker.done.connect(self._block_finished)
+        self._block_thread.start()
+
+    def _block_finished(self, worked: bool, message: str) -> None:
+        self._busy_blocking = False
+        self.status_label.setText(message)
+        thread = getattr(self, "_block_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+        self._block_thread = None
+        self._block_worker = None
+        if not worked:
+            QMessageBox.warning(self, "The router refused", message)
+        # Either way the router is the authority on who is blocked, so the next
+        # scan is what updates the list rather than anything assumed here.
+        if self.scanner is not None:
+            self.scanner.scan_now()
+        self._sync_actions()
 
     def _selected(self):
         row = self.table.currentRow()
@@ -1234,6 +1346,28 @@ class NetworkDevicesPage(QWidget):
         # A successful sign-in changes what the next scan can name.
         if message.startswith("Signed in") and self.scanner is not None:
             self.scanner.scan_now()
+
+    def _probe_filters(self) -> None:
+        """Look for the router page that blocks a device, on its own thread."""
+        self._save_router()
+        self.router_filters.setEnabled(False)
+        self.router_status.setText("Looking through the router's pages…")
+        self._filter_thread = QThread(self)
+        self._filter_worker = RouterFilterProbe(self.store)
+        self._filter_worker.moveToThread(self._filter_thread)
+        self._filter_thread.started.connect(self._filter_worker.run)
+        self._filter_worker.done.connect(self._filters_probed)
+        self._filter_thread.start()
+
+    def _filters_probed(self, message: str) -> None:
+        self.router_status.setText(message)
+        self.router_filters.setEnabled(True)
+        thread = getattr(self, "_filter_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+        self._filter_thread = None
+        self._filter_worker = None
 
     def _interval_changed(self, seconds: int) -> None:
         if self._loading or self.scanner is None:
@@ -2999,6 +3133,12 @@ class MindWindow(QMainWindow):
             if not pointer:
                 return super().nativeEvent(event_type, message)
             native_message = wintypes.MSG.from_address(pointer)
+            # A second launch asking for the window. It arrives even while Mind
+            # is hidden in the tray, which is the whole point: the window is
+            # shown here, through Qt, rather than by the other process.
+            if native_message.message and native_message.message == show_message_id():
+                self.show_window()
+                return True, 0
             if native_message.message == WM_HOTKEY:
                 if native_message.wParam == MIND_PALETTE_HOTKEY_ID:
                     self._palette_requested()

@@ -20,11 +20,11 @@ from mind.main_window import MindWindow
 from mind.paths import data_dir, engine_path
 from mind.runtime_cleanup import prune_in_background
 from mind.setup_wizard import SetupWizard
+from mind.single_instance import ask_running_instance_to_show
 from mind.theme import app_icon, stylesheet
 
 
 ERROR_ALREADY_EXISTS = 183
-SW_RESTORE = 9
 _app_mutex_handle: int | None = None
 
 
@@ -35,13 +35,15 @@ def _app_mutex_name() -> str:
 
 
 def _activate_existing_window() -> None:
-    user32 = ctypes.windll.user32
-    user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
-    user32.FindWindowW.restype = ctypes.c_void_p
-    hwnd = user32.FindWindowW(None, "Mind • AI Writing Workspace") or user32.FindWindowW(None, "Mind")
-    if hwnd:
-        user32.ShowWindow(hwnd, SW_RESTORE)
-        user32.SetForegroundWindow(hwnd)
+    """Bring the copy already running back, without touching its window.
+
+    Restoring it here with ShowWindow is what put a blank white window on
+    screen: Windows made the frame visible while Qt, in the other process,
+    still believed the widget was hidden, so nothing inside it was ever laid
+    out. Asking that process to show its own window is the only way it comes
+    back painted.
+    """
+    ask_running_instance_to_show()
 
 
 def _acquire_app_singleton() -> bool:

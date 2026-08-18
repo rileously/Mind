@@ -254,14 +254,18 @@ class RouterSession:
         self.base = self.candidates[0]
 
     def _open(
-        self, path: str, data: bytes | None = None, cookie: str = ""
+        self,
+        path: str,
+        data: bytes | None = None,
+        cookie: str = "",
+        referer: str = "",
     ) -> tuple[int, str]:
         headers = {
             # The login page's script is checked by some firmwares against a
             # browser-shaped agent, and there is nothing to gain by being coy
             # with the box in the hallway.
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Mind",
-            "Referer": self.base + "/",
+            "Referer": referer or self.base + "/",
         }
         if data is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -282,6 +286,14 @@ class RouterSession:
             raise RouterError(f"Could not reach the router: {exc.reason}") from exc
         except OSError as exc:
             raise RouterError(f"Could not reach the router: {exc}") from exc
+
+    def read(self, path: str) -> tuple[int, str]:
+        """Fetch one page. A GET, so nothing on the router is changed by it."""
+        return self._open(path)
+
+    def post(self, path: str, body: bytes, referer: str = "") -> tuple[int, str]:
+        """Send one form. This writes, so every caller of it is a change."""
+        return self._open(path, data=body, referer=referer)
 
     def _token(self) -> str:
         """The one-shot value the login form posts with the password.
@@ -399,3 +411,508 @@ def fetch_devices(
     session = RouterSession(address, timeout)
     session.sign_in(username, password)
     return session.devices(probe_into), list(session.notes)
+
+
+# -- finding the page that blocks a device ---------------------------------
+#
+# Blocking a device means writing to the router, and the page that does it
+# differs by firmware exactly as the device list does - only worse, because a
+# wrong guess at a form that writes changes a setting rather than returning
+# nothing. So the endpoint is found before it is used: this reads and never
+# writes, and reports what it saw.
+#
+# Guessing paths alone found the device list only after several attempts. The
+# router also publishes its own menu, which names every page it has, so what is
+# read there is followed too - a directory as well as a guess.
+
+# The paths these firmwares are known to use, tried first.
+FILTER_HINT_PAGES = (
+    "/html/bbsp/wlanfilter/wlanfilter.asp",
+    "/html/bbsp/wlanmacfilter/wlanmacfilter.asp",
+    "/html/bbsp/macfilter/macfilter.asp",
+    "/html/bbsp/wlanaccess/wlanaccess.asp",
+    "/html/bbsp/wlanadvance/wlanadvance.asp",
+    "/html/bbsp/parentctrl/parentctrl.asp",
+    "/html/bbsp/common/GetWlanFilterInfo.asp",
+    "/html/ssmp/accesscontrol/accesscontrol.asp",
+    "/html/amp/parentcontrol/parentcontrol.asp",
+    "/api/ntwk/wlanfilter",
+    "/api/ntwk/macfilter",
+)
+# Where the router lists its own pages. The frameset at "/" leads to the rest.
+MENU_PAGES = ("/", "/index.asp", "/html/index.asp", "/html/ssmp/common/menu.asp")
+# What a page about blocking says that no other page does.
+FILTER_MARKERS = (
+    "MacFilter",
+    "WlanFilter",
+    "FilterMode",
+    "AclMode",
+    "X_HW_WlanFilter",
+    "blacklist",
+    "Blacklist",
+    "DenyList",
+    "AccessControl",
+    "ParentCtrl",
+    "TimeRule",
+)
+# A path worth following out of a menu, rather than every page the router has.
+FILTER_WORDS = re.compile(
+    r"(?i)(macfilter|wlanfilter|filter|acl|access|parent|block|deny|forbid|control)"
+)
+# Enough to walk a menu, few enough that this stays a look rather than a flood.
+MAX_SURVEY_REQUESTS = 40
+
+
+@dataclass(frozen=True)
+class FilterPage:
+    """One page the survey fetched, and what it appeared to be."""
+
+    path: str
+    status: int
+    size: int
+    markers: tuple[str, ...] = ()
+    endpoints: tuple[str, ...] = ()
+
+    @property
+    def promising(self) -> bool:
+        """Whether this reads as the page that keeps a block list.
+
+        One marker is a coincidence - "control" appears in half the pages a
+        router serves. Two mean the page is about filtering by address.
+        """
+        return len(self.markers) >= 2
+
+
+def find_markers(body: str) -> tuple[str, ...]:
+    """The filter vocabulary present in a page, in the order listed above."""
+    text = _unescape_hex(body or "")
+    return tuple(marker for marker in FILTER_MARKERS if marker in text)
+
+
+def find_endpoints(body: str) -> tuple[str, ...]:
+    """The places a page submits to.
+
+    This is what blocking will need: the change is a POST to one of these, and
+    reading them off the page beats guessing at them the way the device list was
+    guessed at.
+    """
+    text = _unescape_hex(body or "")
+    found: list[str] = []
+    patterns = (
+        r"""(?i)(?:action\s*=\s*|url\s*[:=]\s*)["']([^"']{2,120}?\.(?:cgi|asp))["']""",
+        r"""(?i)["']([^"']{0,80}?(?:set|add|del|delete|apply)\.cgi[^"']{0,60})["']""",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            value = match.group(1).strip()
+            if value and value not in found:
+                found.append(value)
+    return tuple(found[:12])
+
+
+def harvest_paths(body: str, from_path: str) -> list[str]:
+    """Every page this one links to, as paths from the root.
+
+    A menu writes its links relative to itself - "../wlanfilter/wlanfilter.asp"
+    - so they mean nothing until they are resolved against the page they were
+    found on.
+    """
+    text = _unescape_hex(body or "")
+    base = from_path if from_path.endswith("/") else from_path.rsplit("/", 1)[0] + "/"
+    paths: list[str] = []
+    for match in re.finditer(
+        r"""["'(]([^"'()\s]{2,160}?\.(?:asp|cgi|html))["')]""", text
+    ):
+        raw = match.group(1)
+        if raw.startswith(("http://", "https://", "//", "javascript:")):
+            continue
+        # Resolved against a stand-in origin, because urljoin on a bare path
+        # leaves "../wlanfilter/wlanfilter.asp" relative - and a path without a
+        # leading slash is not a page the router can be asked for.
+        resolved = urllib.parse.urlsplit(
+            urllib.parse.urljoin("http://router" + base, raw)
+        ).path
+        if resolved and resolved not in paths:
+            paths.append(resolved)
+    return paths
+
+
+def survey_summary(pages: list[FilterPage]) -> list[str]:
+    """What the survey found, in the words whoever reads it needs.
+
+    The promising pages by name, because that is the answer; everything else as
+    a count, because forty lines of "404" is not information.
+    """
+    lines = []
+    for page in pages:
+        if not page.promising:
+            continue
+        detail = f"{page.path} — {', '.join(page.markers[:4])}"
+        if page.endpoints:
+            detail += f"; submits to {', '.join(page.endpoints[:3])}"
+        lines.append(detail)
+    if not lines:
+        answered = sum(1 for page in pages if page.status == 200)
+        lines.append(
+            f"No page looked like a block list. {answered} of {len(pages)} paths answered."
+        )
+    return lines
+
+
+class FilterSurvey:
+    """A read-only look for the page that blocks a device, on a live session."""
+
+    def __init__(self, session: RouterSession, limit: int = MAX_SURVEY_REQUESTS):
+        self.session = session
+        self.limit = limit
+        self.pages: list[FilterPage] = []
+        self.bodies: list[str] = []
+        self.seen: set[str] = set()
+
+    def run(self) -> list[FilterPage]:
+        queue = list(MENU_PAGES) + list(FILTER_HINT_PAGES)
+        while queue and len(self.seen) < self.limit:
+            path = queue.pop(0)
+            if path in self.seen:
+                continue
+            self.seen.add(path)
+            body = self._fetch(path)
+            if body is None:
+                continue
+            for found in harvest_paths(body, path):
+                # Only pages whose name suggests they are about blocking. The
+                # router publishes hundreds, and this is a look, not a crawl.
+                if found not in self.seen and FILTER_WORDS.search(found):
+                    queue.append(found)
+        self.pages.sort(key=lambda page: (not page.promising, page.path))
+        return self.pages
+
+    def _fetch(self, path: str) -> str | None:
+        """Read one page and record what it was. GET only: nothing is changed."""
+        try:
+            status, body = self.session.read(path)
+        except RouterError:
+            return None
+        markers = find_markers(body) if status == 200 else ()
+        endpoints = find_endpoints(body) if status == 200 else ()
+        self.pages.append(FilterPage(path, status, len(body), markers, endpoints))
+        if status != 200 or self.session.looks_like_login(body):
+            return None
+        self.bodies.append(
+            f"===== {path} -> {status}, {len(body)} bytes, "
+            f"markers: {', '.join(markers) or 'none'} =====\n{body[:6000]}\n"
+        )
+        return body
+
+    def write_probe(self, probe_into: Path) -> bool:
+        """Keep what the pages returned, so this can be read without the router."""
+        if not self.bodies:
+            return False
+        try:
+            probe_into.parent.mkdir(parents=True, exist_ok=True)
+            probe_into.write_text("\n".join(self.bodies), encoding="utf-8")
+        except OSError:
+            return False
+        return True
+
+
+def survey_filters(
+    address: str,
+    username: str,
+    password: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    probe_into: Path | None = None,
+) -> tuple[list[FilterPage], list[str]]:
+    """Sign in and look for the page that blocks a device. Reads, never writes."""
+    session = RouterSession(address, timeout)
+    session.sign_in(username, password)
+    survey = FilterSurvey(session)
+    pages = survey.run()
+    notes = list(session.notes)
+    if probe_into is not None and survey.write_probe(probe_into):
+        notes.append(f"What those pages returned was written to {probe_into}")
+    return pages, notes
+
+
+# -- keeping a device off the Wi-Fi ----------------------------------------
+#
+# The survey found where this firmware keeps its block list, and this is the
+# writing that follows from it. The router calls it the WLAN MAC filter: a list
+# of addresses and a mode. In blacklist mode the listed devices are refused,
+# which is the only mode Mind will use - whitelist means "refuse everything
+# else", and one wrong click there takes the whole house off the Wi-Fi.
+#
+# The router will not change the mode quietly either: its own page warns that
+# switching modes deletes every rule. So Mind adds to the list the router is
+# already keeping, and refuses to touch a router set the other way.
+#
+# A rule is per SSID, so blocking a phone on the 2.4 GHz network alone would
+# leave it free to join the 5 GHz one. Blocking means every SSID the router has.
+
+FILTER_PAGE = "/html/bbsp/wlanmacfilter/wlanmacfilter.asp"
+FILTER_ADD = (
+    "/html/bbsp/wlanmacfilter/add.cgi?x=InternetGatewayDevice.X_HW_Security.WLANMacFilter"
+    "&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp"
+)
+FILTER_DELETE = (
+    "/html/bbsp/wlanmacfilter/del.cgi?x=InternetGatewayDevice.X_HW_Security.WLANMacFilter"
+    "&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp"
+)
+FILTER_SWITCH = (
+    "/html/bbsp/wlanmacfilter/set.cgi?x=InternetGatewayDevice.X_HW_Security"
+    "&RequestFile=html/bbsp/wlanmacfilter/wlanmacfilter.asp"
+)
+WLAN_LIST_PAGE = "/html/amp/common/wlan_list.asp"
+
+
+@dataclass(frozen=True)
+class Ssid:
+    """One of the networks the router broadcasts."""
+
+    index: int
+    name: str = ""
+    band: str = ""
+
+    @property
+    def field(self) -> str:
+        """What the filter form calls it: SSID-1, SSID-5, and so on."""
+        return f"SSID-{self.index}"
+
+
+@dataclass(frozen=True)
+class BlockEntry:
+    """One rule in the router's list: this address, on this network."""
+
+    domain: str
+    mac: str
+    ssid: str = ""
+    name: str = ""
+
+
+@dataclass(frozen=True)
+class BlockState:
+    """The block list as the router currently has it."""
+
+    on: bool = False
+    blacklist: bool = True
+    entries: tuple[BlockEntry, ...] = ()
+    token: str = ""
+
+    def rules_for(self, mac: str) -> tuple[BlockEntry, ...]:
+        wanted = normalise_mac(mac)
+        return tuple(entry for entry in self.entries if entry.mac == wanted)
+
+    def blocks(self, mac: str) -> bool:
+        """Whether this address is actually being kept off right now.
+
+        A rule in a list nobody is enforcing is not a block, which is why the
+        switch is part of the answer and not a separate question.
+        """
+        return self.on and self.blacklist and bool(self.rules_for(mac))
+
+    @property
+    def blocked_macs(self) -> tuple[str, ...]:
+        if not (self.on and self.blacklist):
+            return ()
+        return tuple(dict.fromkeys(entry.mac for entry in self.entries))
+
+
+def router_mac(mac: str) -> str:
+    """An address as this form wants it typed: AA:BB:CC:DD:EE:FF."""
+    normalised = normalise_mac(mac)
+    if not normalised:
+        raise RouterError(f"{mac!r} is not a MAC address.")
+    return normalised.replace("-", ":").upper()
+
+
+def parse_ssids(payload: str) -> tuple[Ssid, ...]:
+    """The networks the router is broadcasting, from its own WLAN list.
+
+    Only the enabled ones: a rule against a network that is switched off costs
+    a request and blocks nothing.
+    """
+    found: dict[int, Ssid] = {}
+    for row in re.findall(r"new stWlanInfo\(([^)]*)\)", _unescape_hex(payload or "")):
+        fields = [field.strip().strip("\"'") for field in row.split(",")]
+        if len(fields) < 4:
+            continue
+        domain, _interface, name, enable = fields[0], fields[1], fields[2], fields[3]
+        instance = domain.rsplit(".", 1)[-1]
+        if not instance.isdigit() or enable != "1":
+            continue
+        band = fields[5] if len(fields) > 5 else ""
+        found[int(instance)] = Ssid(int(instance), name, band)
+    return tuple(found[index] for index in sorted(found))
+
+
+def parse_block_state(payload: str) -> BlockState:
+    """Read the filter page: the switch, the mode, the rules, and the token.
+
+    The token is a hidden field the page carries and every write must quote
+    back, so it is read here rather than fetched separately - it belongs to the
+    page that was just read, and a stale one is refused.
+    """
+    text = _unescape_hex(payload or "")
+    token = ""
+    found = re.search(
+        r"""name\s*=\s*["']onttoken["'][^>]*?value\s*=\s*["']([^"']+)["']""", text
+    )
+    if found:
+        token = found.group(1)
+
+    def setting(name: str, fallback: str) -> str:
+        match = re.search(rf"var\s+{name}\s*=\s*'([^']*)'", text)
+        return match.group(1) if match else fallback
+
+    entries: list[BlockEntry] = []
+    for row in re.findall(r"new stMacFilter\(([^)]*)\)", text):
+        fields = [field.strip().strip("\"'") for field in row.split(",")]
+        if len(fields) < 4:
+            continue
+        mac = normalise_mac(fields[3])
+        if not mac:
+            continue
+        entries.append(BlockEntry(fields[0], mac, fields[1], fields[2]))
+    return BlockState(
+        on=setting("enableFilter", "0") == "1",
+        blacklist=setting("Mode", "0") != "1",
+        entries=tuple(entries),
+        token=token,
+    )
+
+
+class BlockList:
+    """The router's Wi-Fi block list, on a session that is already signed in.
+
+    Every write quotes back the token from the page it was read from, so each
+    one begins by reading the page again. That is one extra request per change
+    and it is what makes a change either take or say why it did not.
+    """
+
+    def __init__(self, session: RouterSession):
+        self.session = session
+
+    # -- reading ---------------------------------------------------------
+
+    def state(self) -> BlockState:
+        status, body = self.session.read(FILTER_PAGE)
+        if status != 200 or self.session.looks_like_login(body):
+            raise RouterError(
+                "The router did not show its Wi-Fi filter page. The sign-in may have "
+                "expired, or this model keeps its block list somewhere else."
+            )
+        state = parse_block_state(body)
+        if not state.token:
+            raise RouterError(
+                "The router's filter page carried no token, so nothing can be changed "
+                "safely. It refuses any write without one."
+            )
+        return state
+
+    def networks(self) -> tuple[Ssid, ...]:
+        status, body = self.session.read(WLAN_LIST_PAGE)
+        if status != 200:
+            raise RouterError("The router did not say which networks it broadcasts.")
+        found = parse_ssids(body)
+        if not found:
+            raise RouterError("The router listed no Wi-Fi networks to block a device on.")
+        return found
+
+    # -- writing ---------------------------------------------------------
+
+    def _send(self, path: str, fields: dict[str, str]) -> None:
+        """One write, with the page it came from named as the referer.
+
+        These pages are only ever reached from themselves, and the firmware
+        checks that, so a write that does not say where it came from is thrown
+        away without an error worth reading.
+        """
+        body = urllib.parse.urlencode(fields).encode()
+        status, answer = self.session.post(path, body, referer=self.session.base + FILTER_PAGE)
+        if status >= 400:
+            raise RouterError(f"The router refused the change ({status}).")
+        if self.session.looks_like_login(answer):
+            raise RouterError("The router asked for a sign-in again part way through.")
+
+    def block(self, mac: str, name: str = "") -> BlockState:
+        """Keep this device off every network the router broadcasts."""
+        address = router_mac(mac)
+        state = self.state()
+        if not state.blacklist:
+            raise RouterError(
+                "This router's Wi-Fi filter is set to whitelist, where the list is what "
+                "is allowed rather than what is refused. Changing that mode deletes "
+                "every rule the router has, so Mind will not do it for you."
+            )
+        already = {entry.ssid for entry in state.rules_for(mac)}
+        for network in self.networks():
+            if network.field in already:
+                continue
+            self._send(
+                FILTER_ADD,
+                {
+                    "x.SourceMACAddress": address,
+                    "x.SSIDName": network.field,
+                    "x.DeviceName": (name or "")[:32],
+                    "x.Enable": "1",
+                    "x.X_HW_Token": state.token,
+                },
+            )
+            state = self.state()  # each write spends the token it was given
+
+        if not state.on:
+            self._send(
+                FILTER_SWITCH,
+                {"x.WlanMacFilterRight": "1", "x.X_HW_Token": state.token},
+            )
+            state = self.state()
+
+        if not state.blocks(mac):
+            raise RouterError(
+                "The router accepted the request but is not blocking that device. Its "
+                "filter list may be full."
+            )
+        return state
+
+    def unblock(self, mac: str) -> BlockState:
+        """Let this device back on, by deleting the rules that named it."""
+        state = self.state()
+        rules = state.rules_for(mac)
+        if not rules:
+            return state
+        for rule in rules:
+            # The delete form names the rule by its own path, with nothing on
+            # the other side of the equals sign - the value is not read.
+            self._send(FILTER_DELETE, {rule.domain: "", "x.X_HW_Token": state.token})
+            state = self.state()
+        if state.rules_for(mac):
+            raise RouterError("The router kept the rule: that device is still blocked.")
+        return state
+
+
+def blocked_macs(
+    address: str,
+    username: str,
+    password: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> tuple[str, ...]:
+    """Which devices the router is currently keeping off the Wi-Fi."""
+    session = RouterSession(address, timeout)
+    session.sign_in(username, password)
+    return BlockList(session).state().blocked_macs
+
+
+def set_blocked(
+    address: str,
+    username: str,
+    password: str,
+    mac: str,
+    blocked: bool,
+    name: str = "",
+    timeout: float = DEFAULT_TIMEOUT,
+) -> BlockState:
+    """Block or unblock one device, and report the list as it ended up."""
+    session = RouterSession(address, timeout)
+    session.sign_in(username, password)
+    blocking = BlockList(session)
+    return blocking.block(mac, name) if blocked else blocking.unblock(mac)
