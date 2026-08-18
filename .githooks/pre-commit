@@ -9,7 +9,11 @@ cd "$repo_root"
 
 updated=0
 for f in SwiftSlate.pyw commands.json; do
-  actual=$(sha256sum "$f" | awk '{print toupper($1)}')
+  # The blob, not the file on disk. install.ps1 downloads these from
+  # raw.githubusercontent.com, which serves what git stores - LF - while a
+  # Windows working copy has CRLF and hashes differently. Hashing the file
+  # here produced a pin that no download could ever match.
+  actual=$(git show ":$f" | sha256sum | awk '{print toupper($1)}')
   pinned=$(grep -oP "\"$f\"\s*=\s*\"\K[0-9A-F]{64}" install.ps1 | head -1 || true)
   if [ -z "$pinned" ] || [ "$actual" != "$pinned" ]; then
     if [ -n "$pinned" ]; then
