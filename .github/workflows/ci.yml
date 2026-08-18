@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
 
 jobs:
   lint:
@@ -24,9 +24,6 @@ jobs:
 
       - name: Syntax check
         run: python -m py_compile SwiftSlate.pyw
-
-      - name: Pure-logic regression tests
-        run: python -m unittest discover -s tests -v
 
       - name: Pyflakes (undefined names, unused imports)
         run: pyflakes SwiftSlate.pyw
@@ -65,14 +62,60 @@ jobs:
           [ "$code" = "200" ] || { echo "::error::embeddable zip for Python $ver is not available (HTTP $code)"; exit 1; }
           echo "python.zip pin OK ($ver)"
 
-      - name: Verify stdlib-only imports
+      - name: Verify no third-party imports
+        # The engine runs under an embeddable Python that has no pip, so a
+        # dependency it cannot install is a dependency it cannot have. "mind" is
+        # first-party and shipped alongside, so it is allowed here - see the
+        # note in the tests job about what that means for install.ps1.
         run: |
           python -c "import ast,sys,pathlib; t=ast.parse(pathlib.Path('SwiftSlate.pyw').read_text(encoding='utf-8')); m=set()
           for n in ast.walk(t):
               if isinstance(n,ast.Import): m|={a.name.split('.')[0] for a in n.names}
               elif isinstance(n,ast.ImportFrom) and n.level==0 and n.module: m.add(n.module.split('.')[0])
-          bad=sorted(m-set(sys.stdlib_module_names)); assert not bad, 'non-stdlib imports: %s'%bad"
+          bad=sorted(m-set(sys.stdlib_module_names)-{'mind'}); assert not bad, 'third-party imports: %s'%bad"
           echo "imports OK"
 
       - name: PowerShell syntax check
-        run: pwsh -NoProfile -Command '$errs = $null; [System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$errs) > $null; if ($errs.Count) { $errs | ForEach-Object { Write-Host $_.Message }; exit 1 } else { Write-Host "install.ps1 parses OK" }'
+        # Every script Mind ships, not only the installer: the bundled ones do
+        # the Windows API work, and a parse error in one is a feature that
+        # fails on the user's machine and nowhere else.
+        run: |
+          pwsh -NoProfile -Command '
+            $bad = 0
+            foreach ($file in @(Get-ChildItem -Path . -Filter *.ps1 -Recurse -File)) {
+              $errs = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errs) > $null
+              if ($errs.Count) {
+                Write-Host "::error::$($file.Name) does not parse"
+                $errs | ForEach-Object { Write-Host $_.Message }
+                $bad = 1
+              } else {
+                Write-Host "$($file.Name) parses OK"
+              }
+            }
+            exit $bad'
+
+  tests:
+    # Windows, because this is a Windows program: mind\ imports winreg and
+    # ctypes.wintypes, and the single-instance tests need a real window handle,
+    # which is also why QT_QPA_PLATFORM is left alone rather than set to
+    # offscreen - offscreen has no handle to post to.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -c "import py_compile, pathlib; [py_compile.compile(str(f), doraise=True) for f in pathlib.Path('mind').glob('*.py')]"
+
+      - name: Regression tests
+        run: python -m unittest discover -s tests -v
