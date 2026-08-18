@@ -64,6 +64,13 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("commands", "✨  Commands"),
     MenuAction("apps", "🧩  Apps", "telegram_control_enabled"),
     MenuAction("devices", "📶  Devices", "network_scan_enabled"),
+    # Everything below was reachable only by typing it, while /watch, /sleep,
+    # /shutdown and /restart were already published in Telegram's own command
+    # list - so the phone offered them in one place and not in the other.
+    MenuAction("watch", "🔔  Alerts", "watchers_enabled"),
+    MenuAction("print", "🖨  Print", "telegram_print_enabled"),
+    MenuAction("power", "⏻  Power", "telegram_power_enabled"),
+    MenuAction("help", "❓  Help"),
 )
 
 # Label, and the argument press_media_key already understands.
@@ -160,6 +167,50 @@ def build_power_keyboard(action: str, power_callback: str) -> dict:
             ]
         ]
     }
+
+
+def power_prompt(seconds: int, can_sleep: bool = True) -> str:
+    """What the power panel says, describing only the buttons it is showing.
+
+    Sleep follows the PC-controls switch, so with that off a sentence about it
+    would be describing a button that is not there.
+    """
+    lines = [
+        "⏻  What should this PC do?",
+        "",
+        f"Shutting down and restarting wait {seconds} seconds first, with a "
+        "button to call it off.",
+    ]
+    if can_sleep:
+        lines.append("Sleep happens at once.")
+    return "\n".join(lines)
+
+
+def build_power_menu_keyboard(power_callback, can_sleep: bool = True) -> dict:
+    """The three ways to put a PC down, from one tap on the menu.
+
+    ``power_callback`` builds the bridge's own callback data, because the delay
+    and the abort belong to the bridge rather than to the shape of the buttons.
+    Sleep follows the PC-controls switch and the other two follow the shutdown
+    one, so a menu never offers what Preferences has turned off.
+    """
+    rows: list[list[dict]] = [
+        [
+            {"text": "⏻  Shut down", "callback_data": power_callback(1)},
+            {"text": "↻  Restart", "callback_data": power_callback(2)},
+        ]
+    ]
+    if can_sleep:
+        rows.append([{"text": "😴  Sleep", "callback_data": power_callback(3)}])
+    rows.append([{"text": "☰  Menu", "callback_data": callback(CB_MENU, None)}])
+    return {"inline_keyboard": rows}
+
+
+PRINT_PROMPT = (
+    "🖨  Send me a file and Mind will offer to print it.\n\n"
+    "PDFs, images, text and Office documents. After sending one, buttons ask "
+    "which printer, what paper, and colour or black and white."
+)
 
 
 def build_abort_keyboard() -> dict:
@@ -312,23 +363,99 @@ CB_APP_CLOSE = "q"
 CB_APP_KILL = "j"
 # Devices on the network. "y" refreshes the list.
 CB_DEVICES = "y"
+# Blocking carries the address rather than a position in the list. A row index
+# would mean the wrong phone gets blocked whenever the list reorders between
+# the panel being drawn and the button being tapped, which it does every scan.
+CB_DEVICE_ASK = "b"
+CB_DEVICE_BLOCK = "c"
 
 
-def build_devices_keyboard() -> dict:
+# Enough that the phone in question is almost certainly on the panel, few
+# enough that the keyboard does not fill the screen.
+BLOCKABLE_DEVICES = 8
+
+
+def mac_field(mac: str) -> str:
+    """An address as callback data: hex only, because 64 bytes is the budget."""
+    return "".join(character for character in (mac or "").lower() if character in "0123456789abcdef")[:12]
+
+
+def mac_from_field(field: str) -> str:
+    """The address back in the form the rest of Mind writes it."""
+    cleaned = mac_field(field)
+    if len(cleaned) != 12:
+        return ""
+    return "-".join(cleaned[index : index + 2] for index in range(0, 12, 2))
+
+
+def build_devices_keyboard(devices=(), blocked=(), can_block: bool = False) -> dict:
+    """The devices panel: what is here, and a way to put one of them off.
+
+    Blocking is offered only when the router is set up, because it is the only
+    thing that can do it - and a button that always fails is worse than no
+    button. Each row says which way the tap goes, so nothing has to be
+    remembered between looking and tapping.
+    """
+    rows: list[list[dict]] = []
+    if can_block:
+        held = {mac for mac in blocked}
+        for device in list(devices)[:BLOCKABLE_DEVICES]:
+            is_blocked = device.mac in held
+            mark = "✅" if is_blocked else "🚫"
+            label = f"{mark}  {device.display_name}"
+            rows.append(
+                [
+                    {
+                        "text": label[:34],
+                        "callback_data": f"{CB_DEVICE_ASK}:{mac_field(device.mac)}",
+                    }
+                ]
+            )
+    rows.append(
+        [
+            {"text": "⟳  Refresh", "callback_data": CB_DEVICES},
+            {"text": "☰  Menu", "callback_data": callback(CB_MENU, None)},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def build_block_confirm_keyboard(mac: str, blocking: bool) -> dict:
+    """Ask before a tap takes somebody off the Wi-Fi.
+
+    The apps panel closes a program on one tap, because a program can be opened
+    again from the same chair. This reaches a phone in someone else's hand.
+    """
     return {
         "inline_keyboard": [
             [
-                {"text": "⟳  Refresh", "callback_data": CB_DEVICES},
-                {"text": "☰  Menu", "callback_data": callback(CB_MENU, None)},
+                {
+                    "text": "🚫  Block it" if blocking else "✅  Let it back on",
+                    "callback_data": f"{CB_DEVICE_BLOCK}:{mac_field(mac)}",
+                },
+                {"text": "✕  Cancel", "callback_data": CB_DEVICES},
             ]
         ]
     }
 
 
-def devices_text(devices, now: float, enabled: bool) -> str:
+def block_confirm_text(name: str, blocking: bool) -> str:
+    if blocking:
+        return (
+            f"🚫  Block {name} from the Wi-Fi?\n\n"
+            "The router will refuse it on every network it broadcasts until it is "
+            "let back on."
+        )
+    return f"✅  Let {name} back onto the Wi-Fi?"
+
+
+def devices_text(devices, now: float, enabled: bool, blocked=()) -> str:
     """The /devices panel: who is on the network, and who was.
 
-    Online first, because the question is almost always about right now.
+    Online first, because the question is almost always about right now. A
+    blocked device is marked wherever it appears: it may well still be online
+    and still trying, and a list that only said "online" would read as though
+    the block had not worked.
     """
     if not enabled:
         return (
@@ -338,15 +465,18 @@ def devices_text(devices, now: float, enabled: bool) -> str:
         )
     if not devices:
         return "📶  Nothing found on the network yet."
+    held = {mac for mac in blocked}
     online = [device for device in devices if device.online]
     offline = [device for device in devices if not device.online]
     lines = [f"📶  {len(online)} online of {len(devices)} known", ""]
     for device in online[:14]:
-        lines.append(f"• {device.display_name} — {device.ip or device.mac}")
+        mark = " — 🚫 blocked" if device.mac in held else ""
+        lines.append(f"• {device.display_name} — {device.ip or device.mac}{mark}")
     if offline:
         lines += ["", "Seen before:"]
         for device in offline[:6]:
-            lines.append(f"◦ {device.display_name} — {device.seen_label(now)}")
+            mark = " 🚫" if device.mac in held else ""
+            lines.append(f"◦ {device.display_name} — {device.seen_label(now)}{mark}")
     return "\n".join(lines)
 
 

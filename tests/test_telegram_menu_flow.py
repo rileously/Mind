@@ -372,5 +372,93 @@ class PanelReplacementTests(BridgeHarness, unittest.TestCase):
         self.assertEqual(order, ["send", "delete"])
 
 
+class MenuReachTests(BridgeHarness, unittest.TestCase):
+    """Everything the phone can be told to do, it can also be tapped into.
+
+    Telegram's own command list published /watch, /sleep, /shutdown and
+    /restart long before any of them had a button, so the same bot offered them
+    in one place and not the other.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.config.update(
+            {
+                "watchers_enabled": True,
+                "telegram_print_enabled": True,
+                "telegram_power_enabled": True,
+                "network_scan_enabled": True,
+            }
+        )
+
+    def shown(self) -> str:
+        return str(self.client.edited or self.client.sent)
+
+    def test_every_published_command_that_opens_something_has_a_button(self):
+        from mind.telegram_ui import BUILT_IN_COMMANDS, MENU_ACTIONS
+
+        # /save and /find are typed with an argument, and /abort only exists
+        # while a shutdown is counting down. The rest should be reachable.
+        typed_only = {"save", "abort", "menu", "find"}
+        keys = {action.key for action in MENU_ACTIONS}
+        keys |= {"status", "screen", "sleep", "shutdown", "restart"}  # under Power
+        missing = {
+            name for name, _description, _needs in BUILT_IN_COMMANDS
+            if name not in typed_only and name not in keys
+        }
+        self.assertEqual(missing, set())
+
+    def test_alerts_opens_the_watcher_panel(self):
+        self.tap("watch")
+        self.assertIn("watch", self.shown().lower())
+
+    def test_power_offers_all_three_without_doing_any_of_them(self):
+        self.tap("power")
+        shown = self.shown()
+        self.assertIn("Shut down", shown)
+        self.assertIn("Restart", shown)
+        self.assertIn("Sleep", shown)
+
+    def test_sleep_is_not_offered_when_pc_controls_are_off(self):
+        # It follows the same switch as locking the screen; the other two
+        # follow the shutdown one.
+        self.config["telegram_control_enabled"] = False
+        self.tap("power")
+        self.assertNotIn("Sleep", self.shown())
+
+    def test_power_is_not_on_the_menu_at_all_when_shutdown_is_off(self):
+        from mind.telegram_ui import build_main_menu
+
+        allowed = {**self.config, "telegram_power_enabled": False}
+        labels = [
+            button["text"]
+            for row in build_main_menu(allowed)["inline_keyboard"]
+            for button in row
+        ]
+        self.assertFalse(any("Power" in label for label in labels))
+
+    def test_help_answers_with_the_help(self):
+        self.tap("help")
+        self.assertIn("Mind is connected to this chat", self.shown())
+
+    def test_print_says_how_printing_starts(self):
+        self.tap("print")
+        self.assertIn("Send me a file", self.shown())
+
+    def test_the_new_buttons_took_indexes_after_the_old_ones(self):
+        # A tap carries a position in the list, so inserting rather than
+        # appending would repoint buttons in messages already sent.
+        from mind.telegram_ui import MENU_ACTIONS
+
+        first_ten = [action.key for action in MENU_ACTIONS[:10]]
+        self.assertEqual(
+            first_ten,
+            [
+                "files", "find", "clip", "screen", "status",
+                "media", "lock", "commands", "apps", "devices",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

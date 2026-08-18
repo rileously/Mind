@@ -142,6 +142,7 @@ class ConfigStore:
         self.commands_path = self.root / "commands.json"
         self.watchers_path = self.root / "watchers.json"
         self.devices_path = self.root / "devices.json"
+        self.blocked_path = self.root / "blocked.json"
         self.root.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -325,6 +326,25 @@ class ConfigStore:
         # Capped: a network with a busy guest wifi would otherwise grow this
         # file for ever, and the oldest entries are the least interesting.
         self._atomic_json_write(self.devices_path, list(devices)[:500])
+
+    def load_blocked(self) -> list[str]:
+        """Which devices the router was last seen refusing.
+
+        Only the router knows this, and only the scan asks it. Written down so
+        that anything else which needs the answer - the Telegram bridge, most of
+        all - reads what the scan learned instead of signing in again for it.
+        """
+        try:
+            with self.blocked_path.open("r", encoding="utf-8-sig") as handle:
+                items = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, str)]
+
+    def save_blocked(self, macs: list[str]) -> None:
+        self._atomic_json_write(self.blocked_path, sorted({str(mac) for mac in macs}))
 
     def load_watchers(self) -> list[dict[str, Any]]:
         """The saved PC watchers, or an empty list when there are none.

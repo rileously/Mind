@@ -322,6 +322,7 @@ class NetworkScanner(QObject):
             self.devices, list(observed), now, online_grace=ONLINE_GRACE_SECONDS
         )
         self.store.save_devices([to_dict(device) for device in self.devices])
+        self.store.save_blocked(sorted(self.blocked))
         self._tidy_thread()
         self.blocked_changed.emit(sorted(self.blocked))
         self.devices_changed.emit(list(self.devices))

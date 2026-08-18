@@ -86,8 +86,16 @@ from .telegram_ui import (
     build_watcher_files_keyboard,
     build_app_alert_keyboard,
     build_apps_keyboard,
+    CB_DEVICE_ASK,
+    CB_DEVICE_BLOCK,
+    block_confirm_text,
+    build_block_confirm_keyboard,
+    power_prompt,
+    PRINT_PROMPT,
     build_devices_keyboard,
+    build_power_menu_keyboard,
     devices_text,
+    mac_from_field,
     apps_text,
     watcher_list_text,
     parse_print_callback,
@@ -107,7 +115,9 @@ from .telegram_ui import (
 )
 from dataclasses import replace as replace_device
 
-from .network_devices import from_dict as device_from_dict
+from .network_devices import from_dict as device_from_dict, local_ipv4
+from .network_scanner import router_credentials
+from .router_client import RouterError, set_blocked
 from .watchers import (
     Reading as WatcherReading,
     watches_apps,
@@ -161,6 +171,7 @@ PANEL_MEDIA = "media"
 PANEL_COMMANDS = "commands"
 PANEL_HINT = "hint"
 PANEL_WATCH = "watch"
+PANEL_POWER = "power"
 PANEL_APPS = "apps"
 PANEL_DEVICES = "devices"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
@@ -466,11 +477,109 @@ class TelegramBridge(QObject):
             for device in devices
         ]
         fresh.sort(key=lambda device: (not device.online, device.display_name.lower()))
-        text = devices_text(fresh, now, enabled)
-        keyboard = build_devices_keyboard() if enabled else build_menu_keyboard()
+        blocked = self.store.load_blocked()
+        text = devices_text(fresh, now, enabled, blocked)
+        keyboard = (
+            build_devices_keyboard(fresh, blocked, self._can_block(config))
+            if enabled
+            else build_menu_keyboard()
+        )
         if self._replace_panel(client, chat_id, message_id, PANEL_DEVICES, text, keyboard):
             return
         self._send_panel(client, chat_id, PANEL_DEVICES, text, keyboard)
+
+    def _can_block(self, config: dict) -> bool:
+        """Whether blocking can be offered at all.
+
+        It needs the router's sign-in, which only the Wi-Fi devices page asks
+        for, and it is a control of the house rather than of this PC - so it
+        follows the same switch as locking the screen and closing apps.
+        """
+        if not bool(config.get("telegram_control_enabled", False)):
+            return False
+        address, username, password = router_credentials(self.store)
+        return bool(address and username and password)
+
+    def _device_by_mac(self, mac: str):
+        """The remembered device with this address, if it is still known."""
+        for item in self.store.load_devices():
+            device = device_from_dict(item)
+            if device and device.mac == mac:
+                return device
+        return None
+
+    def _handle_device_ask_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        field: str,
+        config: dict,
+    ) -> None:
+        """Ask before blocking, on the message that was tapped."""
+        client.answer_callback_query(callback_id)
+        mac = mac_from_field(field)
+        device = self._device_by_mac(mac)
+        if device is None or not self._can_block(config):
+            self._send_devices_panel(client, chat_id, config, message_id)
+            return
+        here = local_ipv4()
+        if here and device.ip and device.ip == here:
+            # Blocking this PC over Wi-Fi cuts the connection that undoes it,
+            # and the bridge runs on it.
+            client.answer_callback_query(
+                callback_id, "That is this PC. Mind will not block it.", alert=True
+            )
+            self._send_devices_panel(client, chat_id, config, message_id)
+            return
+        blocking = mac not in set(self.store.load_blocked())
+        text = block_confirm_text(device.display_name, blocking)
+        keyboard = build_block_confirm_keyboard(mac, blocking)
+        if self._replace_panel(client, chat_id, message_id, PANEL_DEVICES, text, keyboard):
+            return
+        self._send_panel(client, chat_id, PANEL_DEVICES, text, keyboard)
+
+    def _handle_device_block_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        field: str,
+        config: dict,
+    ) -> None:
+        """Do it, then show the panel again with what the router now says.
+
+        This talks to the router, which takes a few seconds, so the tap is
+        answered first - an unanswered button spins on the phone.
+        """
+        client.answer_callback_query(callback_id, "Asking the router…")
+        mac = mac_from_field(field)
+        device = self._device_by_mac(mac)
+        if device is None or not self._can_block(config):
+            self._send_devices_panel(client, chat_id, config, message_id)
+            return
+        blocking = mac not in set(self.store.load_blocked())
+        address, username, password = router_credentials(self.store)
+        try:
+            state = set_blocked(
+                address, username, password, mac, blocking, device.display_name
+            )
+        except RouterError as exc:
+            client.send_message(chat_id, f"The router refused: {exc}")
+            self._send_devices_panel(client, chat_id, config, message_id)
+            return
+        except Exception as exc:  # a tap must never take the bridge down
+            client.send_message(chat_id, f"The router could not be changed: {exc}")
+            self._send_devices_panel(client, chat_id, config, message_id)
+            return
+        # The router is the authority on who is blocked, so what it said is
+        # what gets written down rather than what was asked for.
+        self.store.save_blocked(list(state.blocked_macs))
+        said = "is off the Wi-Fi" if blocking else "can use the Wi-Fi again"
+        self.log.emit(f"Telegram: {device.display_name} {said}")
+        self._send_devices_panel(client, chat_id, config, message_id)
 
     def _send_apps_panel(
         self,
@@ -852,6 +961,16 @@ class TelegramBridge(QObject):
             self._send_devices_panel(client, chat_id, config, message_id)
             return
 
+        if action in {CB_DEVICE_ASK, CB_DEVICE_BLOCK}:
+            field = str(callback.get("data", "")).partition(":")[2]
+            handler = (
+                self._handle_device_ask_tap
+                if action == CB_DEVICE_ASK
+                else self._handle_device_block_tap
+            )
+            handler(client, chat_id, callback_id, message_id, field, config)
+            return
+
         if action == CB_APP_KILL:
             self._handle_apps_tap(client, chat_id, callback_id, message_id, index, config)
             return
@@ -913,6 +1032,23 @@ class TelegramBridge(QObject):
                 elif index == 2:
                     restart(POWER_DELAY_SECONDS)
                     label = "Restarting"
+                elif index == 3:
+                    # No delay to abort, so this one is answered and done: the
+                    # PC stops replying the moment it goes.
+                    if not bool(config.get("telegram_control_enabled", False)):
+                        client.answer_callback_query(
+                            callback_id, "PC controls are switched off."
+                        )
+                        return
+                    client.answer_callback_query(callback_id, "Going to sleep")
+                    client.edit_message_text(
+                        chat_id,
+                        int(message_id),
+                        "😴 Going to sleep. I will stop replying until it wakes.",
+                    )
+                    self.log.emit(f"Telegram: sleep requested by chat {chat_id}")
+                    sleep_pc()
+                    return
                 else:
                     client.answer_callback_query(callback_id)
                     return
@@ -1150,6 +1286,33 @@ class TelegramBridge(QObject):
                 )
         elif action.key == "devices":
             self._send_devices_panel(client, chat_id, config, message_id)
+        elif action.key == "watch":
+            self._send_watcher_panel(client, chat_id, config, message_id)
+        elif action.key == "power":
+            can_sleep = bool(config.get("telegram_control_enabled", False))
+            prompt = power_prompt(POWER_DELAY_SECONDS, can_sleep)
+            keyboard = build_power_menu_keyboard(
+                lambda choice: f"{CB_POWER}:{choice}", can_sleep=can_sleep
+            )
+            if not self._replace_panel(
+                client, chat_id, message_id, PANEL_POWER, prompt, keyboard
+            ):
+                self._send_panel(client, chat_id, PANEL_POWER, prompt, keyboard)
+        elif action.key == "print":
+            if not self._replace_panel(
+                client, chat_id, message_id, PANEL_HINT, PRINT_PROMPT, build_menu_keyboard()
+            ):
+                self._send_panel(
+                    client, chat_id, PANEL_HINT, PRINT_PROMPT, build_menu_keyboard()
+                )
+        elif action.key == "help":
+            helping = self._help_text(config)
+            if not self._replace_panel(
+                client, chat_id, message_id, PANEL_HINT, helping, build_menu_keyboard()
+            ):
+                self._send_panel(
+                    client, chat_id, PANEL_HINT, helping, build_menu_keyboard()
+                )
         elif action.key == "apps":
             self._send_apps_panel(client, chat_id, config, message_id)
         elif action.key == "files":

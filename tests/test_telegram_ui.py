@@ -33,12 +33,10 @@ def labels(markup: dict) -> list[str]:
     return [button["text"] for button in buttons(markup)]
 
 
-ALL_ON = {
-    "telegram_files_enabled": True,
-    "telegram_control_enabled": True,
-    "telegram_power_enabled": True,
-    "network_scan_enabled": True,
-}
+# Taken from the menu itself rather than listed by hand: a new button with a
+# new setting behind it would otherwise be missing here and the count below
+# would pass while the button was silently absent.
+ALL_ON = {action.needs: True for action in MENU_ACTIONS if action.needs}
 
 
 class MainMenuTests(unittest.TestCase):
