@@ -1198,37 +1198,55 @@ def seat_confirm_text(origin: str, destination: str, sail, seat: int, when: str)
     )
 
 
-def seat_held_text(origin: str, destination: str, sail, seat: int, booking: str) -> str:
+def seat_held_text(
+    origin: str, destination: str, sail, seat: int, booking: str, who: str = ""
+) -> str:
     """The booking to carry to RTL, and the plain fact that it is not paid."""
     return (
         f"✅ Seat <b>{seat}</b> held.\n\n"
         f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
         f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}\n\n"
         f"Booking <code>{booking}</code>\n\n"
-        "<b>Not paid yet.</b> Open the RTL app or rtl.mv, find this booking and "
-        "pay for it, or the seat goes back on sale when the hold runs out."
+        "<b>Not paid yet.</b> "
+        + (
+            f"Paying puts <b>{who}</b> on the ticket."
+            if who
+            else "Mind has nobody to put on the ticket: fill in "
+            "<b>Who travels on a ferry ticket</b> in Preferences, on the Telegram "
+            "tab, and payment can be offered here. Until then, pay for this "
+            "booking in the RTL app or at rtl.mv."
+        )
+        + " The seat goes back on sale when the hold runs out."
     )
 
 
 FERRY_PAY = "y"
 
 
-def build_held_keyboard(trip_index: int, seat: int) -> dict:
-    """Offered under a held seat: go and pay for it, or leave it."""
-    return {
-        "inline_keyboard": [
+def build_held_keyboard(trip_index: int, seat: int, can_pay: bool = True) -> dict:
+    """Offered under a held seat: go and pay for it, or leave it.
+
+    Payment is only offered when there is a passenger to put on the ticket.
+    A button that exists to explain why it cannot work is worse than no
+    button: it asks somebody to find that out by pressing it.
+    """
+    rows: list[list[dict]] = []
+    if can_pay:
+        rows.append(
             [
                 {
                     "text": "💳  Continue to payment",
                     "callback_data": ferry_callback(FERRY_PAY, f"{trip_index}.{seat}"),
                 }
-            ],
-            [
-                {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
-                {"text": "‹  Menu", "callback_data": CB_MENU},
-            ],
+            ]
+        )
+    rows.append(
+        [
+            {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
         ]
-    }
+    )
+    return {"inline_keyboard": rows}
 
 
 def ferry_payment_text(who: str, sail, seat: int, booking: str, link: str) -> str:

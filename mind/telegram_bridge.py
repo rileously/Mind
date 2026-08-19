@@ -2181,7 +2181,9 @@ class TelegramBridge(QObject):
             return
 
         if kind == FERRY_HOLD:
-            self._handle_ferry_hold(client, chat_id, callback_id, message_id, value, stops)
+            self._handle_ferry_hold(
+                client, chat_id, callback_id, message_id, value, stops, config
+            )
             return
 
         if kind == FERRY_PAY:
@@ -2318,6 +2320,7 @@ class TelegramBridge(QObject):
         message_id: object,
         value: str,
         stops: list,
+        config: dict,
     ) -> None:
         """Hold the seat. The one thing in here with a consequence at sea."""
         state = self._ferry_pick.get(chat_id) or {}
@@ -2344,10 +2347,16 @@ class TelegramBridge(QObject):
         self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
         state["booking"] = held.booking_id
         self._ferry_pick[chat_id] = state
+        # Only offer payment when there is somebody to put on the ticket.
+        who = str(config.get("ferry_passenger_name", "")).strip()
+        can_pay = bool(who and self.store.get_ferry_passenger_id(config))
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_held_text(origin.name, destination.name, sail, int(seat), held.booking_id),
-            build_held_keyboard(int(index), int(seat)), html=True,
+            seat_held_text(
+                origin.name, destination.name, sail, int(seat), held.booking_id,
+                who if can_pay else "",
+            ),
+            build_held_keyboard(int(index), int(seat), can_pay), html=True,
         )
 
     def _handle_ferry_pay(

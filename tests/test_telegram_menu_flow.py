@@ -677,8 +677,22 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         original = bridge.ferry_reserve
         bridge.ferry_reserve = refuse
         self.addCleanup(setattr, bridge, "ferry_reserve", original)
-        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
         self.assertIn("Seat already taken", " ".join(self.client.answered))
+
+    def test_payment_is_not_offered_with_nobody_to_put_on_the_ticket(self):
+        # A button whose only purpose is to explain why it cannot work asks
+        # somebody to find that out by pressing it.
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import Reservation
+
+        original = bridge.ferry_reserve
+        bridge.ferry_reserve = lambda body: Reservation(booking_id="00000014B909")
+        self.addCleanup(setattr, bridge, "ferry_reserve", original)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
+        shown = str(self.client.edited or self.client.sent)
+        self.assertNotIn("Continue to payment", shown)
+        self.assertIn("Who travels on a ferry ticket", shown)
 
     def test_a_held_seat_reports_its_booking_and_that_it_is_unpaid(self):
         import mind.telegram_bridge as bridge
@@ -687,7 +701,7 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         original = bridge.ferry_reserve
         bridge.ferry_reserve = lambda body: Reservation(booking_id="00000014B909")
         self.addCleanup(setattr, bridge, "ferry_reserve", original)
-        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
         shown = str(self.client.edited or self.client.sent)
         self.assertIn("00000014B909", shown)
         self.assertIn("Not paid yet", shown)
