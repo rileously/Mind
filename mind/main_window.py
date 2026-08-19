@@ -2683,6 +2683,15 @@ class SettingsPage(QWidget):
             self.telegram_default,
             self.telegram_files_root,
             self.telegram_inbox,
+            # Every text field on this page belongs here. One that is left out
+            # takes what is typed into it and never writes it down, which looks
+            # exactly like the setting having no effect.
+            self.hotspot_ssid,
+            self.hotspot_password,
+            self.ferry_name,
+            self.ferry_id,
+            self.ferry_email,
+            self.ferry_phone,
         ):
             field.textEdited.connect(self._changed_soon)
             # Leaving the field commits it at once, so a half-typed value is not

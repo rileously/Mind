@@ -150,3 +150,48 @@ class MessagesPageStatus(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryTextFieldSaves(unittest.TestCase):
+    """A field that is not wired to the save does nothing at all.
+
+    It takes what is typed, shows it, and forgets it the moment the page is
+    rebuilt - which reads as the setting having no effect rather than as a
+    field that was never connected. Two of them shipped that way.
+    """
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        import mind.main_window as window
+
+        self.page = window.SettingsPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    @staticmethod
+    def listens(widget, signal_name):
+        from PySide6.QtCore import QMetaMethod
+
+        meta = widget.metaObject()
+        for index in range(meta.methodCount()):
+            method = meta.method(index)
+            if method.methodType() == QMetaMethod.Signal:
+                if bytes(method.name()).decode() == signal_name:
+                    if widget.isSignalConnected(method):
+                        return True
+        return False
+
+    def test_no_line_edit_is_left_unconnected(self):
+        from PySide6.QtWidgets import QLineEdit
+
+        loose = [
+            field.placeholderText() or field.objectName() or "unnamed"
+            for field in self.page.findChildren(QLineEdit)
+            if not self.listens(field, "textEdited")
+            and not self.listens(field, "editingFinished")
+        ]
+        self.assertEqual(loose, [], f"these fields never save what is typed: {loose}")
