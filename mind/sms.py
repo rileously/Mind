@@ -74,31 +74,38 @@ class Message:
 def parse_messages(payload: str) -> list[Message]:
     """The rows "content query" printed, as messages.
 
-    A line that does not begin a row belongs to the message before it. Anything
-    arriving before the first row marker is dropped: it is a warning from the
-    shell rather than part of a message.
+    A row is gathered whole before it is taken apart, because a row is not
+    reliably one line. Message bodies contain newlines, and so do some of the
+    fields: a sender id arriving with a carriage return on the end splits the
+    row before the body has even started, leaving the date and the type looking
+    like the first words of the message. Collecting until the next row marker
+    and splitting once at "body=" is right whichever line the break fell on.
+
+    Anything before the first row marker is dropped: that is a warning from the
+    shell, not part of a message.
     """
     messages: list[Message] = []
-    fields: dict[str, str] = {}
-    body: list[str] = []
+    gathered: list[str] = []
     started = False
 
     def finish() -> None:
         if not started:
             return
-        messages.append(_message(fields, "\n".join(body)))
+        text = "\n".join(gathered)
+        head, separator, body = text.partition("body=")
+        # The first "body=" is the column: the header fields come before it, so
+        # one occurring inside the message itself cannot be mistaken for it.
+        messages.append(_message(_fields(head if separator else text), body if separator else ""))
 
     for line in (payload or "").splitlines():
         found = _ROW.match(line)
         if found is None:
             if started:
-                body.append(line)
+                gathered.append(line)
             continue
         finish()
         started = True
-        head, separator, rest = found.group(2).partition("body=")
-        fields = _fields(head if separator else found.group(2))
-        body = [rest] if separator else []
+        gathered = [found.group(2)]
     finish()
     return messages
 

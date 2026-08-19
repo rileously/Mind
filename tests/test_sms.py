@@ -89,6 +89,57 @@ class ReadingRows(unittest.TestCase):
         self.assertEqual(found[0].address, "455")
 
 
+class ARowThatIsNotOneLine(unittest.TestCase):
+    """The header itself can be broken across lines.
+
+    A sender id with a carriage return on the end splits the row before the
+    body has started. The date and the type then look like the opening words
+    of the message, the message loses its time, and the reader is shown
+    ", date=1787141010941, read=0, type=1, body=" as though somebody had sent
+    it. Real messages on a real phone arrive this way.
+    """
+
+    SPLIT_HEADER = """Row: 0 _id=1, address=Ooredoo
+, date=1787141010941, read=0, type=1, body=Tired of spam calls?"""
+
+    def test_the_fields_after_the_break_are_still_fields(self):
+        found = parse_messages(self.SPLIT_HEADER)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].body, "Tired of spam calls?")
+
+    def test_the_sender_survives_the_break(self):
+        self.assertEqual(parse_messages(self.SPLIT_HEADER)[0].address, "Ooredoo")
+
+    def test_the_time_is_not_lost_with_it(self):
+        # The heading showed no time at all, which is how this was noticed.
+        self.assertAlmostEqual(
+            parse_messages(self.SPLIT_HEADER)[0].when, 1787141010.941, places=3
+        )
+
+    def test_the_message_is_not_shown_the_columns(self):
+        for word in ("date=", "read=", "type=", "body="):
+            self.assertNotIn(word, parse_messages(self.SPLIT_HEADER)[0].body)
+
+    def test_a_body_containing_the_word_body_is_still_the_body(self):
+        # The first "body=" is the column, and the header comes before it.
+        payload = (
+            "Row: 0 _id=1, address=X, date=0, read=1, type=1, "
+            "body=the body= of the text"
+        )
+        self.assertEqual(parse_messages(payload)[0].body, "the body= of the text")
+
+    def test_a_break_and_a_multi_line_message_together(self):
+        payload = """Row: 0 _id=1, address=Ooredoo
+, date=0, read=1, type=1, body=first line
+second line
+Row: 1 _id=2, address=Bank, date=0, read=1, type=1, body=next"""
+        found = parse_messages(payload)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(found[0].body, "first line\nsecond line")
+        self.assertEqual(found[0].address, "Ooredoo")
+        self.assertEqual(found[1].address, "Bank")
+
+
 class TheWrongSender(unittest.TestCase):
     """A message must never be shown against somebody who did not send it."""
 
