@@ -1033,6 +1033,7 @@ class NotificationsPage(QWidget):
 
 
 ROUTER_PASSWORD_MASK = "•" * 10
+HOTSPOT_PASSWORD_MASK = "•" * 10
 
 
 class NetworkDevicesPage(QWidget):
@@ -2150,8 +2151,30 @@ class SettingsPage(QWidget):
             "Give it the home Wi-Fi name",
             "The hotspot takes the name and password of the network this PC is on, so "
             "a phone moves onto it by itself when it is the stronger of the two. Turn "
-            "this off to keep the name Windows was given.",
+            "this off to name it yourself below.",
             self.hotspot_match,
+            "✈",
+        )
+        hotspot_own = QWidget()
+        hotspot_own_row = QHBoxLayout(hotspot_own)
+        hotspot_own_row.setContentsMargins(0, 0, 0, 0)
+        hotspot_own_row.setSpacing(8)
+        self.hotspot_ssid = QLineEdit()
+        self.hotspot_ssid.setPlaceholderText("Network name")
+        self.hotspot_ssid.setMaximumWidth(150)
+        self.hotspot_password = QLineEdit()
+        self.hotspot_password.setPlaceholderText("Password")
+        self.hotspot_password.setEchoMode(QLineEdit.Password)
+        self.hotspot_password.setMaximumWidth(150)
+        hotspot_own_row.addWidget(self.hotspot_ssid)
+        hotspot_own_row.addWidget(self.hotspot_password)
+        self._setting_row(
+            telegram_layout,
+            "Or a name of its own",
+            "Used when the setting above is off. Windows has no open hotspot - it "
+            "offers WPA2 and WPA3 and nothing else - so a password of at least eight "
+            "characters is required. It is stored encrypted, like the bot token.",
+            hotspot_own,
             "✈",
         )
         for widget in (
@@ -2177,6 +2200,8 @@ class SettingsPage(QWidget):
         self.telegram_control.toggled.connect(self.telegram_power.setEnabled)
         self.telegram_enabled.toggled.connect(self.telegram_hotspot.setEnabled)
         self.telegram_hotspot.toggled.connect(self.hotspot_match.setEnabled)
+        self.telegram_hotspot.toggled.connect(self.hotspot_ssid.setEnabled)
+        self.telegram_hotspot.toggled.connect(self.hotspot_password.setEnabled)
         self.telegram_enabled.toggled.connect(self.telegram_send_menu.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
@@ -2488,6 +2513,12 @@ class SettingsPage(QWidget):
         self.telegram_hotspot.setChecked(hotspot_on)
         self.telegram_hotspot.setEnabled(telegram_on)
         self.hotspot_match.setChecked(bool(config.get("hotspot_match_home_wifi", True)))
+        self.hotspot_ssid.setText(str(config.get("hotspot_ssid", "")))
+        self.hotspot_ssid.setEnabled(telegram_on and hotspot_on)
+        self.hotspot_password.setText(
+            HOTSPOT_PASSWORD_MASK if self.store.get_hotspot_password(config) else ""
+        )
+        self.hotspot_password.setEnabled(telegram_on and hotspot_on)
         self.hotspot_match.setEnabled(telegram_on and hotspot_on)
         self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
         self.telegram_send_menu.setEnabled(telegram_on)
@@ -2554,6 +2585,7 @@ class SettingsPage(QWidget):
                 "telegram_power_enabled": self.telegram_power.isChecked(),
                 "telegram_hotspot_enabled": self.telegram_hotspot.isChecked(),
                 "hotspot_match_home_wifi": self.hotspot_match.isChecked(),
+                "hotspot_ssid": self.hotspot_ssid.text().strip(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
@@ -2567,6 +2599,10 @@ class SettingsPage(QWidget):
         typed_token = self.telegram_token.text().strip()
         if typed_token != "•" * 12:
             config = self.store.set_telegram_token(config, typed_token)
+        # The hotspot key is kept the same way, and for the same reason.
+        typed_hotspot = self.hotspot_password.text()
+        if typed_hotspot != HOTSPOT_PASSWORD_MASK:
+            config = self.store.set_hotspot_password(config, typed_hotspot)
         want_shell_menu = self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
         try:
             self.store.save(config)

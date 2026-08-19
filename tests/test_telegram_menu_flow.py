@@ -12,6 +12,7 @@ and a message that changes role stops being tracked as its old one. Content -
 a file, a transform, text read from a photo - is never touched by any of this.
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,6 +138,67 @@ class HotspotPanelTests(BridgeHarness, unittest.TestCase):
         self.bridge._hotspot_chat = 7
         self.bridge._check_hotspot(self.client, self.config)
         self.assertIsNone(self.bridge._hotspot_chat)
+
+
+class HotspotNamingTests(BridgeHarness, unittest.TestCase):
+    """Which name the hotspot is given, and by whom.
+
+    A stand-in radio records what it was configured with, so no access point
+    comes up and nothing reads the Wi-Fi this machine is actually on.
+    """
+
+    class FakeRadio:
+        def __init__(self, current=""):
+            self.current = current
+            self.configured: list[tuple[str, str]] = []
+
+        def state(self):
+            from mind.hotspot import HotspotState
+
+            return HotspotState(state="off", clients=0, ssid=self.current)
+
+        def configure(self, ssid, passphrase):
+            self.configured.append((ssid, passphrase))
+            self.current = ssid
+            return self.state()
+
+    def setUp(self):
+        super().setUp()
+        self.config["telegram_hotspot_enabled"] = True
+        self.config["hotspot_match_home_wifi"] = False
+
+    def test_a_name_of_its_own_is_used_when_matching_is_off(self):
+        self.config["hotspot_ssid"] = "Toilet Wi-Fi"
+        config = self.store.set_hotspot_password(self.config, "openthedoor")
+        radio = self.FakeRadio(current="DESKTOP-1234")
+        self.assertTrue(self.bridge._apply_hotspot_name(radio, config))
+        self.assertEqual(radio.configured, [("Toilet Wi-Fi", "openthedoor")])
+
+    def test_a_hotspot_already_carrying_that_name_is_left_alone(self):
+        self.config["hotspot_ssid"] = "Toilet Wi-Fi"
+        config = self.store.set_hotspot_password(self.config, "openthedoor")
+        radio = self.FakeRadio(current="Toilet Wi-Fi")
+        self.assertTrue(self.bridge._apply_hotspot_name(radio, config))
+        self.assertEqual(radio.configured, [])
+
+    def test_no_name_set_leaves_windows_own_alone_rather_than_failing(self):
+        # Nothing configured is not an error: Windows has a name and a key
+        # already, and there is no instruction here to replace them.
+        radio = self.FakeRadio(current="DESKTOP-1234")
+        self.assertTrue(self.bridge._apply_hotspot_name(radio, self.config))
+        self.assertEqual(radio.configured, [])
+
+    def test_a_name_with_no_password_is_not_sent_to_windows(self):
+        # Windows has no open hotspot, so a name on its own cannot be applied.
+        self.config["hotspot_ssid"] = "Toilet Wi-Fi"
+        radio = self.FakeRadio(current="DESKTOP-1234")
+        self.assertTrue(self.bridge._apply_hotspot_name(radio, self.config))
+        self.assertEqual(radio.configured, [])
+
+    def test_the_password_is_not_stored_as_itself(self):
+        config = self.store.set_hotspot_password(self.config, "openthedoor")
+        self.assertNotIn("openthedoor", json.dumps(config))
+        self.assertEqual(self.store.get_hotspot_password(config), "openthedoor")
 
 
 class MenuFlowTests(BridgeHarness, unittest.TestCase):

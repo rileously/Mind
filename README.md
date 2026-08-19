@@ -75,7 +75,8 @@ launch; a folder still in use is never touched.
 - Automatic cleanup of runtime folders left behind by a crash or forced shutdown
 - Telegram button that turns this PC into a Wi-Fi hotspot for the rooms the router
   does not reach, optionally carrying the home network's own name so a phone moves
-  onto it by itself, switching off once nothing has used it for five minutes
+  onto it by itself or a name and password of its own, switching off once nothing
+  has used it for five minutes (Windows offers no open hotspot, only WPA2 and WPA3)
 - Diagnostics view with no API-key logging
 
 ## Privacy

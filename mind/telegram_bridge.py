@@ -747,20 +747,27 @@ class TelegramBridge(QObject):
         """The panel's words and buttons, for whatever state the radio is in."""
         if not bool(config.get("telegram_hotspot_enabled", False)):
             return hotspot_text("off", 0, "", enabled=False), build_menu_keyboard()
-        home_ssid, _key = current_wifi()
+        match_home = bool(config.get("hotspot_match_home_wifi", True))
+        if match_home:
+            wanted, _key = current_wifi()
+        else:
+            wanted = str(config.get("hotspot_ssid", "")).strip()
         try:
             state = Hotspot().state()
         except HotspotError as exc:
             return f"📡 {exc}", build_menu_keyboard()
-        matched = bool(home_ssid) and state.ssid == home_ssid
+        matched = not wanted or state.ssid == wanted
         text = hotspot_text(
             state.state,
             state.clients,
             state.ssid,
-            home_ssid,
+            wanted,
             idle_minutes=HOTSPOT_IDLE_SECONDS // 60,
+            match_home=match_home,
         )
-        return text, build_hotspot_keyboard(state.state, matched, state.clients)
+        return text, build_hotspot_keyboard(
+            state.state, matched, state.clients, match_home
+        )
 
     def _send_hotspot_panel(
         self,
@@ -798,7 +805,7 @@ class TelegramBridge(QObject):
                 client.answer_callback_query(callback_id, "Starting the hotspot…")
                 # Named after the home network before it comes up, so a phone
                 # that is already looking for that name finds this one too.
-                self._match_home_wifi(radio, config)
+                self._apply_hotspot_name(radio, config)
                 state = radio.start()
                 if state.is_on:
                     self._hotspot_chat = chat_id
@@ -812,7 +819,7 @@ class TelegramBridge(QObject):
                 self.log.emit("Telegram: hotspot off")
             elif index == HOTSPOT_MATCH:
                 client.answer_callback_query(callback_id, "Renaming…")
-                if not self._match_home_wifi(radio, config):
+                if not self._apply_hotspot_name(radio, config):
                     client.answer_callback_query(
                         callback_id,
                         "Windows would not say what this PC's Wi-Fi password is. "
@@ -828,22 +835,35 @@ class TelegramBridge(QObject):
         # rather than the one the tap asked for.
         self._send_hotspot_panel(client, chat_id, config, message_id)
 
-    def _match_home_wifi(self, radio: Hotspot, config: dict) -> bool:
-        """Give the hotspot the name and password of the Wi-Fi this PC is on.
+    def _apply_hotspot_name(self, radio: Hotspot, config: dict) -> bool:
+        """Give the hotspot the name it is meant to have before it comes up.
 
-        Two access points with one name and one password is what a phone
-        already knows how to handle: it moves to whichever is stronger without
-        being asked. Windows hands out its own addresses behind the hotspot
-        rather than the router's, so this is not a true extender - a connection
-        held open across the move will drop - but for picking up a page in a
-        room the router does not reach, it is the difference between working
-        and not.
+        Two shapes, and the setting picks between them. Matching the home
+        network means one name and one password across both access points,
+        which is what a phone already knows how to handle: it moves to
+        whichever is stronger without being asked. Windows hands out its own
+        addresses behind the hotspot rather than the router's, so this is not a
+        true extender - a connection held open across the move will drop - but
+        for picking up a page in a room the router does not reach, it is the
+        difference between working and not.
+
+        A name of its own is the other shape, for when a separate network is
+        the point rather than an accident. That one is joined by hand the first
+        time and never again. There is no third shape without a password:
+        Windows accepts WPA2 and WPA3 for a hotspot and nothing else.
         """
-        if not bool(config.get("hotspot_match_home_wifi", True)):
-            return True
-        ssid, key = current_wifi()
-        if not ssid or len(key) < 8:
-            return False
+        if bool(config.get("hotspot_match_home_wifi", True)):
+            ssid, key = current_wifi()
+            if not ssid or len(key) < 8:
+                return False
+        else:
+            ssid = str(config.get("hotspot_ssid", "")).strip()
+            key = self.store.get_hotspot_password(config)
+            if not ssid or len(key) < 8:
+                # Nothing configured is not a failure. Windows already has a
+                # name and a key of its own, and leaving them alone is the
+                # sensible thing to do with no instruction to the contrary.
+                return True
         try:
             if radio.state().ssid == ssid:
                 return True

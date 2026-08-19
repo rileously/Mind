@@ -125,8 +125,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # radio this PC is using to stay online.
     "telegram_hotspot_enabled": False,
     # Give the hotspot the home network's name and password, so a phone
-    # moves onto it without being told to.
+    # moves onto it without being told to. Turn it off to use the name and
+    # password below instead.
     "hotspot_match_home_wifi": True,
+    "hotspot_ssid": "",
+    # Encrypted like the bot token and the router password. It is a Wi-Fi key,
+    # and Windows will not run an open hotspot, so there is always one to keep.
+    "hotspot_password_protected": "",
     # "Send to Telegram" in the Explorer right-click menu, and the chat those
     # sends go to. The chat must still be one of the allowed ids.
     "telegram_send_menu_enabled": False,
@@ -238,6 +243,30 @@ class ConfigStore:
         clean = token.strip() if isinstance(token, str) else ""
         updated = deepcopy(config)
         updated["telegram_token_protected"] = protect_text(clean) if clean else ""
+        return updated
+
+    def get_hotspot_password(self, config: dict[str, Any] | None = None) -> str:
+        """Read the hotspot password, stored encrypted like the bot token.
+
+        Windows offers no open hotspot - the authentication kinds it accepts are
+        WPA2 and WPA3 and nothing else - so there is always a key here, and a
+        Wi-Fi key is not something to leave lying in a settings file.
+        """
+        current = config if config is not None else self.load()
+        protected = current.get("hotspot_password_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return ""
+        try:
+            return unprotect_text(protected)
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def set_hotspot_password(self, config: dict[str, Any], password: str) -> dict[str, Any]:
+        # Not stripped: a Wi-Fi password may legitimately end in a space, and
+        # quietly removing it would leave a hotspot nobody can join.
+        clean = password if isinstance(password, str) else ""
+        updated = deepcopy(config)
+        updated["hotspot_password_protected"] = protect_text(clean) if clean else ""
         return updated
 
     def get_router_password(self, config: dict[str, Any] | None = None) -> str:

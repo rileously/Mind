@@ -773,7 +773,9 @@ def commands_signature(config: dict, commands: list[dict] | None = None) -> str:
     return "|".join(f"{entry['command']}:{entry['description']}" for entry in bot_commands(config, commands))
 
 
-def build_hotspot_keyboard(state: str, matched: bool = True, clients: int = 0) -> dict:
+def build_hotspot_keyboard(
+    state: str, matched: bool = True, clients: int = 0, match_home: bool = True
+) -> dict:
     """On or off, and a way to make the hotspot look like the home network.
 
     The off button says how many devices are on it, because the phone reading
@@ -792,9 +794,8 @@ def build_hotspot_keyboard(state: str, matched: bool = True, clients: int = 0) -
     else:
         rows.append([{"text": "📡  Turn on", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_START}"}])
     if not matched:
-        rows.append(
-            [{"text": "🏠  Use the home Wi-Fi name", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_MATCH}"}]
-        )
+        label = "🏠  Use the home Wi-Fi name" if match_home else "✏️  Use the name I set"
+        rows.append([{"text": label, "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_MATCH}"}])
     rows.append(
         [
             {"text": "⟳  Refresh", "callback_data": f"{CB_HOTSPOT}:{HOTSPOT_REFRESH}"},
@@ -808,9 +809,10 @@ def hotspot_text(
     state: str,
     clients: int,
     ssid: str,
-    home_ssid: str = "",
+    wanted: str = "",
     idle_minutes: int = 0,
     enabled: bool = True,
+    match_home: bool = True,
 ) -> str:
     """What the hotspot panel says.
 
@@ -834,22 +836,32 @@ def hotspot_text(
             lines.append(
                 f"It turns itself off after {idle_minutes} minutes with nothing connected."
             )
-        if home_ssid and ssid == home_ssid:
+        if wanted and ssid == wanted and match_home:
             lines += [
                 "",
                 "It carries the same name and password as the home Wi-Fi, so a "
                 "phone moves onto it by itself once this one is the stronger of "
                 "the two.",
             ]
+        elif not match_home:
+            lines += [
+                "",
+                "It is a network of its own, so a phone joins it the first time "
+                "from its Wi-Fi list and remembers it after that.",
+            ]
         return "\n".join(lines)
     if state == "intransition":
         return f"📡 {name} is still coming up. Refresh in a moment."
     lines = [f"📡 <b>{name}</b> is off."]
-    if home_ssid and ssid and ssid != home_ssid:
+    if wanted and ssid and ssid != wanted:
+        because = (
+            "so a phone will not move onto it without being told to"
+            if match_home
+            else "and will be renamed when it starts"
+        )
         lines += [
             "",
-            f"It is named <b>{ssid}</b> rather than <b>{home_ssid}</b>, so a phone "
-            "will not move onto it without being told to.",
+            f"It is named <b>{ssid}</b> rather than <b>{wanted}</b>, {because}.",
         ]
     lines += ["", "This PC is on Wi-Fi, so sharing it halves the speed. It is the "
               "reach that is worth having, not the speed."]

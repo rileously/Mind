@@ -149,5 +149,48 @@ class MatchingTheHomeNetwork(unittest.TestCase):
         self.assertTrue(all(" " not in part for part in arguments if part.endswith(".ps1")))
 
 
+class AnOpenHotspotIsNotOffered(unittest.TestCase):
+    """Windows has no open hotspot, so neither does Mind.
+
+    TetheringWiFiAuthenticationKind carries Wpa2, Wpa3TransitionMode and Wpa3
+    and nothing else: there is no value meaning "no password". The refusal
+    therefore belongs here, where it can say so, rather than at WinRT, where it
+    arrives as a failed operation with no explanation.
+    """
+
+    def test_no_password_is_refused_before_windows_sees_it(self):
+        run = Recorder(ON)
+        with self.assertRaises(HotspotError):
+            Hotspot(run=run).configure("Toilet", "")
+        self.assertEqual(run.calls, [])
+
+    def test_the_refusal_says_what_would_be_acceptable(self):
+        with self.assertRaises(HotspotError) as caught:
+            Hotspot(run=Recorder(ON)).configure("Toilet", "1234567")
+        self.assertIn("8", str(caught.exception))
+
+
+class ANameOfItsOwn(unittest.TestCase):
+    """A hotspot that is not pretending to be the home network."""
+
+    def test_a_name_and_key_are_sent_as_given(self):
+        run = Recorder(ON)
+        Hotspot(run=run).configure("Toilet Wi-Fi", "openthedoor")
+        self.assertIn("Toilet Wi-Fi", run.calls[0])
+        self.assertIn("openthedoor", run.calls[0])
+
+    def test_surrounding_space_in_a_name_is_not_kept(self):
+        run = Recorder(ON)
+        Hotspot(run=run).configure("  Toilet  ", "openthedoor")
+        self.assertIn("Toilet", run.calls[0])
+
+    def test_but_a_password_is_left_exactly_as_typed(self):
+        # A Wi-Fi key may legitimately end in a space. Trimming it would leave a
+        # hotspot that refuses the password its owner believes they set.
+        run = Recorder(ON)
+        Hotspot(run=run).configure("Toilet", "open door ")
+        self.assertIn("open door ", run.calls[0])
+
+
 if __name__ == "__main__":
     unittest.main()
