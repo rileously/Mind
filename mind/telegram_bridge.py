@@ -121,6 +121,12 @@ from .telegram_ui import (
     ferry_text,
     ferry_choices_text,
     sailings_text,
+    seat_pick_text,
+    seat_chosen_text,
+    build_sailings_keyboard,
+    build_seats_keyboard,
+    FERRY_TRIP,
+    FERRY_SEAT,
     ferry_pick_text,
     ferry_callback,
     parse_ferry_callback,
@@ -2154,6 +2160,14 @@ class TelegramBridge(QObject):
             )
             return
 
+        if kind == FERRY_TRIP:
+            self._handle_ferry_trip(client, chat_id, message_id, value, stops)
+            return
+
+        if kind == FERRY_SEAT:
+            self._handle_ferry_seat(client, chat_id, message_id, value, stops)
+            return
+
         if kind != FERRY_ISLAND:
             return
         chosen = ferry_stop_by_code(stops, value)
@@ -2182,23 +2196,96 @@ class TelegramBridge(QObject):
                 callback_id, "That is where you are leaving from.", alert=True
             )
             return
+        self._ferry_result(client, chat_id, message_id, origin, chosen, described)
+
+    def _ferry_result(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        origin,
+        chosen,
+        described: dict,
+    ) -> None:
+        """What sails today, with a button for each one that has room."""
         routes = ferry_routes_between(parse_ferry_routes(described), origin.name, chosen.name)
         today = time.strftime("%Y%m%d")
+        when = time.strftime("%a %d %B")
         try:
             sails = ferry_sailings(origin.code, chosen.code, today)
-            text = sailings_text(
-                origin.name, chosen.name, time.strftime("%a %d %B"), sails, routes
-            )
         except FerryError:
-            # The network description still answers "can I get there at all",
-            # which is worth more than an error about seats.
-            text = ferry_text(
-                origin.name, chosen.name, routes,
-                stops_named=lambda r: r.between(origin.name, chosen.name),
+            # Routes still answer "can I get there at all".
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ferry_text(origin.name, chosen.name, routes,
+                           stops_named=lambda r: r.between(origin.name, chosen.name)),
+                build_ferry_again_keyboard(), html=True,
             )
-        self._ferry_pick.pop(chat_id, None)
+            return
+        self._ferry_pick[chat_id] = {
+            "stage": "sailings", "origin": origin.code, "destination": chosen.code,
+            "sailings": sails, "when": when,
+        }
+        text = sailings_text(origin.name, chosen.name, when, sails, routes)
+        keyboard = build_sailings_keyboard(sails) if sails else build_ferry_again_keyboard()
+        self._replace_panel(client, chat_id, message_id, PANEL_FERRY, text, keyboard, html=True)
+
+    def _handle_ferry_trip(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        value: str,
+        stops: list,
+    ) -> None:
+        """A sailing was tapped: offer its free seats."""
+        state = self._ferry_pick.get(chat_id) or {}
+        sails = state.get("sailings") or []
+        origin = ferry_stop_by_code(stops, state.get("origin", ""))
+        destination = ferry_stop_by_code(stops, state.get("destination", ""))
+        if origin is None or destination is None or not sails:
+            return
+        if value == "back":
+            text = sailings_text(origin.name, destination.name, state.get("when", ""), sails)
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY, text,
+                build_sailings_keyboard(sails), html=True,
+            )
+            return
+        if not value.isdigit() or int(value) >= len(sails):
+            return
+        sail = sails[int(value)]
         self._replace_panel(
-            client, chat_id, message_id, PANEL_FERRY, text, build_ferry_again_keyboard(), html=True
+            client, chat_id, message_id, PANEL_FERRY,
+            seat_pick_text(origin.name, destination.name, sail),
+            build_seats_keyboard(sail, int(value)), html=True,
+        )
+
+    def _handle_ferry_seat(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        value: str,
+        stops: list,
+    ) -> None:
+        """A seat was tapped: say what it is, and hand the booking over."""
+        state = self._ferry_pick.get(chat_id) or {}
+        sails = state.get("sailings") or []
+        origin = ferry_stop_by_code(stops, state.get("origin", ""))
+        destination = ferry_stop_by_code(stops, state.get("destination", ""))
+        index, _, seat = value.partition(".")
+        if origin is None or destination is None or not index.isdigit():
+            return
+        if int(index) >= len(sails) or not seat.isdigit():
+            return
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            seat_chosen_text(
+                origin.name, destination.name, sails[int(index)], int(seat),
+                state.get("when", ""),
+            ),
+            build_ferry_again_keyboard(), html=True,
         )
 
     def _handle_search(

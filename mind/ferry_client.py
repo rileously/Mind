@@ -269,6 +269,9 @@ class Sailing:
     seats_free: int = 0
     seats_total: int = 0
     schedule_id: str = ""
+    # Which seats are actually free, so one can be pointed at rather than
+    # merely counted.
+    free_seats: tuple = ()
 
     @property
     def departs_at(self) -> str:
@@ -326,6 +329,11 @@ def parse_sailings(payload: dict) -> list[Sailing]:
                     seats_free=free,
                     seats_total=len(seats) or int(deck.get("seatCount") or 0),
                     schedule_id=str(leg.get("scheduleId") or ""),
+                    free_seats=tuple(
+                        int(s.get("code"))
+                        for s in seats
+                        if s.get("status") == SEAT_FREE and str(s.get("code", "")).isdigit()
+                    ),
                 )
             )
     return found

@@ -1026,3 +1026,72 @@ def sailings_text(origin: str, destination: str, when: str, sailings: list, rout
         lines.append(f"…and {len(sailings) - 8} more.")
     lines += ["", "Book in the RTL app or at rtl.mv."]
     return "\n".join(lines)
+
+
+FERRY_TRIP = "t"
+FERRY_SEAT = "e"
+
+
+def build_sailings_keyboard(sailings: list) -> dict:
+    """One button per sailing that has room, so a seat can be picked on it."""
+    rows: list[list[dict]] = []
+    for index, sail in enumerate(sailings[:8]):
+        if sail.full:
+            continue
+        rows.append(
+            [
+                {
+                    "text": f"{sail.departs_at} · {sail.seats_free} seats",
+                    "callback_data": ferry_callback(FERRY_TRIP, str(index)),
+                }
+            ]
+        )
+    rows.append(
+        [
+            {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def build_seats_keyboard(sail, trip_index: int) -> dict:
+    """The free seats, five to a row. Numbers are short and there are many."""
+    rows: list[list[dict]] = []
+    for position, seat in enumerate(sail.free_seats[:40]):
+        button = {
+            "text": str(seat),
+            "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
+        }
+        if position % 5 == 0:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    rows.append(
+        [
+            {"text": "‹  Sailings", "callback_data": ferry_callback(FERRY_TRIP, "back")},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def seat_pick_text(origin: str, destination: str, sail) -> str:
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
+        f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · MVR {sail.fare:.0f}\n\n"
+        f"{sail.seats_free} seats free. Pick one."
+    )
+
+
+def seat_chosen_text(origin: str, destination: str, sail, seat: int, when: str) -> str:
+    """The summary to carry to RTL, and the plain reason Mind stops here."""
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
+        f"{when} · <b>{sail.departs_at} → {sail.arrives_at}</b>\n\n"
+        f"Seat <b>{seat}</b> · {sail.route} · boat {sail.boat}\n"
+        f"Fare <b>MVR {sail.fare:.0f}</b>\n\n"
+        "Book it in the RTL app or at rtl.mv. Mind does not hold the seat: "
+        "reserving needs your account, and paying needs your card.\n\n"
+        "<a href=\"https://rtl.mv\">rtl.mv</a>"
+    )
