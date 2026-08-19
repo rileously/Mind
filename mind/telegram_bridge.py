@@ -133,6 +133,13 @@ from .telegram_ui import (
     FERRY_HOLD,
     build_sailings_keyboard,
     build_seat_map_keyboard,
+    build_count_keyboard,
+    build_seats_confirm_keyboard,
+    count_text,
+    seats_pick_text,
+    ask_who_text,
+    FERRY_COUNT,
+    MAX_PASSENGERS,
     FERRY_TRIP,
     FERRY_SEAT,
     ferry_pick_text,
@@ -173,6 +180,7 @@ from .ferry_client import (
     Passenger as ferry_passenger,
     Contact as ferry_contact,
     parse_passenger as ferry_parse_passenger,
+    parse_passengers as ferry_parse_passengers,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -2184,6 +2192,10 @@ class TelegramBridge(QObject):
             self._handle_ferry_trip(client, chat_id, message_id, value, stops)
             return
 
+        if kind == FERRY_COUNT:
+            self._handle_ferry_count(client, chat_id, message_id, value)
+            return
+
         if kind == FERRY_SEAT:
             self._handle_ferry_seat(client, chat_id, message_id, value, stops)
             return
@@ -2287,10 +2299,12 @@ class TelegramBridge(QObject):
         if not value.isdigit() or int(value) >= len(sails):
             return
         sail = sails[int(value)]
+        state["paying_trip"] = int(value)
+        state["picked"] = []
+        self._ferry_pick[chat_id] = state
         self._replace_panel(
-            client, chat_id, message_id, PANEL_FERRY,
-            seat_pick_text(origin.name, destination.name, sail),
-            build_seat_map_keyboard(sail, int(value)), html=True,
+            client, chat_id, message_id, PANEL_FERRY, count_text(sail),
+            build_count_keyboard(min(6, max(1, sail.seats_free))), html=True,
         )
 
     def _handle_ferry_seat(
@@ -2311,13 +2325,29 @@ class TelegramBridge(QObject):
             return
         if int(index) >= len(sails) or not seat.isdigit():
             return
+        sail = sails[int(index)]
+        wanted = int(state.get("wanted", 1))
+        picked = list(state.get("picked", []))
+        number = int(seat)
+        # Tapping a picked seat takes it back, which is how somebody changes
+        # their mind without starting the whole thing again.
+        if number in picked:
+            picked.remove(number)
+        elif len(picked) < wanted:
+            picked.append(number)
+        state["picked"] = picked
+        self._ferry_pick[chat_id] = state
+        if len(picked) < wanted:
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                seats_pick_text(origin.name, destination.name, sail, wanted, picked),
+                build_seat_map_keyboard(sail, int(index), picked), html=True,
+            )
+            return
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_confirm_text(
-                origin.name, destination.name, sails[int(index)], int(seat),
-                state.get("when", ""),
-            ),
-            build_seat_confirm_keyboard(int(index), int(seat)), html=True,
+            seats_pick_text(origin.name, destination.name, sail, wanted, picked),
+            build_seats_confirm_keyboard(int(index), picked), html=True,
         )
 
     def _handle_ferry_hold(
@@ -2335,16 +2365,19 @@ class TelegramBridge(QObject):
         sails = state.get("sailings") or []
         origin = ferry_stop_by_code(stops, state.get("origin", ""))
         destination = ferry_stop_by_code(stops, state.get("destination", ""))
-        index, _, seat = value.partition(".")
-        if origin is None or destination is None or not index.isdigit() or not seat.isdigit():
+        index, _, listed = value.partition(".")
+        seats = [int(n) for n in listed.split(",") if n.strip().isdigit()]
+        if origin is None or destination is None or not index.isdigit() or not seats:
             return
         if int(index) >= len(sails):
             return
         sail = sails[int(index)]
-        client.answer_callback_query(callback_id, "Holding the seat…")
+        client.answer_callback_query(
+            callback_id, "Holding the seats…" if len(seats) > 1 else "Holding the seat…"
+        )
         try:
             held = ferry_reserve(
-                ferry_reserve_body(sail, int(seat), origin.code, destination.code)
+                ferry_reserve_body(sail, seats, origin.code, destination.code)
             )
         except FerryError as exc:
             # Same reason as above: the tap has already been answered, so this
@@ -2354,15 +2387,17 @@ class TelegramBridge(QObject):
                 f"🚤 {exc}", build_ferry_again_keyboard(), html=True,
             )
             return
-        self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
+        shown = ", ".join(str(n) for n in seats)
+        self.log.emit(f"Telegram: held ferry seats {shown}, booking {held.booking_id}")
         state["booking"] = held.booking_id
+        state["held_seats"] = seats
         self._ferry_pick[chat_id] = state
         # Payment is always offerable now: who travels is asked in the chat
         # when the button is pressed, rather than read from a saved setting.
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_held_text(origin.name, destination.name, sail, int(seat), held.booking_id),
-            build_held_keyboard(int(index), int(seat)), html=True,
+            seat_held_text(origin.name, destination.name, sail, shown, held.booking_id),
+            build_held_keyboard(int(index), seats), html=True,
         )
 
     def _handle_ferry_pay(
@@ -2384,8 +2419,10 @@ class TelegramBridge(QObject):
         state = self._ferry_pick.get(chat_id) or {}
         sails = state.get("sailings") or []
         booking = state.get("booking", "")
-        index, _, seat = value.partition(".")
-        if not booking or not index.isdigit() or not seat.isdigit():
+        index, _, listed = value.partition(".")
+        # A list, not one number: "0.4,5" is two seats on the first sailing.
+        seats = [int(n) for n in listed.split(",") if n.strip().isdigit()]
+        if not booking or not index.isdigit() or not seats:
             return
         if int(index) >= len(sails):
             return
@@ -2393,7 +2430,6 @@ class TelegramBridge(QObject):
         # is often for somebody else, and a saved passenger would have to be
         # edited on the PC before every one of those.
         state["paying_trip"] = int(index)
-        state["paying_seat"] = int(seat)
         self._ferry_pick[chat_id] = state
         client.answer_callback_query(callback_id)
         self._ferry_ask_passenger(client, chat_id, message_id)
@@ -2406,7 +2442,8 @@ class TelegramBridge(QObject):
         state["awaiting_passenger"] = True
         self._ferry_pick[chat_id] = state
         self._replace_panel(
-            client, chat_id, message_id, PANEL_FERRY, ferry_ask_who_text(),
+            client, chat_id, message_id, PANEL_FERRY,
+            ask_who_text(len(state.get("held_seats") or []) or 1),
             build_ferry_again_keyboard(), html=True,
         )
 
@@ -2417,17 +2454,28 @@ class TelegramBridge(QObject):
         state = self._ferry_pick.get(chat_id) or {}
         if not state.get("awaiting_passenger"):
             return False
-        passenger = ferry_parse_passenger(text)
-        if passenger is None:
+        held = state.get("held_seats") or []
+        people = ferry_parse_passengers(text)
+        if not people:
             client.send_message(
                 chat_id,
                 "That did not have an ID number in it. Send the name and the "
-                "ID together, like:\n\nMohamed Maazinu A375667",
+                "ID together, one passenger per line, like:\n\n"
+                "Mohamed Maazinu A375667",
+            )
+            return True
+        if held and len(people) != len(held):
+            # Caught here rather than by RTL, which refuses it with a field name.
+            client.send_message(
+                chat_id,
+                f"{len(held)} seats are held but {len(people)} "
+                f"passenger{'s' if len(people) != 1 else ''} were given. "
+                "Send one line per seat.",
             )
             return True
         state["awaiting_passenger"] = False
         self._ferry_pick[chat_id] = state
-        self._ferry_pay_now(client, chat_id, None, passenger, config)
+        self._ferry_pay_now(client, chat_id, None, people, config)
         return True
 
     def _ferry_pay_now(
@@ -2435,7 +2483,7 @@ class TelegramBridge(QObject):
         client: TelegramClient,
         chat_id: int,
         message_id: object,
-        passenger,
+        people,
         config: dict,
     ) -> None:
         """Turn the held seat into a bank page for this passenger."""
@@ -2443,19 +2491,19 @@ class TelegramBridge(QObject):
         sails = state.get("sailings") or []
         booking = state.get("booking", "")
         index = state.get("paying_trip", 0)
-        seat = state.get("paying_seat", 0)
-        if not booking or index >= len(sails) or not seat:
+        seats = state.get("held_seats") or []
+        if not booking or index >= len(sails) or not seats:
             client.send_message(chat_id, "That booking is no longer on this screen.")
             return
         sail = sails[index]
         contact = ferry_contact(
-            name=passenger.name,
+            name=people[0].name,
             email=str(config.get("ferry_contact_email", "")).strip(),
             phone=str(config.get("ferry_contact_phone", "")).strip(),
         )
         try:
             link = ferry_initiate_payment(
-                ferry_payment_body(booking, sail, int(seat), passenger, contact)
+                ferry_payment_body(booking, sail, seats, people, contact)
             )
         except FerryError as exc:
             self._send_panel(
@@ -2467,8 +2515,39 @@ class TelegramBridge(QObject):
         self.log.emit(f"Telegram: ferry payment link for booking {booking}")
         self._send_panel(
             client, chat_id, PANEL_FERRY,
-            ferry_payment_text(passenger.name, sail, int(seat), booking, link),
+            ferry_payment_text(
+                ", ".join(p.name for p in people), sail,
+                ", ".join(str(n) for n in seats), booking, link,
+                total=float(sail.fare or 0) * len(seats),
+            ),
             build_ferry_again_keyboard(), html=True,
+        )
+
+    def _ferry_state(self, chat_id: int) -> dict:
+        return self._ferry_pick.setdefault(chat_id, {})
+
+    def _handle_ferry_count(
+        self, client: TelegramClient, chat_id: int, message_id: object, value: str
+    ) -> None:
+        """How many are travelling, chosen before any seat is picked."""
+        state = self._ferry_state(chat_id)
+        sails = state.get("sailings") or []
+        index = state.get("paying_trip", 0)
+        if not value.isdigit() or index >= len(sails):
+            return
+        sail = sails[index]
+        wanted = max(1, min(int(value), MAX_PASSENGERS, sail.seats_free))
+        state.update({"wanted": wanted, "picked": []})
+        self._ferry_pick[chat_id] = state
+        origin = ferry_stop_by_code(self._ferry_stops()[0], state.get("origin", ""))
+        destination = ferry_stop_by_code(self._ferry_stops()[0], state.get("destination", ""))
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            seats_pick_text(
+                origin.name if origin else "", destination.name if destination else "",
+                sail, wanted, [],
+            ),
+            build_seat_map_keyboard(sail, index), html=True,
         )
 
     def _handle_search(

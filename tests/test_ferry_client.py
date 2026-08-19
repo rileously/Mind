@@ -598,3 +598,72 @@ class WhoIsTravellingThisTime(unittest.TestCase):
         from mind.ferry_client import parse_passenger
 
         self.assertIsNone(parse_passenger("A375667"))
+
+
+class MoreThanOnePassenger(unittest.TestCase):
+    """Seats and people are lists, and they have to line up."""
+
+    def people(self, n=2):
+        from mind.ferry_client import Passenger
+
+        return [Passenger(name=f"P{i}", id_number=f"A00000{i}") for i in range(n)]
+
+    def sail(self):
+        from mind.ferry_client import Sailing
+
+        return Sailing(schedule_id="1", fare=35)
+
+    def test_the_fare_is_per_person(self):
+        from mind.ferry_client import reserve_body
+
+        body = reserve_body(self.sail(), [3, 4], "105", "106")
+        self.assertEqual(body["totalPrice"], 70)
+        self.assertEqual(body["products"][0]["passengerCount"], 2)
+
+    def test_every_seat_is_held_on_one_booking(self):
+        from mind.ferry_client import reserve_body
+
+        seats = reserve_body(self.sail(), [3, 4, 5], "105", "106")["inbound"][0]["seats"]
+        self.assertEqual([s["seatNumber"] for s in seats], [3, 4, 5])
+
+    def test_one_seat_still_works_unwrapped(self):
+        from mind.ferry_client import reserve_body
+
+        body = reserve_body(self.sail(), 3, "105", "106")
+        self.assertEqual(body["inbound"][0]["seats"][0]["seatNumber"], 3)
+
+    def test_each_person_gets_their_own_seat(self):
+        from mind.ferry_client import Contact, payment_body
+
+        body = payment_body("B1", self.sail(), [3, 4], self.people(), Contact(name="A"))
+        rows = body["inbound"][0]["selectedSeats"]
+        self.assertEqual([(r["customerName"], r["seatNumber"]) for r in rows],
+                         [("P0", 3), ("P1", 4)])
+
+    def test_only_the_first_is_primary(self):
+        from mind.ferry_client import Contact, payment_body
+
+        rows = payment_body("B1", self.sail(), [3, 4, 5], self.people(3),
+                            Contact(name="A"))["inbound"][0]["selectedSeats"]
+        self.assertEqual([r["isPrimary"] for r in rows], [1, 0, 0])
+
+    def test_a_mismatch_is_refused_before_rtl_sees_it(self):
+        # Two seats and one passenger would be refused by RTL with a field
+        # name, which says nothing about the actual mistake.
+        from mind.ferry_client import Contact, FerryError, payment_body
+
+        with self.assertRaises(FerryError) as caught:
+            payment_body("B1", self.sail(), [3, 4], self.people(1), Contact(name="A"))
+        self.assertIn("2 seats", str(caught.exception))
+
+    def test_passengers_are_read_one_per_line(self):
+        from mind.ferry_client import parse_passengers
+
+        found = parse_passengers("Mohamed Maazinu A375667\nAdam Rilwan A227559")
+        self.assertEqual([p.name for p in found], ["Mohamed Maazinu", "Adam Rilwan"])
+
+    def test_one_bad_line_rejects_the_whole_lot(self):
+        # Half a booking is worse than none: the seats are already held.
+        from mind.ferry_client import parse_passengers
+
+        self.assertEqual(parse_passengers("Mohamed Maazinu A375667\nAdam Rilwan"), [])

@@ -657,15 +657,16 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         held = []
         import mind.telegram_bridge as bridge
 
+        self.bridge._ferry_pick[7]["wanted"] = 1
         self.bridge._handle_ferry_seat(self.client, 7, 500, "0.3", self.stops)
         shown = str(self.client.edited or self.client.sent)
-        self.assertIn("Holding it takes the seat off the boat", shown)
+        self.assertIn("Holding takes the seat off the boat", shown)
         self.assertEqual(held, [])
 
     def test_the_asking_offers_a_separate_button_to_hold(self):
+        self.bridge._ferry_pick[7]["wanted"] = 1
         self.bridge._handle_ferry_seat(self.client, 7, 500, "0.3", self.stops)
-        markup = str((self.client.edited or self.client.sent))
-        self.assertIn("Hold seat 3", markup)
+        self.assertIn("Hold 3", str(self.client.edited or self.client.sent))
 
     def test_holding_says_what_rtl_said_when_it_refuses(self):
         import mind.telegram_bridge as bridge

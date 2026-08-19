@@ -1199,11 +1199,13 @@ def seat_confirm_text(origin: str, destination: str, sail, seat: int, when: str)
 
 
 def seat_held_text(
-    origin: str, destination: str, sail, seat: int, booking: str, who: str = ""
+    origin: str, destination: str, sail, seat, booking: str, who: str = ""
 ) -> str:
     """The booking to carry to RTL, and the plain fact that it is not paid."""
+    # One seat or several, written the way it was held.
+    plural = "s" if "," in str(seat) else ""
     return (
-        f"✅ Seat <b>{seat}</b> held.\n\n"
+        f"✅ Seat{plural} <b>{seat}</b> held.\n\n"
         f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
         f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}\n\n"
         f"Booking <code>{booking}</code>\n\n"
@@ -1215,7 +1217,12 @@ def seat_held_text(
 FERRY_PAY = "y"
 
 
-def build_held_keyboard(trip_index: int, seat: int, can_pay: bool = True) -> dict:
+def seat_list(seats) -> str:
+    """Seat numbers as they travel on a button: "3,4,5"."""
+    many = seats if isinstance(seats, (list, tuple)) else [seats]
+    return ",".join(str(n) for n in many)
+
+def build_held_keyboard(trip_index: int, seats, can_pay: bool = True) -> dict:
     """Offered under a held seat: go and pay for it, or leave it.
 
     Payment is only offered when there is a passenger to put on the ticket.
@@ -1228,7 +1235,9 @@ def build_held_keyboard(trip_index: int, seat: int, can_pay: bool = True) -> dic
             [
                 {
                     "text": "💳  Continue to payment",
-                    "callback_data": ferry_callback(FERRY_PAY, f"{trip_index}.{seat}"),
+                    "callback_data": ferry_callback(
+                        FERRY_PAY, f"{trip_index}." + seat_list(seats)
+                    ),
                 }
             ]
         )
@@ -1241,12 +1250,14 @@ def build_held_keyboard(trip_index: int, seat: int, can_pay: bool = True) -> dic
     return {"inline_keyboard": rows}
 
 
-def ferry_payment_text(who: str, sail, seat: int, booking: str, link: str) -> str:
+def ferry_payment_text(
+    who: str, sail, seat, booking: str, link: str, total: float | None = None
+) -> str:
     """The link to pay on, and what it is for."""
     return (
         f"💳 <b>{who}</b> · seat <b>{seat}</b>\n"
         f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
-        f"<b>MVR {sail.fare:.0f}</b>\n"
+        f"<b>MVR {(sail.fare if total is None else total):.0f}</b>\n"
         f"Booking <code>{booking}</code>\n\n"
         f'<a href="{link}">Pay on RTL\'s bank page</a>\n\n'
         "The card goes in on that page, which is the bank's, not Mind's. "
@@ -1284,4 +1295,143 @@ def ferry_ask_who_text() -> str:
         "<code>Mohamed Maazinu A375667</code>\n\n"
         "This is used for this ticket only and is not saved. It does stay in "
         "this chat's history, which is Telegram's, not Mind's."
+    )
+
+
+FERRY_COUNT = "n"
+# RTL's own limit, from afcConstants.
+MAX_PASSENGERS = 10
+
+
+def build_count_keyboard(most: int = 6) -> dict:
+    """How many are travelling, before any seat is picked."""
+    row = [
+        {"text": str(n), "callback_data": ferry_callback(FERRY_COUNT, str(n))}
+        for n in range(1, most + 1)
+    ]
+    return {
+        "inline_keyboard": [
+            row,
+            [
+                {"text": "‹  Sailings", "callback_data": ferry_callback(FERRY_TRIP, "back")},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ],
+        ]
+    }
+
+
+def count_text(sail) -> str:
+    return (
+        f"🚤 {sail.departs_at} → {sail.arrives_at} · {sail.route} · "
+        f"MVR {sail.fare:.0f} each\n\n"
+        f"How many are travelling? {sail.seats_free} seats free."
+    )
+
+
+def build_seat_map_keyboard(sail, trip_index: int, picked=()) -> dict:
+    """Every seat in its place: free ones tappable, taken shown, picked ticked.
+
+    A list of free numbers says how many are left. A map says where they are,
+    which is what somebody choosing cares about - by a window, at the front,
+    or simply next to the person they are travelling with.
+    """
+    chosen = set(picked or ())
+    free = set(sail.free_seats)
+    every = set(free) | set(getattr(sail, "taken_seats", ()) or ())
+    if not every:
+        every = free
+    rows: list[list[dict]] = []
+    for row in seat_rows(sorted(every)):
+        buttons = []
+        for seat in row:
+            if seat is None:
+                buttons.append({"text": " ", "callback_data": CB_NOOP})
+            elif seat in chosen:
+                buttons.append(
+                    {
+                        "text": f"✓{seat}",
+                        "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
+                    }
+                )
+            elif seat in free:
+                buttons.append(
+                    {
+                        "text": str(seat),
+                        "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
+                    }
+                )
+            else:
+                buttons.append({"text": "✕", "callback_data": CB_NOOP})
+        rows.append(buttons)
+    rows.append(
+        [
+            {"text": "‹  Sailings", "callback_data": ferry_callback(FERRY_TRIP, "back")},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def seats_pick_text(origin: str, destination: str, sail, wanted: int, picked) -> str:
+    """How many seats are still to choose, and which are chosen."""
+    chosen = list(picked or ())
+    left = wanted - len(chosen)
+    if chosen:
+        listed = ", ".join(str(seat) for seat in chosen)
+        so_far = f"\nPicked: <b>{listed}</b>"
+    else:
+        so_far = ""
+    if left > 0:
+        asking = f"Pick {left} more seat{'s' if left != 1 else ''}."
+    else:
+        # The warning belongs on the step that commits, not the one that
+        # chooses: holding takes seats off a boat other people are booking.
+        many = "s" if len(chosen) != 1 else ""
+        asking = "\n\n".join(
+            [
+                "That is all of them.",
+                f"Holding takes the seat{many} off the boat for everybody else "
+                "until paid for or the hold runs out. Mind cannot pay: that "
+                "needs your card.",
+            ]
+        )
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
+        f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
+        f"MVR {sail.fare:.0f} each{so_far}\n\n"
+        f"{asking}\n"
+        "Three each side of the aisle, as they are on the boat. ✕ is taken."
+    )
+
+
+def build_seats_confirm_keyboard(trip_index: int, picked) -> dict:
+    """Once enough seats are picked: hold them, or start the picking again."""
+    chosen = ",".join(str(seat) for seat in picked)
+    listed = ", ".join(str(seat) for seat in picked)
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"✅  Hold {listed}",
+                    "callback_data": ferry_callback(FERRY_HOLD, f"{trip_index}.{chosen}"),
+                }
+            ],
+            [
+                {"text": "↺  Pick again", "callback_data": ferry_callback(FERRY_TRIP, str(trip_index))},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ],
+        ]
+    }
+
+
+def ask_who_text(count: int) -> str:
+    """Asking for however many people are on the booking."""
+    if count == 1:
+        return ferry_ask_who_text()
+    return (
+        f"🎫 <b>Who is travelling?</b>\n\n"
+        f"{count} passengers, one per line, name and ID together:\n"
+        "<code>Mohamed Maazinu A375667\nAdam Rilwan A227559</code>\n\n"
+        "Used for this ticket only and not saved. It does stay in this chat's "
+        "history, which is Telegram's, not Mind's."
     )

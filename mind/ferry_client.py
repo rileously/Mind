@@ -424,10 +424,9 @@ class Reservation:
 
 def reserve_body(
     sail,
-    seat: int,
+    seats,
     origin_code: str,
     destination_code: str,
-    passengers: int = 1,
     deck: str = DEFAULT_DECK,
 ) -> dict:
     """The request RTL's own page sends when somebody presses Select.
@@ -436,13 +435,15 @@ def reserve_body(
     every call that succeeds takes a real seat out of a real ferry and there is
     no polite way to discover a payload by trying.
     """
+    wanted = [int(s) for s in (seats if isinstance(seats, (list, tuple)) else [seats])]
+    if not wanted:
+        raise FerryError("No seat was chosen.")
     return {
-        "products": [
-            {"productCode": REGULAR_PRODUCT, "passengerCount": max(1, int(passengers))}
-        ],
+        "products": [{"productCode": REGULAR_PRODUCT, "passengerCount": len(wanted)}],
         "startStation": str(origin_code),
         "endStation": str(destination_code),
-        "totalPrice": float(sail.fare or 0),
+        # The fare RTL quotes is per person.
+        "totalPrice": float(sail.fare or 0) * len(wanted),
         "deviceType": WEB_DEVICE,
         "qrType": ONE_WAY,
         "inbound": [
@@ -450,7 +451,9 @@ def reserve_body(
                 "scheduleId": sail.schedule_id,
                 "sourceStation": str(origin_code),
                 "destinationStation": str(destination_code),
-                "seats": [{"deckCode": str(deck), "seatNumber": int(seat)}],
+                "seats": [
+                    {"deckCode": str(deck), "seatNumber": number} for number in wanted
+                ],
             }
         ],
         "outbound": None,
@@ -558,8 +561,8 @@ def id_type_value(stored: str) -> str:
 def payment_body(
     booking_id: str,
     sail,
-    seat: int,
-    passenger: Passenger,
+    seats,
+    people,
     contact: Contact,
     deck: str = DEFAULT_DECK,
 ) -> dict:
@@ -572,13 +575,20 @@ def payment_body(
     """
     if not booking_id:
         raise FerryError("There is no booking to pay for.")
-    if not passenger.name or not passenger.id_number:
-        raise FerryError("The passenger needs a name and an ID number.")
+    wanted = [int(s) for s in (seats if isinstance(seats, (list, tuple)) else [seats])]
+    riders = list(people) if isinstance(people, (list, tuple)) else [people]
+    if not riders or any(not r.name or not r.id_number for r in riders):
+        raise FerryError("Every passenger needs a name and an ID number.")
+    if len(riders) != len(wanted):
+        raise FerryError(
+            f"{len(wanted)} seats are held but {len(riders)} "
+            f"passenger{'s' if len(riders) != 1 else ''} were given."
+        )
     return {
         "bookingId": booking_id,
         "rrn": "",
         "qrType": ONE_WAY,
-        "totalPrice": float(sail.fare or 0),
+        "totalPrice": float(sail.fare or 0) * len(wanted),
         "deviceType": WEB_DEVICE,
         "vehicleType": VEHICLE_FERRY,
         "paymentType": PAYMENT_TYPE_CARD,
@@ -589,7 +599,7 @@ def payment_body(
         "cardId": None,
         "isConcessional": 0,
         "isDnrVerified": 0,
-        "customerName": contact.name or passenger.name,
+        "customerName": contact.name or riders[0].name,
         "customerEmail": contact.email,
         "customerPhone": contact.phone,
         "inbound": [
@@ -600,17 +610,20 @@ def payment_body(
                 # name is the reason this took three tries.
                 "selectedSeats": [
                     {
-                        "customerCategoryId": id_type_value(passenger.id_type),
-                        "customerId": passenger.id_number,
-                        "customerName": passenger.name,
-                        "dob": passenger.date_of_birth,
+                        "customerCategoryId": id_type_value(rider.id_type),
+                        "customerId": rider.id_number,
+                        "customerName": rider.name,
+                        "dob": rider.date_of_birth,
                         "productCode": REGULAR_PRODUCT,
-                        "isPrimary": 1,
+                        # The first person on the booking is the one RTL
+                        # treats as its owner.
+                        "isPrimary": 1 if position == 0 else 0,
                         "isAccompanied": 0,
-                        "seatNumber": int(seat),
+                        "seatNumber": number,
                         "deckCode": str(deck),
-                        "passengerCount": 0,
+                        "passengerCount": position,
                     }
+                    for position, (rider, number) in enumerate(zip(riders, wanted))
                 ],
             }
         ],
@@ -671,6 +684,19 @@ ID_PATTERN = re.compile(r"^[Aa][0-9]{6}$")
 
 def looks_like_id(text: str) -> bool:
     return bool(ID_PATTERN.match((text or "").strip()))
+
+
+def parse_passengers(text: str) -> list:
+    """One passenger per line, for a booking with more than one seat."""
+    found = []
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        who = parse_passenger(line)
+        if who is None:
+            return []
+        found.append(who)
+    return found
 
 
 def parse_passenger(text: str) -> Passenger | None:
