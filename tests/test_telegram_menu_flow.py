@@ -678,7 +678,21 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         bridge.ferry_reserve = refuse
         self.addCleanup(setattr, bridge, "ferry_reserve", original)
         self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
-        self.assertIn("Seat already taken", " ".join(self.client.answered))
+        # In the panel, not a second answer to the same tap: Telegram accepts
+        # one answer per tap and drops the rest, so an error sent that way is
+        # an error nobody sees. That is exactly how a dead button looked.
+        shown = str(self.client.edited or self.client.sent)
+        self.assertIn("Seat already taken", shown)
+
+    def test_a_tap_is_never_answered_twice(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import FerryError
+
+        original = bridge.ferry_reserve
+        bridge.ferry_reserve = lambda body: (_ for _ in ()).throw(FerryError("nope"))
+        self.addCleanup(setattr, bridge, "ferry_reserve", original)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
+        self.assertLessEqual(len(self.client.answered), 1)
 
     def test_payment_is_not_offered_with_nobody_to_put_on_the_ticket(self):
         # A button whose only purpose is to explain why it cannot work asks

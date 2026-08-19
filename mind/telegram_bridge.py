@@ -127,6 +127,7 @@ from .telegram_ui import (
     build_seat_confirm_keyboard,
     build_held_keyboard,
     ferry_payment_text,
+    ferry_payment_failed_text,
     FERRY_PAY,
     FERRY_HOLD,
     build_sailings_keyboard,
@@ -2339,10 +2340,12 @@ class TelegramBridge(QObject):
                 ferry_reserve_body(sail, int(seat), origin.code, destination.code)
             )
         except FerryError as exc:
-            # RTL's own words: "seat already taken" needs a different answer
-            # from "could not reach RTL".
-            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
-            self._handle_ferry_trip(client, chat_id, message_id, index, stops)
+            # Same reason as above: the tap has already been answered, so this
+            # goes where it can be read.
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                f"🚤 {exc}", build_ferry_again_keyboard(), html=True,
+            )
             return
         self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
         state["booking"] = held.booking_id
@@ -2407,7 +2410,14 @@ class TelegramBridge(QObject):
                 ferry_payment_body(booking, sail, int(seat), passenger, contact)
             )
         except FerryError as exc:
-            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+            # Into the panel, not a second answer_callback_query: Telegram
+            # takes one answer per tap and quietly drops the rest, so an error
+            # reported that way is an error nobody ever sees.
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ferry_payment_failed_text(booking, str(exc)),
+                build_ferry_again_keyboard(), html=True,
+            )
             return
         self.log.emit(f"Telegram: ferry payment link for booking {booking}")
         self._replace_panel(

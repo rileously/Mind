@@ -1260,3 +1260,25 @@ def ferry_payment_text(who: str, sail, seat: int, booking: str, link: str) -> st
         "The card goes in on that page, which is the bank's, not Mind's. "
         "The ticket is emailed once it goes through."
     )
+
+
+def ferry_payment_failed_text(booking: str, reason: str) -> str:
+    """Why the payment link did not come, in a place it can be read.
+
+    A refused payment is not a refused seat: the hold is still there, and
+    saying so stops somebody holding another one on top of it.
+    """
+    denied = "403" in reason or "401" in reason
+    lines = [f"💳 RTL would not start the payment.\n", f"<i>{reason}</i>", ""]
+    if denied:
+        lines += [
+            "That is a refusal to serve the request rather than a problem with "
+            "the booking. Paying needs a signed-in RTL session, and signing in "
+            "needs the captcha on their login page - which Mind cannot do.",
+            "",
+        ]
+    lines += [
+        f"Seat is still held under <code>{booking}</code>. "
+        "Pay for it in the RTL app or at rtl.mv, where you are already signed in."
+    ]
+    return "\n".join(lines)
