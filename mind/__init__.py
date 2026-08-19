@@ -1,3 +1,3 @@
 """Mind desktop application."""
 
-__version__ = "0.3.54"
+__version__ = "0.3.55"

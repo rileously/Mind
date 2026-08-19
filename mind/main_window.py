@@ -99,7 +99,7 @@ from .selection import (
 )
 from .hotspot import BANDS as HOTSPOT_BAND_CHOICES
 from .ocr import OcrError, extract_text_from_image
-from .sms import matching, read_messages, unread
+from .sms import SmsError, matching, read_messages, unread
 from .selection_monitor import SelectionMonitor
 from .single_instance import action_message_id, show_message_id
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
@@ -1825,7 +1825,7 @@ class MessagesWorker(QRunnable):
                 self.signals.completed.emit(False, "No phone is paired yet.")
                 return
             self.signals.completed.emit(True, read_messages(phone, self.limit))
-        except AdbError as exc:
+        except (AdbError, SmsError) as exc:
             self.signals.completed.emit(False, str(exc))
 
 
@@ -1848,6 +1848,11 @@ class MessagesPage(QWidget):
         self._messages: list = []
         self._shown: list = []
         self._busy = False
+        # What the last attempt to ask the phone came back with. Kept because
+        # the search box redraws the list, and a redraw must not overwrite the
+        # reason the list is empty with a guess about it.
+        self._trouble = ""
+        self._asked = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(30, 26, 30, 26)
@@ -1903,6 +1908,7 @@ class MessagesPage(QWidget):
             )
             return
         self._busy = True
+        self._trouble = ""
         self.refresh_button.setEnabled(False)
         self.status_label.setText("Asking the phone...")
         worker = MessagesWorker(self.store, MESSAGE_LIMIT)
@@ -1912,11 +1918,14 @@ class MessagesPage(QWidget):
     def _arrived(self, ok: bool, payload) -> None:
         self._busy = False
         self.refresh_button.setEnabled(True)
+        self._asked = True
         if not ok:
             # The phone's own words. "device not found" means something
             # different from "permission denied", and both need the person
-            # reading them to do something different.
-            self.status_label.setText(str(payload))
+            # reading them to do something different - and both have to
+            # survive the next keystroke in the search box.
+            self._trouble = str(payload)
+            self.status_label.setText(self._trouble)
             return
         self._messages = list(payload)
         self._render()
@@ -1940,10 +1949,21 @@ class MessagesPage(QWidget):
         self._say_what_is_here()
 
     def _say_what_is_here(self) -> None:
+        # Order matters: what is happening now, then what went wrong, then what
+        # is here. Typing in the search box redraws the list, and it must not
+        # report an empty inbox while the phone is still being asked or when
+        # the asking failed.
+        if self._busy:
+            self.status_label.setText("Asking the phone...")
+            return
+        if self._trouble:
+            self.status_label.setText(self._trouble)
+            return
         if not self._messages:
             self.status_label.setText(
-                "No messages yet. Press Refresh, with the phone paired and "
-                "wireless debugging on."
+                "No messages on the phone."
+                if self._asked
+                else "Press Refresh to read the phone's messages."
             )
             return
         waiting = unread(self._messages)

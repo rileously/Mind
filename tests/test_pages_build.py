@@ -76,5 +76,50 @@ class PageBuildTests(unittest.TestCase):
                     refresh()
 
 
+class MessagesPageStatus(unittest.TestCase):
+    """What the Messages page says while it does not yet have messages.
+
+    The search box redraws the list on every keystroke, and the redraw writes
+    the status line. So a keystroke arriving while the phone is being asked, or
+    after the asking failed, must not replace the real reason with a cheerful
+    guess that the inbox is empty.
+    """
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        import mind.main_window as window
+
+        self.page = window.MessagesPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    def test_before_anything_is_asked_it_says_so(self):
+        self.page._render()
+        self.assertIn("Press Refresh", self.page.status_label.text())
+
+    def test_a_keystroke_while_asking_does_not_claim_an_empty_inbox(self):
+        self.page._busy = True
+        self.page.search.setText("anything")
+        self.assertIn("Asking the phone", self.page.status_label.text())
+
+    def test_a_keystroke_after_a_failure_keeps_the_failure(self):
+        self.page._arrived(False, "device 'pixel' not found")
+        self.page.search.setText("anything")
+        self.assertIn("not found", self.page.status_label.text())
+
+    def test_a_phone_with_no_messages_reads_differently_from_never_asking(self):
+        self.page._arrived(True, [])
+        self.assertIn("No messages on the phone", self.page.status_label.text())
+
+    def test_no_phone_paired_is_said_without_starting_a_worker(self):
+        self.page.refresh()
+        self.assertIn("No phone is paired", self.page.status_label.text())
+        self.assertFalse(self.page._busy)
+
+
 if __name__ == "__main__":
     unittest.main()

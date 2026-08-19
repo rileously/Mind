@@ -37,6 +37,10 @@ DEFAULT_LIMIT = 300
 _ROW = re.compile(r"^Row: (\d+) (.*)$", re.DOTALL)
 
 
+class SmsError(RuntimeError):
+    """Something the person reading it can act on."""
+
+
 @dataclass(frozen=True)
 class Message:
     """One message, as the phone keeps it."""
@@ -152,7 +156,18 @@ def read_messages(phone, limit: int = DEFAULT_LIMIT, timeout: float = 30.0) -> l
         f"'date DESC LIMIT {count}'",
         timeout=timeout,
     )
-    return parse_messages(payload)
+    messages = parse_messages(payload)
+    if messages:
+        return messages
+    # "content" prints its usage on stdout and exits zero, so a query it did
+    # not understand arrives looking exactly like a phone with no messages.
+    # Anything that is not a row and not the phone saying there were none is
+    # therefore worth raising: a wrong argument here should not be reported to
+    # somebody as an empty inbox.
+    spoken = [line.strip() for line in (payload or "").splitlines() if line.strip()]
+    if not spoken or spoken[0].lower().startswith("no result"):
+        return []
+    raise SmsError(f"The phone did not return messages: {spoken[0][:160]}")
 
 
 def matching(messages: list[Message], text: str) -> list[Message]:
