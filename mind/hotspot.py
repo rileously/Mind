@@ -166,6 +166,7 @@ def _default_runner(arguments: list[str], timeout: float) -> tuple[int, str, str
             arguments,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

@@ -121,6 +121,7 @@ def _run(arguments: list[str], timeout: float = 20.0) -> str:
             ],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

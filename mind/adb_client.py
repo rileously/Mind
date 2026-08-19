@@ -231,7 +231,8 @@ def _default_runner(arguments: list[str], timeout: float) -> tuple[int, str, str
         done = subprocess.run(
             arguments,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

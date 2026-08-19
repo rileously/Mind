@@ -93,6 +93,7 @@ def _create_start_menu_shortcut(target: Path) -> None:
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=30,
         creationflags=CREATE_NO_WINDOW,
     )

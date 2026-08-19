@@ -25,6 +25,7 @@ def _descendant_process_ids(process_id: int) -> list[int]:
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=8,
             creationflags=CREATE_NO_WINDOW,
         )

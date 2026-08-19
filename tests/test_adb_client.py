@@ -421,5 +421,48 @@ adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.   device product:frankel model:
         self.assertTrue(merged[0].serial.endswith("._tcp."))
 
 
+class WhatThePhoneSays(unittest.TestCase):
+    """adb speaks UTF-8, and this machine may not.
+
+    subprocess with text=True decodes using the machine's own codepage. On a
+    Windows set to cp1252 that raises on bytes the codepage has no character
+    for - and it raises inside subprocess's reader thread, where nothing sees
+    it. The call then returns empty output and a successful exit code, so a
+    phone full of messages in Thaana reads as a phone with none.
+
+    Nothing is mocked here: a real process writes real UTF-8 bytes, because the
+    decoding is the whole point and a fake would decode them the same way twice.
+    """
+
+    def run_it(self, text: str) -> str:
+        import sys
+
+        from mind.adb_client import _default_runner
+
+        program = (
+            "import sys; sys.stdout.buffer.write("
+            + repr(text.encode("utf-8"))
+            + ")"
+        )
+        code, out, _err = _default_runner([sys.executable, "-c", program], 30.0)
+        self.assertEqual(code, 0)
+        return out
+
+    def test_a_byte_the_codepage_has_no_character_for_survives(self):
+        # U+0410 is D0 90 in UTF-8, and 0x90 is undefined in cp1252. That was
+        # the byte in the traceback.
+        wanted = chr(0x410) + chr(0x411)
+        self.assertIn(wanted, self.run_it(wanted))
+
+    def test_thaana_comes_back_as_thaana(self):
+        wanted = chr(0x780) + chr(0x7A6) + chr(0x781)
+        self.assertIn(wanted, self.run_it(wanted))
+
+    def test_an_emoji_does_not_empty_the_whole_reply(self):
+        wanted = "before " + chr(0x1F610) + " after"
+        self.assertIn("before", self.run_it(wanted))
+        self.assertIn("after", self.run_it(wanted))
+
+
 if __name__ == "__main__":
     unittest.main()

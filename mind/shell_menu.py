@@ -166,6 +166,7 @@ def _run_powershell(script: str, timeout: float = 180.0) -> tuple[int, str]:
             ],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

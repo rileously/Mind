@@ -275,6 +275,7 @@ def _run_script(arguments: list[str], timeout: float) -> str:
             + arguments,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )

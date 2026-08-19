@@ -179,6 +179,7 @@ def _run_shutdown(arguments: list[str]) -> None:
             ["shutdown.exe", *arguments],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=15,
             creationflags=CREATE_NO_WINDOW,
         )
@@ -462,6 +463,7 @@ def read_wifi_networks(timeout: float = 15.0) -> frozenset[str]:
             ["netsh", "wlan", "show", "networks"],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )
@@ -494,6 +496,7 @@ def read_network_devices(timeout: float = 15.0) -> dict[str, str]:
             ["arp", "-a"],
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             creationflags=CREATE_NO_WINDOW,
         )
