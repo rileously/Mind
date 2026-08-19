@@ -73,8 +73,9 @@ launch; a folder still in use is never touched.
 - Per-user Windows startup registration
 - First-run offer to install into the Programs folder with a Start Menu entry
 - Automatic cleanup of runtime folders left behind by a crash or forced shutdown
-- Ask from Telegram what sails between two islands today, with departure times, fare
-  and how many seats are left, straight from RTL's own API and without an account
+- Ask from Telegram what sails between two islands today, pick a seat off a map of
+  the boat, and hold it - times, fare and live seats from RTL's own API, with the
+  hold behind a confirmation of its own because it takes a seat off the ferry
 - Pair a phone by showing it a QR code, instead of typing an address and a code
 - Read the phone's messages on the desktop, searchable, with unread marked - no app
   on the phone and nothing stored on the PC

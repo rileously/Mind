@@ -394,3 +394,109 @@ def sailings(
     except ValueError as exc:
         raise FerryError("RTL answered with something that was not JSON.") from exc
     return parse_sailings(payload)
+
+
+RESERVE_URL = "https://bo.rtl.mv:4455/maldives/api/booking/v3/ferries/reserveFerrySeats"
+DEFAULT_DECK = "1"
+
+
+@dataclass(frozen=True)
+class Reservation:
+    """A seat held on a sailing, and how long there is to pay for it."""
+
+    booking_id: str = ""
+    total: float = 0.0
+    held_seconds: int = 0
+    detail: str = ""
+
+    @property
+    def held(self) -> bool:
+        return bool(self.booking_id)
+
+
+def reserve_body(
+    sail,
+    seat: int,
+    origin_code: str,
+    destination_code: str,
+    passengers: int = 1,
+    deck: str = DEFAULT_DECK,
+) -> dict:
+    """The request RTL's own page sends when somebody presses Select.
+
+    Read out of the site's compiled source rather than guessed at, because
+    every call that succeeds takes a real seat out of a real ferry and there is
+    no polite way to discover a payload by trying.
+    """
+    return {
+        "products": [
+            {"productCode": REGULAR_PRODUCT, "passengerCount": max(1, int(passengers))}
+        ],
+        "startStation": str(origin_code),
+        "endStation": str(destination_code),
+        "totalPrice": float(sail.fare or 0),
+        "deviceType": WEB_DEVICE,
+        "qrType": ONE_WAY,
+        "inbound": [
+            {
+                "scheduleId": sail.schedule_id,
+                "sourceStation": str(origin_code),
+                "destinationStation": str(destination_code),
+                "seats": [{"deckCode": str(deck), "seatNumber": int(seat)}],
+            }
+        ],
+        "outbound": None,
+    }
+
+
+def parse_reservation(payload: dict) -> Reservation:
+    """What came back from holding a seat."""
+    if not isinstance(payload, dict):
+        raise FerryError("RTL answered with something unreadable.")
+    booking = (
+        payload.get("bookingId")
+        or payload.get("bookingID")
+        or (payload.get("booking") or {}).get("bookingId")
+        if isinstance(payload.get("booking"), dict)
+        else payload.get("bookingId")
+    )
+    if not booking:
+        detail = payload.get("message") or "RTL did not hold the seat."
+        raise FerryError(str(detail))
+    return Reservation(
+        booking_id=str(booking),
+        total=float(payload.get("totalPrice") or payload.get("totalFare") or 0),
+        held_seconds=int(payload.get("timeToConfirm") or 0),
+        detail=str(payload.get("message") or ""),
+    )
+
+
+def reserve(body: dict, token: str = "", opener=None) -> Reservation:
+    """Hold the seat. One call, and it has a consequence at the other end."""
+    request = urllib.request.Request(
+        RESERVE_URL, data=json.dumps(body).encode("utf-8"), method="POST"
+    )
+    for name, value in {**HEADERS, "Content-Type": "application/json"}.items():
+        request.add_header(name, value)
+    if token:
+        request.add_header("Authorization", token)
+    send = opener or (
+        lambda r: urllib.request.urlopen(
+            r, timeout=TIMEOUT, context=ssl.create_default_context()
+        )
+    )
+    try:
+        with send(request) as answer:
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read(300).decode("utf-8", "replace")
+        try:
+            said = json.loads(body_text).get("message")
+        except ValueError:
+            said = ""
+        raise FerryError(said or f"RTL answered HTTP {exc.code}.") from exc
+    except urllib.error.URLError as exc:
+        raise FerryError(f"Could not reach RTL: {getattr(exc, 'reason', exc)}") from exc
+    except ValueError as exc:
+        raise FerryError("RTL answered with something that was not JSON.") from exc
+    return parse_reservation(payload)

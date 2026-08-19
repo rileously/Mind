@@ -625,3 +625,69 @@ class MenuReachTests(BridgeHarness, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
+    """A tap that takes a seat off a ferry is not the tap that chose it.
+
+    Picking a seat and holding it are the same gesture in most pickers. Here
+    they must not be: a mis-tap costs somebody else a seat until the hold runs
+    out, so the seat tap only ever asks.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from mind.ferry_client import Sailing, Stop
+
+        self.sail = Sailing(
+            schedule_id="125034", fare=70, route="R1C5", boat="RTL109",
+            departs="20260820083000", arrives="20260820092000",
+            free_seats=(3, 7), taken_seats=(19,), seats_free=2, seats_total=3,
+        )
+        self.stops = [
+            Stop(name="Hdh.Naivaadhoo", code="105"),
+            Stop(name="Hdh.Kulhudhuffushi", code="104"),
+        ]
+        self.bridge._ferry_pick[7] = {
+            "stage": "sailings", "origin": "105", "destination": "104",
+            "sailings": [self.sail], "when": "Thu 20 August",
+        }
+
+    def test_tapping_a_seat_only_asks(self):
+        held = []
+        import mind.telegram_bridge as bridge
+
+        self.bridge._handle_ferry_seat(self.client, 7, 500, "0.3", self.stops)
+        shown = str(self.client.edited or self.client.sent)
+        self.assertIn("Holding it takes the seat off the boat", shown)
+        self.assertEqual(held, [])
+
+    def test_the_asking_offers_a_separate_button_to_hold(self):
+        self.bridge._handle_ferry_seat(self.client, 7, 500, "0.3", self.stops)
+        markup = str((self.client.edited or self.client.sent))
+        self.assertIn("Hold seat 3", markup)
+
+    def test_holding_says_what_rtl_said_when_it_refuses(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import FerryError
+
+        def refuse(body):
+            raise FerryError("Seat already taken")
+
+        original = bridge.ferry_reserve
+        bridge.ferry_reserve = refuse
+        self.addCleanup(setattr, bridge, "ferry_reserve", original)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops)
+        self.assertIn("Seat already taken", " ".join(self.client.answered))
+
+    def test_a_held_seat_reports_its_booking_and_that_it_is_unpaid(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import Reservation
+
+        original = bridge.ferry_reserve
+        bridge.ferry_reserve = lambda body: Reservation(booking_id="00000014B909")
+        self.addCleanup(setattr, bridge, "ferry_reserve", original)
+        self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops)
+        shown = str(self.client.edited or self.client.sent)
+        self.assertIn("00000014B909", shown)
+        self.assertIn("Not paid yet", shown)

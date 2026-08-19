@@ -371,3 +371,60 @@ class TheSeatMap(unittest.TestCase):
         rows = build_seat_map_keyboard(sail, 2)["inline_keyboard"]
         seat = [b for row in rows for b in row if b["text"] == "7"][0]
         self.assertTrue(seat["callback_data"].endswith("2.7"))
+
+
+class HoldingASeat(unittest.TestCase):
+    """The one call in here with a consequence at the other end.
+
+    A seat held is a seat nobody else can buy for the next few minutes, so the
+    request is built from the shape RTL's own page sends rather than discovered
+    by trying things until one works.
+    """
+
+    def sail(self):
+        from mind.ferry_client import Sailing
+
+        return Sailing(schedule_id="125034", fare=70, route="R1C5")
+
+    def test_the_seat_travels_with_its_deck(self):
+        from mind.ferry_client import reserve_body
+
+        body = reserve_body(self.sail(), 7, "105", "104")
+        seat = body["inbound"][0]["seats"][0]
+        self.assertEqual(seat, {"deckCode": "1", "seatNumber": 7})
+
+    def test_the_sailing_is_named_by_its_schedule(self):
+        from mind.ferry_client import reserve_body
+
+        self.assertEqual(reserve_body(self.sail(), 7, "105", "104")["inbound"][0]["scheduleId"], "125034")
+
+    def test_a_one_way_carries_no_outbound(self):
+        from mind.ferry_client import reserve_body
+
+        self.assertIsNone(reserve_body(self.sail(), 7, "105", "104")["outbound"])
+
+    def test_the_price_is_the_sailings_own(self):
+        from mind.ferry_client import reserve_body
+
+        self.assertEqual(reserve_body(self.sail(), 7, "105", "104")["totalPrice"], 70)
+
+    def test_a_reply_without_a_booking_is_a_failure_not_a_hold(self):
+        # The worst outcome would be reporting a seat held when it is not.
+        from mind.ferry_client import FerryError, parse_reservation
+
+        with self.assertRaises(FerryError):
+            parse_reservation({"message": "Seat already taken"})
+
+    def test_a_held_seat_reports_its_booking(self):
+        from mind.ferry_client import parse_reservation
+
+        held = parse_reservation({"bookingId": "00000014B8E4", "totalPrice": 70})
+        self.assertTrue(held.held)
+        self.assertEqual(held.booking_id, "00000014B8E4")
+
+    def test_the_refusal_rtl_gives_is_the_one_reported(self):
+        from mind.ferry_client import FerryError, parse_reservation
+
+        with self.assertRaises(FerryError) as caught:
+            parse_reservation({"message": "Ticket mode is not found in request"})
+        self.assertIn("Ticket mode", str(caught.exception))

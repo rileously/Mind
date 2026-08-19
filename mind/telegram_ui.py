@@ -1159,3 +1159,52 @@ def build_seat_map_keyboard(sail, trip_index: int) -> dict:
         ]
     )
     return {"inline_keyboard": rows}
+
+
+FERRY_HOLD = "d"
+
+
+def build_seat_confirm_keyboard(trip_index: int, seat: int) -> dict:
+    """Between picking a seat and holding it.
+
+    A tap that takes a seat out of a ferry should not be the same tap that
+    chooses which seat to look at. This is the step in between.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"✅  Hold seat {seat}",
+                    "callback_data": ferry_callback(FERRY_HOLD, f"{trip_index}.{seat}"),
+                }
+            ],
+            [
+                {"text": "‹  Seats", "callback_data": ferry_callback(FERRY_TRIP, str(trip_index))},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ],
+        ]
+    }
+
+
+def seat_confirm_text(origin: str, destination: str, sail, seat: int, when: str) -> str:
+    """What holding it will do, said before it is done."""
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
+        f"{when} · <b>{sail.departs_at} → {sail.arrives_at}</b>\n\n"
+        f"Seat <b>{seat}</b> · {sail.route} · boat {sail.boat}\n"
+        f"Fare <b>MVR {sail.fare:.0f}</b>\n\n"
+        "Holding it takes the seat off the boat for everybody else until it is "
+        "paid for or the hold runs out. Mind cannot pay: that needs your card."
+    )
+
+
+def seat_held_text(origin: str, destination: str, sail, seat: int, booking: str) -> str:
+    """The booking to carry to RTL, and the plain fact that it is not paid."""
+    return (
+        f"✅ Seat <b>{seat}</b> held.\n\n"
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
+        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}\n\n"
+        f"Booking <code>{booking}</code>\n\n"
+        "<b>Not paid yet.</b> Open the RTL app or rtl.mv, find this booking and "
+        "pay for it, or the seat goes back on sale when the hold runs out."
+    )

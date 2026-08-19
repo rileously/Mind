@@ -122,7 +122,10 @@ from .telegram_ui import (
     ferry_choices_text,
     sailings_text,
     seat_pick_text,
-    seat_chosen_text,
+    seat_confirm_text,
+    seat_held_text,
+    build_seat_confirm_keyboard,
+    FERRY_HOLD,
     build_sailings_keyboard,
     build_seat_map_keyboard,
     FERRY_TRIP,
@@ -158,6 +161,8 @@ from .ferry_client import (
     stops_in as ferry_stops_in,
     stop_by_code as ferry_stop_by_code,
     sailings as ferry_sailings,
+    reserve as ferry_reserve,
+    reserve_body as ferry_reserve_body,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -2168,6 +2173,10 @@ class TelegramBridge(QObject):
             self._handle_ferry_seat(client, chat_id, message_id, value, stops)
             return
 
+        if kind == FERRY_HOLD:
+            self._handle_ferry_hold(client, chat_id, callback_id, message_id, value, stops)
+            return
+
         if kind != FERRY_ISLAND:
             return
         chosen = ferry_stop_by_code(stops, value)
@@ -2281,10 +2290,48 @@ class TelegramBridge(QObject):
             return
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_chosen_text(
+            seat_confirm_text(
                 origin.name, destination.name, sails[int(index)], int(seat),
                 state.get("when", ""),
             ),
+            build_seat_confirm_keyboard(int(index), int(seat)), html=True,
+        )
+
+    def _handle_ferry_hold(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        value: str,
+        stops: list,
+    ) -> None:
+        """Hold the seat. The one thing in here with a consequence at sea."""
+        state = self._ferry_pick.get(chat_id) or {}
+        sails = state.get("sailings") or []
+        origin = ferry_stop_by_code(stops, state.get("origin", ""))
+        destination = ferry_stop_by_code(stops, state.get("destination", ""))
+        index, _, seat = value.partition(".")
+        if origin is None or destination is None or not index.isdigit() or not seat.isdigit():
+            return
+        if int(index) >= len(sails):
+            return
+        sail = sails[int(index)]
+        client.answer_callback_query(callback_id, "Holding the seat…")
+        try:
+            held = ferry_reserve(
+                ferry_reserve_body(sail, int(seat), origin.code, destination.code)
+            )
+        except FerryError as exc:
+            # RTL's own words: "seat already taken" needs a different answer
+            # from "could not reach RTL".
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+            self._handle_ferry_trip(client, chat_id, message_id, index, stops)
+            return
+        self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            seat_held_text(origin.name, destination.name, sail, int(seat), held.booking_id),
             build_ferry_again_keyboard(), html=True,
         )
 
