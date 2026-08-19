@@ -813,6 +813,7 @@ def hotspot_text(
     idle_minutes: int = 0,
     enabled: bool = True,
     match_home: bool = True,
+    band: str = "",
 ) -> str:
     """What the hotspot panel says.
 
@@ -832,6 +833,8 @@ def hotspot_text(
             lines.append(f"{clients} device{'s' if clients != 1 else ''} connected.")
         else:
             lines.append("Nothing has connected yet.")
+        if band:
+            lines.append(f"Band: {band}.")
         if idle_minutes:
             lines.append(
                 f"It turns itself off after {idle_minutes} minutes with nothing connected."

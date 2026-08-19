@@ -13,7 +13,12 @@ param(
     [ValidateSet("status", "start", "stop", "configure")]
     [string]$Action = "status",
     [string]$Ssid = "",
-    [string]$Passphrase = ""
+    [string]$Passphrase = "",
+    # Auto lets Windows choose, which on a PC already on 2.4 GHz usually means
+    # 2.4 GHz anyway - but "usually" is not something to build a room's signal
+    # on, and the lower band is the one that goes through walls.
+    [ValidateSet("", "auto", "2.4", "5", "6")]
+    [string]$Band = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,11 +90,15 @@ function Report() {
     } catch {
         Say "clients" "0"
     }
-    try {
-        $access = $manager.GetCurrentAccessPointConfiguration()
-        Say "ssid" $access.Ssid
-    } catch {
+    # One snapshot for both, so the name and the band cannot disagree.
+    $current = $null
+    try { $current = $manager.GetCurrentAccessPointConfiguration() } catch { }
+    if ($null -ne $current) {
+        Say "ssid" $current.Ssid
+        Say "band" $current.Band
+    } else {
         Say "ssid" ""
+        Say "band" "Auto"
     }
 }
 
@@ -108,6 +117,18 @@ switch ($Action) {
             $access = $manager.GetCurrentAccessPointConfiguration()
             $access.Ssid = $Ssid
             $access.Passphrase = $Passphrase
+            if ($Band) {
+                # Not fatal on its own: an adapter that will not sit on the
+                # asked-for band should still come up on the one it prefers,
+                # carrying the name and password that were the point of the call.
+                $wanted = switch ($Band) {
+                    "2.4" { "TwoPointFourGigahertz" }
+                    "5"   { "FiveGigahertz" }
+                    "6"   { "SixGigahertz" }
+                    default { "Auto" }
+                }
+                try { $access.Band = $wanted } catch { Say "bandrefused" $wanted }
+            }
             AwaitAction $manager.ConfigureAccessPointAsync($access)
         } catch {
             Fail "Windows refused the hotspot name or password."

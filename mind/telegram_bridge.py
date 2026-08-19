@@ -128,7 +128,7 @@ from .telegram_ui import (
 )
 from dataclasses import replace as replace_device
 
-from .hotspot import Hotspot, HotspotError, current_wifi
+from .hotspot import Hotspot, HotspotError, band_label, current_wifi
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
 from .adb_client import AdbError
@@ -764,6 +764,7 @@ class TelegramBridge(QObject):
             wanted,
             idle_minutes=HOTSPOT_IDLE_SECONDS // 60,
             match_home=match_home,
+            band=band_label(state.band),
         )
         return text, build_hotspot_keyboard(
             state.state, matched, state.clients, match_home
@@ -852,6 +853,7 @@ class TelegramBridge(QObject):
         time and never again. There is no third shape without a password:
         Windows accepts WPA2 and WPA3 for a hotspot and nothing else.
         """
+        band = str(config.get("hotspot_band", "auto")).strip() or "auto"
         if bool(config.get("hotspot_match_home_wifi", True)):
             ssid, key = current_wifi()
             if not ssid or len(key) < 8:
@@ -865,9 +867,10 @@ class TelegramBridge(QObject):
                 # sensible thing to do with no instruction to the contrary.
                 return True
         try:
-            if radio.state().ssid == ssid:
+            state = radio.state()
+            if state.ssid == ssid and state.band == band:
                 return True
-            radio.configure(ssid, key)
+            radio.configure(ssid, key, band)
         except HotspotError:
             return False
         return True

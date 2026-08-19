@@ -37,6 +37,16 @@ class HotspotError(RuntimeError):
     """Something the person reading it in the chat can act on."""
 
 
+# What the setting stores, and what the script takes. "auto" is Windows
+# choosing; on a PC already sitting on 2.4 GHz it usually chooses that, but the
+# room at the far end of the house is not a good place to find out.
+BANDS: tuple[tuple[str, str], ...] = (
+    ("auto", "Automatic"),
+    ("2.4", "2.4 GHz - goes through walls"),
+    ("5", "5 GHz - faster, shorter range"),
+)
+
+
 @dataclass(frozen=True)
 class HotspotState:
     """What the hotspot is doing, as Windows describes it."""
@@ -44,6 +54,7 @@ class HotspotState:
     state: str = "unknown"
     clients: int = 0
     ssid: str = ""
+    band: str = "auto"
 
     @property
     def is_on(self) -> bool:
@@ -78,7 +89,25 @@ def parse_report(payload: str) -> HotspotState:
         state=fields.get("state", "unknown").lower(),
         clients=max(0, clients),
         ssid=fields.get("ssid", ""),
+        band=band_from_windows(fields.get("band", "")),
     )
+
+
+def band_from_windows(value: str) -> str:
+    """Windows' enum name as the short form the settings use."""
+    return {
+        "twopointfourgigahertz": "2.4",
+        "fivegigahertz": "5",
+        "sixgigahertz": "6",
+    }.get((value or "").strip().lower(), "auto")
+
+
+def band_label(band: str) -> str:
+    """How a band is written where somebody reads it."""
+    for value, label in BANDS:
+        if value == band:
+            return label
+    return "Automatic"
 
 
 def parse_current_ssid(payload: str) -> str:
@@ -156,7 +185,7 @@ class Hotspot:
     def stop(self) -> HotspotState:
         return self._call("stop", CHANGE_TIMEOUT)
 
-    def configure(self, ssid: str, passphrase: str) -> HotspotState:
+    def configure(self, ssid: str, passphrase: str, band: str = "") -> HotspotState:
         ssid = (ssid or "").strip()
         if not ssid:
             raise HotspotError("A hotspot needs a name.")
@@ -164,7 +193,10 @@ class Hotspot:
             raise HotspotError(
                 f"A hotspot password must be at least {MIN_PASSPHRASE} characters."
             )
-        return self._call("configure", CHANGE_TIMEOUT, "-Ssid", ssid, "-Passphrase", passphrase)
+        extra = ["-Ssid", ssid, "-Passphrase", passphrase]
+        if band and band in {value for value, _label in BANDS}:
+            extra += ["-Band", band]
+        return self._call("configure", CHANGE_TIMEOUT, *extra)
 
 
 def current_wifi(run=_default_runner) -> tuple[str, str]:

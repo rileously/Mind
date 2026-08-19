@@ -148,18 +148,22 @@ class HotspotNamingTests(BridgeHarness, unittest.TestCase):
     """
 
     class FakeRadio:
-        def __init__(self, current=""):
+        def __init__(self, current="", band="auto"):
             self.current = current
-            self.configured: list[tuple[str, str]] = []
+            self.band = band
+            self.configured: list[tuple[str, str, str]] = []
 
         def state(self):
             from mind.hotspot import HotspotState
 
-            return HotspotState(state="off", clients=0, ssid=self.current)
+            return HotspotState(
+                state="off", clients=0, ssid=self.current, band=self.band
+            )
 
-        def configure(self, ssid, passphrase):
-            self.configured.append((ssid, passphrase))
+        def configure(self, ssid, passphrase, band=""):
+            self.configured.append((ssid, passphrase, band))
             self.current = ssid
+            self.band = band or self.band
             return self.state()
 
     def setUp(self):
@@ -172,7 +176,7 @@ class HotspotNamingTests(BridgeHarness, unittest.TestCase):
         config = self.store.set_hotspot_password(self.config, "openthedoor")
         radio = self.FakeRadio(current="DESKTOP-1234")
         self.assertTrue(self.bridge._apply_hotspot_name(radio, config))
-        self.assertEqual(radio.configured, [("Toilet Wi-Fi", "openthedoor")])
+        self.assertEqual(radio.configured, [("Toilet Wi-Fi", "openthedoor", "auto")])
 
     def test_a_hotspot_already_carrying_that_name_is_left_alone(self):
         self.config["hotspot_ssid"] = "Toilet Wi-Fi"
@@ -194,6 +198,24 @@ class HotspotNamingTests(BridgeHarness, unittest.TestCase):
         radio = self.FakeRadio(current="DESKTOP-1234")
         self.assertTrue(self.bridge._apply_hotspot_name(radio, self.config))
         self.assertEqual(radio.configured, [])
+
+    def test_the_band_is_carried_into_the_configure_call(self):
+        self.config["hotspot_ssid"] = "Toilet Wi-Fi"
+        self.config["hotspot_band"] = "2.4"
+        config = self.store.set_hotspot_password(self.config, "openthedoor")
+        radio = self.FakeRadio(current="DESKTOP-1234")
+        self.bridge._apply_hotspot_name(radio, config)
+        self.assertEqual(radio.configured, [("Toilet Wi-Fi", "openthedoor", "2.4")])
+
+    def test_a_band_change_alone_is_enough_to_reconfigure(self):
+        # The name already matches, so only the band differs - and that is
+        # still a reason to write the configuration rather than skip it.
+        self.config["hotspot_ssid"] = "Toilet Wi-Fi"
+        self.config["hotspot_band"] = "2.4"
+        config = self.store.set_hotspot_password(self.config, "openthedoor")
+        radio = self.FakeRadio(current="Toilet Wi-Fi", band="auto")
+        self.bridge._apply_hotspot_name(radio, config)
+        self.assertEqual(radio.configured, [("Toilet Wi-Fi", "openthedoor", "2.4")])
 
     def test_the_password_is_not_stored_as_itself(self):
         config = self.store.set_hotspot_password(self.config, "openthedoor")

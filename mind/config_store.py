@@ -129,6 +129,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # password below instead.
     "hotspot_match_home_wifi": True,
     "hotspot_ssid": "",
+    # "auto", "2.4" or "5". The low band reaches further through walls,
+    # which is the whole reason a PC is being asked to be an access point.
+    "hotspot_band": "auto",
     # Encrypted like the bot token and the router password. It is a Wi-Fi key,
     # and Windows will not run an open hotspot, so there is always one to keep.
     "hotspot_password_protected": "",

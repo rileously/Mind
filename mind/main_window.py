@@ -88,6 +88,7 @@ from .selection import (
     is_notion_input,
     is_question_text,
 )
+from .hotspot import BANDS as HOTSPOT_BAND_CHOICES
 from .ocr import OcrError, extract_text_from_image
 from .selection_monitor import SelectionMonitor
 from .single_instance import action_message_id, show_message_id
@@ -1034,6 +1035,7 @@ class NotificationsPage(QWidget):
 
 ROUTER_PASSWORD_MASK = "•" * 10
 HOTSPOT_PASSWORD_MASK = "•" * 10
+HOTSPOT_BANDS = HOTSPOT_BAND_CHOICES
 
 
 class NetworkDevicesPage(QWidget):
@@ -2168,6 +2170,19 @@ class SettingsPage(QWidget):
         self.hotspot_password.setMaximumWidth(150)
         hotspot_own_row.addWidget(self.hotspot_ssid)
         hotspot_own_row.addWidget(self.hotspot_password)
+        self.hotspot_band = QComboBox()
+        for value, label in HOTSPOT_BANDS:
+            self.hotspot_band.addItem(label, value)
+        self.hotspot_band.setMaximumWidth(230)
+        self._setting_row(
+            telegram_layout,
+            "Which band it broadcasts on",
+            "2.4 GHz travels further through walls and floors, which is usually the "
+            "reason for turning a PC into an access point at all. 5 GHz is faster and "
+            "stops sooner. Automatic lets Windows decide.",
+            self.hotspot_band,
+            "✈",
+        )
         self._setting_row(
             telegram_layout,
             "Or a name of its own",
@@ -2202,6 +2217,7 @@ class SettingsPage(QWidget):
         self.telegram_hotspot.toggled.connect(self.hotspot_match.setEnabled)
         self.telegram_hotspot.toggled.connect(self.hotspot_ssid.setEnabled)
         self.telegram_hotspot.toggled.connect(self.hotspot_password.setEnabled)
+        self.telegram_hotspot.toggled.connect(self.hotspot_band.setEnabled)
         self.telegram_enabled.toggled.connect(self.telegram_send_menu.setEnabled)
         self.secret_shield = ToggleSwitch()
         self._setting_row(
@@ -2519,6 +2535,9 @@ class SettingsPage(QWidget):
             HOTSPOT_PASSWORD_MASK if self.store.get_hotspot_password(config) else ""
         )
         self.hotspot_password.setEnabled(telegram_on and hotspot_on)
+        band_index = self.hotspot_band.findData(str(config.get("hotspot_band", "auto")))
+        self.hotspot_band.setCurrentIndex(max(band_index, 0))
+        self.hotspot_band.setEnabled(telegram_on and hotspot_on)
         self.hotspot_match.setEnabled(telegram_on and hotspot_on)
         self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
         self.telegram_send_menu.setEnabled(telegram_on)
@@ -2586,6 +2605,7 @@ class SettingsPage(QWidget):
                 "telegram_hotspot_enabled": self.telegram_hotspot.isChecked(),
                 "hotspot_match_home_wifi": self.hotspot_match.isChecked(),
                 "hotspot_ssid": self.hotspot_ssid.text().strip(),
+                "hotspot_band": self.hotspot_band.currentData(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
