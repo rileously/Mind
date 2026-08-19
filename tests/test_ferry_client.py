@@ -667,3 +667,96 @@ class MoreThanOnePassenger(unittest.TestCase):
         from mind.ferry_client import parse_passengers
 
         self.assertEqual(parse_passengers("Mohamed Maazinu A375667\nAdam Rilwan"), [])
+
+
+class ThereAndBack(unittest.TestCase):
+    """A return is priced as a pair, not as two singles.
+
+    The second search is what prices it: asking again with the chosen sailing
+    named returns the other direction with a fare covering both. Adding two
+    one-way fares together is refused as "fare validation failed", which says
+    nothing about which of the two numbers was wrong.
+    """
+
+    def legs(self):
+        from mind.ferry_client import Sailing
+
+        return (Sailing(schedule_id="11", fare=70), Sailing(schedule_id="22", fare=130))
+
+    def test_the_pair_price_is_used_whole(self):
+        from mind.ferry_client import reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [1, 2], "105", "106", back_sail=back, back_seats=[5, 6])
+        self.assertEqual(body["totalPrice"], 130)
+
+    def test_a_one_way_still_scales_with_its_seats(self):
+        from mind.ferry_client import Sailing, reserve_body
+
+        body = reserve_body(Sailing(schedule_id="1", fare=35), [1, 2], "105", "106")
+        self.assertEqual(body["totalPrice"], 70)
+
+    def test_a_return_is_marked_as_one(self):
+        from mind.ferry_client import RETURN, reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [1], "105", "106", back_sail=back, back_seats=[5])
+        self.assertEqual(body["qrType"], RETURN)
+
+    def test_the_way_back_runs_the_other_way(self):
+        from mind.ferry_client import reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [1], "105", "106", back_sail=back, back_seats=[5])
+        home = body["outbound"][0]
+        self.assertEqual((home["sourceStation"], home["destinationStation"]), ("106", "105"))
+
+    def test_both_legs_need_the_same_number_of_seats(self):
+        from mind.ferry_client import FerryError, reserve_body
+
+        out, back = self.legs()
+        with self.assertRaises(FerryError):
+            reserve_body(out, [1, 2], "105", "106", back_sail=back, back_seats=[5])
+
+    def test_the_same_people_sit_somewhere_else_on_the_way_back(self):
+        from mind.ferry_client import Contact, Passenger, payment_body
+
+        out, back = self.legs()
+        who = [Passenger(name="A", id_number="A000001"),
+               Passenger(name="B", id_number="A000002")]
+        body = payment_body("B1", out, [1, 2], who, Contact(name="A"),
+                            back_sail=back, back_seats=[5, 6])
+        there = [(r["customerName"], r["seatNumber"]) for r in body["inbound"][0]["selectedSeats"]]
+        home = [(r["customerName"], r["seatNumber"]) for r in body["outbound"][0]["selectedSeats"]]
+        self.assertEqual(there, [("A", 1), ("B", 2)])
+        self.assertEqual(home, [("A", 5), ("B", 6)])
+
+    def test_a_one_way_payment_carries_no_outbound(self):
+        from mind.ferry_client import Contact, Passenger, Sailing, payment_body
+
+        body = payment_body("B1", Sailing(schedule_id="1", fare=35), [1],
+                            [Passenger(name="A", id_number="A000001")], Contact(name="A"))
+        self.assertEqual(body["outbound"], [])
+
+    def test_the_second_search_names_the_sailing_already_chosen(self):
+        import io as _io
+        import json as _json
+        from mind.ferry_client import Sailing, sailings
+
+        captured = {}
+
+        class Answer:
+            def __enter__(self_inner):
+                return _io.BytesIO(b'{"schedules":{"journey":[]}}')
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def opener(request):
+            captured["body"] = _json.loads(request.data.decode())
+            return Answer()
+
+        sailings("105", "106", "20260820", opener=opener, after=Sailing(schedule_id="125034"))
+        self.assertEqual(captured["body"]["scheduleId"], ["125034"])
+        self.assertEqual(captured["body"]["qrType"], 2)
+        self.assertIsNotNone(captured["body"]["outboundTripDate"])

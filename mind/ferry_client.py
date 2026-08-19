@@ -362,6 +362,8 @@ def sailings(
     passengers: int = 1,
     opener=None,
     now=None,
+    coming_back: bool = False,
+    after=None,
 ) -> list[Sailing]:
     """What sails between two stops on a day, and how many seats are left.
 
@@ -372,12 +374,19 @@ def sailings(
         "products": [
             {"productCode": REGULAR_PRODUCT, "passengerCount": max(1, int(passengers))}
         ],
-        # Null, deliberately. See the note above.
-        "scheduleId": None,
+        # Null for a first ask. Naming the sailing already chosen is what
+        # turns the same call into "and what comes back after that one" - the
+        # stations stay as they were, and RTL answers with the other
+        # direction, priced for the pair.
+        "scheduleId": [after.schedule_id] if after is not None else None,
         "deviceType": WEB_DEVICE,
-        "qrType": ONE_WAY,
+        "qrType": RETURN if (coming_back or after is not None) else ONE_WAY,
         "inboundTripDate": trip_stamp(date_text, now=now),
-        "outboundTripDate": None,
+        "outboundTripDate": (
+            trip_stamp(date_text, now=now)
+            if (coming_back or after is not None)
+            else None
+        ),
         "sourceStation": str(origin_code),
         "destinationStation": str(destination_code),
     }
@@ -423,6 +432,22 @@ class Reservation:
         return bool(self.booking_id)
 
 
+def _total(sail, back_sail, people: int) -> float:
+    """What RTL expects to be charged.
+
+    A one-way fare is quoted for the passengers asked about, so it is used as
+    it comes. A return is not two singles: the second search prices the pair,
+    and its fare is already the whole journey - adding the two together is
+    refused as "fare validation failed", which says nothing about which of the
+    two numbers was wrong.
+    """
+    if back_sail is not None:
+        return float(back_sail.fare or 0)
+    quoted = float(sail.fare or 0)
+    # Quoted for one when the search asked about one, so it scales with seats.
+    return quoted * max(1, people) if quoted and people else quoted
+
+
 def _leg(sail, seats, origin_code: str, destination_code: str, deck: str) -> dict:
     """One direction of a journey, as reserving describes it."""
     return {
@@ -454,10 +479,7 @@ def reserve_body(
     coming_back = [int(n) for n in (back_seats or [])]
     if back_sail is not None and len(coming_back) != len(wanted):
         raise FerryError("The way back needs as many seats as the way there.")
-    # The fare RTL quotes is per person, per direction.
-    total = float(sail.fare or 0) * len(wanted)
-    if back_sail is not None:
-        total += float(back_sail.fare or 0) * len(coming_back)
+    total = _total(sail, back_sail, len(wanted))
     return {
         "products": [{"productCode": REGULAR_PRODUCT, "passengerCount": len(wanted)}],
         "startStation": str(origin_code),
@@ -625,9 +647,7 @@ def payment_body(
     coming_back = [int(n) for n in (back_seats or [])]
     if back_sail is not None and len(coming_back) != len(wanted):
         raise FerryError("The way back needs as many seats as the way there.")
-    total = float(sail.fare or 0) * len(wanted)
-    if back_sail is not None:
-        total += float(back_sail.fare or 0) * len(coming_back)
+    total = _total(sail, back_sail, len(wanted))
     return {
         "bookingId": booking_id,
         "rrn": "",

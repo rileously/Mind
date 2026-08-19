@@ -1251,18 +1251,32 @@ def build_held_keyboard(trip_index: int, seats, can_pay: bool = True) -> dict:
 
 
 def ferry_payment_text(
-    who: str, sail, seat, booking: str, link: str, total: float | None = None
+    who: str, sail, seat, booking: str, link: str, total: float | None = None,
+    back_sail=None, back_seats=None,
 ) -> str:
-    """The link to pay on, and what it is for."""
-    return (
-        f"💳 <b>{who}</b> · seat <b>{seat}</b>\n"
+    """The link to pay on, and what it is for.
+
+    Both legs when there are two, because a return that shows only the way
+    there looks like the wrong ticket at exactly the moment somebody is about
+    to pay for it.
+    """
+    lines = [
+        f"💳 <b>{who}</b> · seat <b>{seat}</b>",
         f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
-        f"<b>MVR {(sail.fare if total is None else total):.0f}</b>\n"
-        f"Booking <code>{booking}</code>\n\n"
-        f'<a href="{link}">Pay on RTL\'s bank page</a>\n\n'
+        f"<b>MVR {(sail.fare if total is None else total):.0f}</b>",
+    ]
+    if back_sail is not None:
+        coming = ", ".join(str(n) for n in (back_seats or []))
+        lines.append(f"Back {back_sail.departs_at} → {back_sail.arrives_at} · seats {coming}")
+    lines += [
+        f"Booking <code>{booking}</code>",
+        "",
+        f'<a href="{link}">Pay on RTL\'s bank page</a>',
+        "",
         "The card goes in on that page, which is the bank's, not Mind's. "
-        "The ticket is emailed once it goes through."
-    )
+        "The ticket is emailed once it goes through.",
+    ]
+    return "\n".join(lines)
 
 
 def ferry_payment_failed_text(booking: str, reason: str) -> str:
@@ -1435,3 +1449,93 @@ def ask_who_text(count: int) -> str:
         "Used for this ticket only and not saved. It does stay in this chat's "
         "history, which is Telegram's, not Mind's."
     )
+
+
+FERRY_WAY = "r"
+
+
+def build_way_keyboard() -> dict:
+    """One way, or there and back."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "→  One way", "callback_data": ferry_callback(FERRY_WAY, "1")},
+                {"text": "⇄  Return", "callback_data": ferry_callback(FERRY_WAY, "2")},
+            ],
+            [{"text": "‹  Menu", "callback_data": CB_MENU}],
+        ]
+    }
+
+
+def way_text(origin: str, destination: str) -> str:
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n\n"
+        "One way, or coming back the same day?"
+    )
+
+
+def back_sailings_text(origin: str, destination: str, when: str, sailings: list) -> str:
+    """The way back, after the way there is chosen."""
+    head = f"⇄ Coming back: <b>{destination}</b> → <b>{origin}</b>\n{when}"
+    if not sailings:
+        return (
+            f"{head}\n\nNothing sails back that day.\n\n"
+            "The way there is still unheld, so nothing has been taken."
+        )
+    lines = [head, ""]
+    for sail in sailings[:8]:
+        seats = "full" if sail.full else f"{sail.seats_free} of {sail.seats_total} seats"
+        lines.append(
+            f"<b>{sail.departs_at} → {sail.arrives_at}</b>  ·  {seats}\n"
+            f"    {sail.route} · MVR {sail.fare:.0f} for the return"
+        )
+    return "\n".join(lines)
+
+
+def build_back_sailings_keyboard(sailings: list) -> dict:
+    """One button per sailing back that has room."""
+    rows = [
+        [
+            {
+                "text": f"{sail.departs_at} · {sail.seats_free} seats",
+                "callback_data": ferry_callback(FERRY_TRIP, f"back{index}"),
+            }
+        ]
+        for index, sail in enumerate(sailings[:8])
+        if not sail.full
+    ]
+    rows.append(
+        [
+            {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def return_summary(out_sail, out_seats, back_sail, back_seats) -> str:
+    """Both legs, before anything is held."""
+    there = ", ".join(str(n) for n in out_seats)
+    home = ", ".join(str(n) for n in back_seats)
+    return (
+        f"⇄ <b>Return</b>\n\n"
+        f"There  <b>{out_sail.departs_at} → {out_sail.arrives_at}</b> · seats {there}\n"
+        f"Back  <b>{back_sail.departs_at} → {back_sail.arrives_at}</b> · seats {home}\n\n"
+        f"<b>MVR {back_sail.fare:.0f}</b> for the return.\n\n"
+        "Holding takes these seats off both boats until paid for or the hold "
+        "runs out. Mind cannot pay: that needs your card."
+    )
+
+
+def build_return_hold_keyboard(out_seats, back_seats) -> dict:
+    """Hold both legs on one booking."""
+    both = ",".join(str(n) for n in out_seats) + "|" + ",".join(str(n) for n in back_seats)
+    return {
+        "inline_keyboard": [
+            [{"text": "✅  Hold both", "callback_data": ferry_callback(FERRY_HOLD, f"0.{both}")}],
+            [
+                {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ],
+        ]
+    }
