@@ -542,6 +542,19 @@ class Contact:
     phone: str = ""
 
 
+# customerIdTypes carries an id and a code for the same thing, and the payment
+# wants the id. A setting written before that was understood holds the code, so
+# it is translated here rather than left to fail as "customerIdType.not.found"
+# on somebody who filled the form in correctly.
+ID_TYPE_BY_CODE = {"101": "2"}
+
+
+def id_type_value(stored: str) -> str:
+    """The id RTL wants, whichever of the two a setting happens to hold."""
+    text = str(stored or "").strip()
+    return ID_TYPE_BY_CODE.get(text, text or NATIONAL_ID)
+
+
 def payment_body(
     booking_id: str,
     sail,
@@ -587,7 +600,7 @@ def payment_body(
                 # name is the reason this took three tries.
                 "selectedSeats": [
                     {
-                        "customerCategoryId": passenger.id_type,
+                        "customerCategoryId": id_type_value(passenger.id_type),
                         "customerId": passenger.id_number,
                         "customerName": passenger.name,
                         "dob": passenger.date_of_birth,

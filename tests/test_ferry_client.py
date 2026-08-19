@@ -521,3 +521,38 @@ class WhoTravels(unittest.TestCase):
         with self.assertRaises(FerryError) as caught:
             parse_payment({"message": "Booking already paid"})
         self.assertIn("already paid", str(caught.exception))
+
+
+class TheTwoNamesForOneIdType(unittest.TestCase):
+    """customerIdTypes gives an id and a code, and they are not interchangeable.
+
+    A setting written before that was understood holds the code. Sending it
+    fails with "customerIdType.not.found", which sounds like the passenger's
+    ID is wrong when the ID is fine and the type field is the wrong one of two
+    numbers.
+    """
+
+    def test_the_old_code_becomes_the_id(self):
+        from mind.ferry_client import id_type_value
+
+        self.assertEqual(id_type_value("101"), "2")
+
+    def test_the_id_is_left_alone(self):
+        from mind.ferry_client import id_type_value
+
+        self.assertEqual(id_type_value("2"), "2")
+
+    def test_nothing_saved_falls_back_to_national_id(self):
+        from mind.ferry_client import NATIONAL_ID, id_type_value
+
+        self.assertEqual(id_type_value(""), NATIONAL_ID)
+
+    def test_a_payment_built_from_the_old_setting_still_works(self):
+        from mind.ferry_client import Contact, Passenger, Sailing, payment_body
+
+        body = payment_body(
+            "00000014B909", Sailing(schedule_id="1", fare=35), 4,
+            Passenger(name="A", id_number="A375667", id_type="101"),
+            Contact(name="A"),
+        )
+        self.assertEqual(body["inbound"][0]["selectedSeats"][0]["customerCategoryId"], "2")
