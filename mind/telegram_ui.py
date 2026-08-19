@@ -72,6 +72,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("power", "⏻  Power", "telegram_power_enabled"),
     MenuAction("help", "❓  Help"),
     MenuAction("hotspot", "📡  Hotspot", "telegram_hotspot_enabled"),
+    MenuAction("ferry", "🚤  Ferry"),
 )
 
 # Label, and the argument press_media_key already understands.
@@ -917,3 +918,80 @@ def ferry_choices_text(typed: str, matches: list) -> str:
     names = ", ".join(stop.name for stop in matches[:12])
     more = "" if len(matches) <= 12 else f" …and {len(matches) - 12} more."
     return f"<b>{typed}</b> matches several islands:\n\n{names}{more}"
+
+
+# Picking a ferry journey by tapping. "s:h/Hdh" chooses an atoll, "s:i/105" an
+# island, "s:x" starts over. Codes rather than names, because a callback has
+# sixty-four bytes and some island names spend a third of that on their own.
+CB_FERRY = "s"
+FERRY_ATOLL = "h"
+FERRY_ISLAND = "i"
+FERRY_RESTART = "x"
+
+
+def ferry_callback(kind: str, value: str = "") -> str:
+    return f"{CB_FERRY}:{kind}/{value}" if value else f"{CB_FERRY}:{kind}"
+
+
+def parse_ferry_callback(data: str) -> tuple[str, str]:
+    """"s:i/105" as ("i", "105")."""
+    body = (data or "").partition(":")[2]
+    kind, _, value = body.partition("/")
+    return kind, value
+
+
+def build_atoll_keyboard(atolls: list) -> dict:
+    """Every atoll, four to a row: the names are two or three letters."""
+    rows: list[list[dict]] = []
+    for index, atoll in enumerate(atolls):
+        button = {"text": atoll, "callback_data": ferry_callback(FERRY_ATOLL, atoll)}
+        if index % 4 == 0:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    rows.append([{"text": "‹  Menu", "callback_data": CB_MENU}])
+    return {"inline_keyboard": rows}
+
+
+def build_island_keyboard(stops: list) -> dict:
+    """The islands on one atoll, two to a row, and a way back to the atolls."""
+    rows: list[list[dict]] = []
+    for index, stop in enumerate(stops):
+        button = {
+            "text": stop.island[:22],
+            "callback_data": ferry_callback(FERRY_ISLAND, stop.code),
+        }
+        if index % 2 == 0:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    rows.append(
+        [
+            {"text": "‹  Atolls", "callback_data": ferry_callback(FERRY_RESTART)},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def ferry_pick_text(stage: str, origin: str = "") -> str:
+    """What the picker is asking for at this point."""
+    if stage == "from-atoll":
+        return "🚤 <b>Ferry</b>\n\nWhich atoll are you leaving from?"
+    if stage == "from-island":
+        return "🚤 <b>Ferry</b>\n\nWhich island are you leaving from?"
+    if stage == "to-atoll":
+        return f"🚤 Leaving <b>{origin}</b>.\n\nWhich atoll are you going to?"
+    return f"🚤 Leaving <b>{origin}</b>.\n\nWhich island are you going to?"
+
+
+def build_ferry_again_keyboard() -> dict:
+    """Offered under a result: another journey, or back to the menu."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ]
+        ]
+    }

@@ -208,3 +208,38 @@ def network(cache: Path | None = None, fetch=_fetch, now=time.time) -> dict:
             # A cache that cannot be written is slower, not broken.
             pass
     return payload
+
+
+def atoll_of(stop: Stop) -> str:
+    """The atoll an island belongs to, as RTL spells it."""
+    return stop.name.split(".", 1)[0] if "." in stop.name else ""
+
+
+def atolls(stops: list[Stop]) -> list[str]:
+    """Every atoll with a stop on it, in the order they run down the country.
+
+    RTL's own order is the useful one: the list is read by somebody looking for
+    their own island, and the atolls are already grouped that way in what it
+    sends.
+    """
+    found: list[str] = []
+    for stop in stops:
+        name = atoll_of(stop)
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def stops_in(stops: list[Stop], atoll: str) -> list[Stop]:
+    """The islands on one atoll, alphabetically."""
+    wanted = (atoll or "").lower()
+    return sorted(
+        (s for s in stops if atoll_of(s).lower() == wanted), key=lambda s: s.island
+    )
+
+
+def stop_by_code(stops: list[Stop], code: str) -> Stop | None:
+    for stop in stops:
+        if stop.code == str(code):
+            return stop
+    return None

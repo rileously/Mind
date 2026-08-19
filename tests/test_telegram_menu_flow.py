@@ -102,6 +102,46 @@ class BridgeHarness:
         self.bridge._show_menu(self.client, 7, "cb", message_id, index, self.config)
 
 
+class TypedCommandsReachTheirHandler(BridgeHarness, unittest.TestCase):
+    """Every typed command, driven the way Telegram drives it.
+
+    Calling a handler directly proves the handler. It does not prove that
+    anything reaches it - a command dispatched with a name that does not exist
+    in that scope raises, the bridge catches it so one bad message cannot take
+    the poll down, and the chat simply stays silent. Which is what happened.
+    """
+
+    def send(self, text):
+        self.bridge._handle_text(self.client, 7, text, 500, self.config)
+
+    def test_ferry_reaches_its_handler(self):
+        seen = []
+        self.bridge._handle_ferry = lambda c, chat, arg: seen.append(arg)
+        self.send("/ferry naivaadhoo kulhudhuffushi")
+        self.assertEqual(seen, ["naivaadhoo kulhudhuffushi"])
+
+    def test_ferry_with_nothing_after_it_opens_the_picker(self):
+        # Typing two islands still works; typing nothing gets buttons instead,
+        # which is the point of the picker.
+        opened = []
+        self.bridge._send_ferry_panel = lambda c, chat, cfg, mid=None: opened.append(1)
+        self.bridge._handle_ferry = lambda c, chat, arg: opened.append("text")
+        self.send("/ferry")
+        self.assertEqual(opened, [1])
+
+    def test_no_typed_command_raises_on_a_name_that_is_not_there(self):
+        # The bug this class exists for, caught for every command at once.
+        for text in ("/menu", "/help", "/clip", "/devices", "/apps", "/hotspot",
+                     "/ferry a b", "/watch", "/commands", "/find x", "/files"):
+            with self.subTest(command=text):
+                try:
+                    self.send(text)
+                except NameError as exc:
+                    self.fail(f"{text} raised {exc}")
+                except Exception:
+                    pass  # anything else is that command's own business
+
+
 class HotspotPanelTests(BridgeHarness, unittest.TestCase):
     """The hotspot panel, without a radio to bring up.
 

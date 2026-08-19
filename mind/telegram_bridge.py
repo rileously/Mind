@@ -120,6 +120,16 @@ from .telegram_ui import (
     menu_text,
     ferry_text,
     ferry_choices_text,
+    ferry_pick_text,
+    ferry_callback,
+    parse_ferry_callback,
+    build_atoll_keyboard,
+    build_island_keyboard,
+    build_ferry_again_keyboard,
+    CB_FERRY,
+    FERRY_ATOLL,
+    FERRY_ISLAND,
+    FERRY_RESTART,
     build_hotspot_keyboard,
     hotspot_text,
     CB_HOTSPOT,
@@ -137,6 +147,9 @@ from .ferry_client import (
     parse_routes as parse_ferry_routes,
     parse_stops as parse_ferry_stops,
     routes_between as ferry_routes_between,
+    atolls as ferry_atolls,
+    stops_in as ferry_stops_in,
+    stop_by_code as ferry_stop_by_code,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -205,6 +218,7 @@ PANEL_POWER = "power"
 PANEL_APPS = "apps"
 PANEL_DEVICES = "devices"
 PANEL_HOTSPOT = "hotspot"
+PANEL_FERRY = "ferry"
 MEDIA_PROMPT = "🎵  Media keys for this PC."
 # Long enough to call off from a phone after a mis-tap.
 POWER_DELAY_SECONDS = 60
@@ -281,6 +295,8 @@ class TelegramBridge(QObject):
         # when it starts, because the answer lives on this machine and the
         # error appears on the phone.
         self._hotspot_fault = ""
+        # Where each chat has got to in picking a ferry journey.
+        self._ferry_pick: dict[int, dict] = {}
 
     # -- lifecycle -------------------------------------------------------
 
@@ -1147,7 +1163,11 @@ class TelegramBridge(QObject):
             self._send_hotspot_panel(client, chat_id, config)
             return
         if trigger in {"ferry", "ferries", "boat"}:
-            self._handle_ferry(client, chat_id, argument)
+            # Two islands typed still work; nothing typed opens the picker.
+            if (request.text or "").strip():
+                self._handle_ferry(client, chat_id, request.text)
+            else:
+                self._send_ferry_panel(client, chat_id, config)
             return
         if trigger in {"watch", "watchers", "alerts"}:
             self._send_watcher_panel(client, chat_id, config)
@@ -1307,6 +1327,12 @@ class TelegramBridge(QObject):
         if action == CB_HOTSPOT:
             self._handle_hotspot_tap(
                 client, chat_id, callback_id, message_id, index, config
+            )
+            return
+
+        if action == CB_FERRY:
+            self._handle_ferry_tap(
+                client, chat_id, callback_id, message_id, str(callback.get("data", "")), config
             )
             return
 
@@ -1652,6 +1678,8 @@ class TelegramBridge(QObject):
             self._send_apps_panel(client, chat_id, config, message_id)
         elif action.key == "hotspot":
             self._send_hotspot_panel(client, chat_id, config, message_id)
+        elif action.key == "ferry":
+            self._send_ferry_panel(client, chat_id, config, message_id)
         elif action.key == "files":
             # The listing takes the menu's place, which is also how the browsing
             # buttons already behave once you are inside a folder.
@@ -2060,6 +2088,107 @@ class TelegramBridge(QObject):
             stops_named=lambda r: r.between(origin.name, destination.name),
         )
         self._send_panel(client, chat_id, PANEL_HINT, text, build_menu_keyboard(), html=True)
+
+    # -- ferry ------------------------------------------------------------
+
+    def _ferry_stops(self):
+        """Every island RTL calls at. Raises FerryError if it cannot be asked."""
+        described = ferry_network(cache=self.store.root / "ferry.json")
+        return parse_ferry_stops(described), described
+
+    def _send_ferry_panel(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        """Start the picker: the atolls, to choose where the journey begins."""
+        try:
+            stops, _ = self._ferry_stops()
+        except FerryError as exc:
+            client.send_message(chat_id, f"🚤 {exc}")
+            return
+        self._ferry_pick[chat_id] = {"stage": "from-atoll"}
+        text = ferry_pick_text("from-atoll")
+        keyboard = build_atoll_keyboard(ferry_atolls(stops))
+        if self._replace_panel(client, chat_id, message_id, PANEL_FERRY, text, keyboard, html=True):
+            return
+        self._send_panel(client, chat_id, PANEL_FERRY, text, keyboard, html=True)
+
+    def _handle_ferry_tap(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        data: str,
+        config: dict,
+    ) -> None:
+        """One tap in the picker: an atoll, an island, or start again."""
+        kind, value = parse_ferry_callback(data)
+        client.answer_callback_query(callback_id)
+        try:
+            stops, described = self._ferry_stops()
+        except FerryError as exc:
+            client.send_message(chat_id, f"🚤 {exc}")
+            return
+
+        state = self._ferry_pick.get(chat_id) or {"stage": "from-atoll"}
+        if kind == FERRY_RESTART:
+            self._send_ferry_panel(client, chat_id, config, message_id)
+            return
+
+        if kind == FERRY_ATOLL:
+            going_out = state.get("stage", "from-atoll").startswith("from")
+            state["stage"] = "from-island" if going_out else "to-island"
+            self._ferry_pick[chat_id] = state
+            origin = ferry_stop_by_code(stops, state.get("origin", ""))
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ferry_pick_text(state["stage"], origin.island if origin else ""),
+                build_island_keyboard(ferry_stops_in(stops, value)),
+                html=True,
+            )
+            return
+
+        if kind != FERRY_ISLAND:
+            return
+        chosen = ferry_stop_by_code(stops, value)
+        if chosen is None:
+            client.answer_callback_query(callback_id, "That island is not on the list.", alert=True)
+            return
+
+        if state.get("stage") == "from-island":
+            # Halfway: remember where they are leaving from, ask where to.
+            state.update({"stage": "to-atoll", "origin": chosen.code})
+            self._ferry_pick[chat_id] = state
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ferry_pick_text("to-atoll", chosen.island),
+                build_atoll_keyboard(ferry_atolls(stops)),
+                html=True,
+            )
+            return
+
+        origin = ferry_stop_by_code(stops, state.get("origin", ""))
+        if origin is None:
+            self._send_ferry_panel(client, chat_id, config, message_id)
+            return
+        if origin.code == chosen.code:
+            client.answer_callback_query(
+                callback_id, "That is where you are leaving from.", alert=True
+            )
+            return
+        routes = ferry_routes_between(parse_ferry_routes(described), origin.name, chosen.name)
+        text = ferry_text(
+            origin.name, chosen.name, routes,
+            stops_named=lambda r: r.between(origin.name, chosen.name),
+        )
+        self._ferry_pick.pop(chat_id, None)
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY, text, build_ferry_again_keyboard(), html=True
+        )
 
     def _handle_search(
         self,
