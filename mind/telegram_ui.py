@@ -724,6 +724,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("restart", "Restart this PC", "telegram_power_enabled"),
     ("abort", "Call off a shutdown", "telegram_power_enabled"),
     ("hotspot", "Share this PC's Wi-Fi", "telegram_hotspot_enabled"),
+    ("ferry", "Which RTL boats go from one island to another", None),
 )
 
 # Telegram's own limit, and it rejects the whole list if it is exceeded.
@@ -876,3 +877,43 @@ def hotspot_text(
     lines += ["", "This PC is on Wi-Fi, so sharing it halves the speed. It is the "
               "reach that is worth having, not the speed."]
     return "\n".join(lines)
+
+
+def ferry_text(origin: str, destination: str, routes: list, stops_named=None) -> str:
+    """What sails between two islands.
+
+    Routes rather than departures: the description RTL publishes without an
+    account says which boats go this way and where they call, not when. That
+    is still the answer to "can I get there from here", which is the question
+    somebody at the other end of the country is actually asking.
+    """
+    if not routes:
+        return (
+            f"No RTL route goes from <b>{origin}</b> to <b>{destination}</b>.\n\n"
+            "They may still be connected by changing boats, which this does not "
+            "work out."
+        )
+    lines = [f"🚤 <b>{origin}</b> → <b>{destination}</b>", ""]
+    for route in routes[:6]:
+        between = stops_named(route) if stops_named else ()
+        if between:
+            calling = "calls at " + ", ".join(between)
+        else:
+            calling = "direct"
+        lines.append(f"<b>{route.name}</b> — {calling}")
+    if len(routes) > 6:
+        lines.append(f"…and {len(routes) - 6} more.")
+    lines += ["", "Times and seats need the RTL app or rtl.mv."]
+    return "\n".join(lines)
+
+
+def ferry_choices_text(typed: str, matches: list) -> str:
+    """When what was typed names more than one island, or none."""
+    if not matches:
+        return (
+            f"No island matches <b>{typed}</b>.\n\n"
+            "Try part of the name on its own, like <code>naiva</code>."
+        )
+    names = ", ".join(stop.name for stop in matches[:12])
+    more = "" if len(matches) <= 12 else f" …and {len(matches) - 12} more."
+    return f"<b>{typed}</b> matches several islands:\n\n{names}{more}"

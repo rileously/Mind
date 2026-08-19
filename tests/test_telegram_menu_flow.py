@@ -521,7 +521,8 @@ class MenuReachTests(BridgeHarness, unittest.TestCase):
 
         # /save and /find are typed with an argument, and /abort only exists
         # while a shutdown is counting down. The rest should be reachable.
-        typed_only = {"save", "abort", "menu", "find"}
+        # /ferry takes two islands after it, so it is typed rather than tapped.
+        typed_only = {"save", "abort", "menu", "find", "ferry"}
         keys = {action.key for action in MENU_ACTIONS}
         keys |= {"status", "screen", "sleep", "shutdown", "restart"}  # under Power
         missing = {

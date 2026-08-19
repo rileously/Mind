@@ -118,6 +118,8 @@ from .telegram_ui import (
     media_key_at,
     menu_action_at,
     menu_text,
+    ferry_text,
+    ferry_choices_text,
     build_hotspot_keyboard,
     hotspot_text,
     CB_HOTSPOT,
@@ -128,6 +130,14 @@ from .telegram_ui import (
 )
 from dataclasses import replace as replace_device
 
+from .ferry_client import (
+    FerryError,
+    match_stops as match_ferry_stops,
+    network as ferry_network,
+    parse_routes as parse_ferry_routes,
+    parse_stops as parse_ferry_stops,
+    routes_between as ferry_routes_between,
+)
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
@@ -1136,6 +1146,9 @@ class TelegramBridge(QObject):
         if trigger in {"hotspot", "share", "tether"}:
             self._send_hotspot_panel(client, chat_id, config)
             return
+        if trigger in {"ferry", "ferries", "boat"}:
+            self._handle_ferry(client, chat_id, argument)
+            return
         if trigger in {"watch", "watchers", "alerts"}:
             self._send_watcher_panel(client, chat_id, config)
             return
@@ -2003,6 +2016,50 @@ class TelegramBridge(QObject):
                 return
         except SystemActionError as exc:
             client.send_message(chat_id, str(exc))
+
+    def _handle_ferry(self, client: TelegramClient, chat_id: int, argument: str) -> None:
+        """Which boats go from one island to another.
+
+        Two islands, in the order they are travelled. RTL publishes the network
+        without asking anybody to sign in, so this answers from a desk, a
+        pocket, or an island with one bar of signal.
+        """
+        words = (argument or "").split()
+        if len(words) < 2:
+            client.send_message(
+                chat_id,
+                "Send two islands, from and to. For example:\n"
+                "/ferry naivaadhoo kulhudhuffushi",
+            )
+            return
+        # Everything before the last word is the origin, so two-word island
+        # names on the left still work.
+        typed_from, typed_to = " ".join(words[:-1]), words[-1]
+        try:
+            described = ferry_network(cache=self.store.root / "ferry.json")
+        except FerryError as exc:
+            client.send_message(chat_id, f"🚤 {exc}")
+            return
+        stops = parse_ferry_stops(described)
+        origins = match_ferry_stops(stops, typed_from)
+        targets = match_ferry_stops(stops, typed_to)
+        if len(origins) != 1:
+            client.send_message(chat_id, ferry_choices_text(typed_from, origins), html=True)
+            return
+        if len(targets) != 1:
+            client.send_message(chat_id, ferry_choices_text(typed_to, targets), html=True)
+            return
+        origin, destination = origins[0], targets[0]
+        routes = ferry_routes_between(
+            parse_ferry_routes(described), origin.name, destination.name
+        )
+        text = ferry_text(
+            origin.name,
+            destination.name,
+            routes,
+            stops_named=lambda r: r.between(origin.name, destination.name),
+        )
+        self._send_panel(client, chat_id, PANEL_HINT, text, build_menu_keyboard(), html=True)
 
     def _handle_search(
         self,
