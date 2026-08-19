@@ -243,3 +243,139 @@ def stop_by_code(stops: list[Stop], code: str) -> Stop | None:
         if stop.code == str(code):
             return stop
     return None
+
+
+SEATS_URL = "https://bo.rtl.mv:4455/maldives/api/booking/v3/ferries/seats"
+# The site sends these exactly. deviceType is a number, and scheduleId is null
+# rather than an empty list - an empty list is accepted and then quietly
+# returns no sailings at all, which is the worst of both answers.
+ONE_WAY = 1
+WEB_DEVICE = 1
+REGULAR_PRODUCT = "101"
+SEAT_FREE = 1
+
+
+@dataclass(frozen=True)
+class Sailing:
+    """One departure, and how full it is."""
+
+    route: str = ""
+    route_code: str = ""
+    boat: str = ""
+    departs: str = ""
+    arrives: str = ""
+    stops: int = 0
+    fare: float = 0.0
+    seats_free: int = 0
+    seats_total: int = 0
+    schedule_id: str = ""
+
+    @property
+    def departs_at(self) -> str:
+        """The time on its own, from RTL's fourteen digits."""
+        return f"{self.departs[8:10]}:{self.departs[10:12]}" if len(self.departs) >= 12 else ""
+
+    @property
+    def arrives_at(self) -> str:
+        return f"{self.arrives[8:10]}:{self.arrives[10:12]}" if len(self.arrives) >= 12 else ""
+
+    @property
+    def full(self) -> bool:
+        return self.seats_free <= 0
+
+
+def trip_stamp(date_text: str, now=None) -> str:
+    """RTL wants yyyyMMdd with a time stuck on the end.
+
+    The site sends the current time, which for today means "sailings still to
+    come". For a later day that would hide the morning ones, so a future date
+    is asked about from one second past midnight.
+    """
+    moment = time.localtime(now if now is not None else time.time())
+    today = time.strftime("%Y%m%d", moment)
+    if date_text == today:
+        return today + time.strftime("%H%M%S", moment)
+    return date_text + "000001"
+
+
+def parse_sailings(payload: dict) -> list[Sailing]:
+    """The journeys in a seats reply, with their seat counts."""
+    found: list[Sailing] = []
+    schedules = payload.get("schedules")
+    if not isinstance(schedules, dict):
+        return found
+    for journey in schedules.get("journey") or []:
+        if not isinstance(journey, dict):
+            continue
+        fare = journey.get("totalFare") or 0
+        for leg in journey.get("instances") or []:
+            if not isinstance(leg, dict):
+                continue
+            deck = leg.get("deck") if isinstance(leg.get("deck"), dict) else {}
+            seats = [s for s in (deck.get("seats") or []) if isinstance(s, dict)]
+            free = sum(1 for s in seats if s.get("status") == SEAT_FREE)
+            found.append(
+                Sailing(
+                    route=str(leg.get("routeName") or ""),
+                    route_code=str(leg.get("routeCode") or ""),
+                    boat=str(leg.get("assetName") or ""),
+                    departs=str(leg.get("startTime") or ""),
+                    arrives=str(leg.get("endTime") or ""),
+                    stops=int(leg.get("intermediateStops") or 0),
+                    fare=float(fare or 0),
+                    seats_free=free,
+                    seats_total=len(seats) or int(deck.get("seatCount") or 0),
+                    schedule_id=str(leg.get("scheduleId") or ""),
+                )
+            )
+    return found
+
+
+def sailings(
+    origin_code: str,
+    destination_code: str,
+    date_text: str,
+    passengers: int = 1,
+    opener=None,
+    now=None,
+) -> list[Sailing]:
+    """What sails between two stops on a day, and how many seats are left.
+
+    No account needed: this is the same call the booking page makes before
+    anybody signs in.
+    """
+    body = {
+        "products": [
+            {"productCode": REGULAR_PRODUCT, "passengerCount": max(1, int(passengers))}
+        ],
+        # Null, deliberately. See the note above.
+        "scheduleId": None,
+        "deviceType": WEB_DEVICE,
+        "qrType": ONE_WAY,
+        "inboundTripDate": trip_stamp(date_text, now=now),
+        "outboundTripDate": None,
+        "sourceStation": str(origin_code),
+        "destinationStation": str(destination_code),
+    }
+    request = urllib.request.Request(
+        SEATS_URL, data=json.dumps(body).encode("utf-8"), method="POST"
+    )
+    for name, value in {**HEADERS, "Content-Type": "application/json"}.items():
+        request.add_header(name, value)
+    send = opener or (
+        lambda r: urllib.request.urlopen(
+            r, timeout=TIMEOUT, context=ssl.create_default_context()
+        )
+    )
+    try:
+        with send(request) as answer:
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raise FerryError(f"RTL answered HTTP {exc.code} when asked about sailings.") from exc
+    except urllib.error.URLError as exc:
+        raise FerryError(f"Could not reach RTL: {getattr(exc, 'reason', exc)}") from exc
+    except TimeoutError as exc:
+        raise FerryError("RTL did not answer in time.") from exc
+    except ValueError as exc:
+        raise FerryError("RTL answered with something that was not JSON.") from exc
+    return parse_sailings(payload)

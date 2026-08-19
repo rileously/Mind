@@ -120,6 +120,7 @@ from .telegram_ui import (
     menu_text,
     ferry_text,
     ferry_choices_text,
+    sailings_text,
     ferry_pick_text,
     ferry_callback,
     parse_ferry_callback,
@@ -150,6 +151,7 @@ from .ferry_client import (
     atolls as ferry_atolls,
     stops_in as ferry_stops_in,
     stop_by_code as ferry_stop_by_code,
+    sailings as ferry_sailings,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -2181,10 +2183,19 @@ class TelegramBridge(QObject):
             )
             return
         routes = ferry_routes_between(parse_ferry_routes(described), origin.name, chosen.name)
-        text = ferry_text(
-            origin.name, chosen.name, routes,
-            stops_named=lambda r: r.between(origin.name, chosen.name),
-        )
+        today = time.strftime("%Y%m%d")
+        try:
+            sails = ferry_sailings(origin.code, chosen.code, today)
+            text = sailings_text(
+                origin.name, chosen.name, time.strftime("%a %d %B"), sails, routes
+            )
+        except FerryError:
+            # The network description still answers "can I get there at all",
+            # which is worth more than an error about seats.
+            text = ferry_text(
+                origin.name, chosen.name, routes,
+                stops_named=lambda r: r.between(origin.name, chosen.name),
+            )
         self._ferry_pick.pop(chat_id, None)
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY, text, build_ferry_again_keyboard(), html=True

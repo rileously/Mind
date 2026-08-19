@@ -995,3 +995,34 @@ def build_ferry_again_keyboard() -> dict:
             ]
         ]
     }
+
+
+def sailings_text(origin: str, destination: str, when: str, sailings: list, routes: list = ()) -> str:
+    """What sails today, with how many seats are left on each.
+
+    Seats are the part that changes while somebody is deciding, so they lead.
+    """
+    head = f"🚤 <b>{origin}</b> → <b>{destination}</b>\n{when}"
+    if not sailings:
+        if routes:
+            names = ", ".join(r.name for r in routes[:4])
+            return (
+                f"{head}\n\nNothing sails that day.\n\n"
+                f"The route exists ({names}) - it may not run on that day of the week."
+            )
+        return f"{head}\n\nNo RTL route goes that way."
+    lines = [head, ""]
+    for sail in sailings[:8]:
+        if sail.full:
+            seats = "full"
+        else:
+            seats = f"{sail.seats_free} of {sail.seats_total} seats"
+        stops = "direct" if not sail.stops else f"{sail.stops} stop{'s' if sail.stops > 1 else ''}"
+        lines.append(
+            f"<b>{sail.departs_at} → {sail.arrives_at}</b>  ·  {seats}\n"
+            f"    {sail.route} · {stops} · MVR {sail.fare:.0f}"
+        )
+    if len(sailings) > 8:
+        lines.append(f"…and {len(sailings) - 8} more.")
+    lines += ["", "Book in the RTL app or at rtl.mv."]
+    return "\n".join(lines)

@@ -195,3 +195,132 @@ class KeepingIt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+SEATS_REPLY = {
+    "resultType": 1,
+    "schedules": {
+        "fromStationName": "Hdh.Naivaadhoo",
+        "toStationName": "Hdh.Kulhudhuffushi",
+        "journey": [
+            {
+                "totalFare": 70,
+                "instances": [
+                    {
+                        "scheduleId": "9911",
+                        "routeName": "R1C5",
+                        "routeCode": "1210",
+                        "assetName": "RTL109",
+                        "startTime": "20260820083000",
+                        "endTime": "20260820092000",
+                        "intermediateStops": 2,
+                        "deck": {
+                            "seatCount": 4,
+                            "seats": [
+                                {"code": 1, "status": 1},
+                                {"code": 2, "status": 0},
+                                {"code": 3, "status": 1},
+                                {"code": 4, "status": 1},
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    },
+}
+
+
+class ReadingSailings(unittest.TestCase):
+    """The seats reply, which is the part that changes while somebody decides."""
+
+    def test_a_sailing_is_read_whole(self):
+        from mind.ferry_client import parse_sailings
+
+        sail = parse_sailings(SEATS_REPLY)[0]
+        self.assertEqual((sail.route, sail.boat, sail.stops), ("R1C5", "RTL109", 2))
+        self.assertEqual(sail.fare, 70)
+
+    def test_the_times_come_out_of_fourteen_digits(self):
+        from mind.ferry_client import parse_sailings
+
+        sail = parse_sailings(SEATS_REPLY)[0]
+        self.assertEqual(sail.departs_at, "08:30")
+        self.assertEqual(sail.arrives_at, "09:20")
+
+    def test_free_seats_are_counted_not_taken_on_trust(self):
+        # RTL sends every seat with a status; only status 1 is free.
+        from mind.ferry_client import parse_sailings
+
+        sail = parse_sailings(SEATS_REPLY)[0]
+        self.assertEqual((sail.seats_free, sail.seats_total), (3, 4))
+        self.assertFalse(sail.full)
+
+    def test_a_sailing_with_no_seats_left_says_so(self):
+        from mind.ferry_client import parse_sailings
+
+        payload = json.loads(json.dumps(SEATS_REPLY))
+        for seat in payload["schedules"]["journey"][0]["instances"][0]["deck"]["seats"]:
+            seat["status"] = 0
+        self.assertTrue(parse_sailings(payload)[0].full)
+
+    def test_nothing_sailing_is_not_an_error(self):
+        from mind.ferry_client import parse_sailings
+
+        self.assertEqual(parse_sailings({"schedules": {"journey": []}}), [])
+        self.assertEqual(parse_sailings({}), [])
+
+
+class TheTimeStuckOnTheDate(unittest.TestCase):
+    """RTL wants yyyyMMdd with a time after it, and the time is not decorative."""
+
+    def test_today_is_asked_about_from_now(self):
+        # So sailings that have already gone are not offered.
+        from mind.ferry_client import trip_stamp
+
+        moment = time.mktime((2026, 8, 20, 14, 30, 0, 0, 0, -1))
+        self.assertEqual(trip_stamp("20260820", now=moment), "20260820143000")
+
+    def test_a_later_day_is_asked_about_from_midnight(self):
+        # Using the current time would hide that morning's sailings.
+        from mind.ferry_client import trip_stamp
+
+        moment = time.mktime((2026, 8, 20, 14, 30, 0, 0, 0, -1))
+        self.assertEqual(trip_stamp("20260825", now=moment), "20260825000001")
+
+
+class TheRequestRtlAcceptsel(unittest.TestCase):
+    """One field decides whether any of this works."""
+
+    def sent(self):
+        import io as _io
+        from mind.ferry_client import sailings
+
+        captured = {}
+
+        class Answer:
+            def __enter__(self_inner):
+                return _io.BytesIO(json.dumps(SEATS_REPLY).encode())
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def opener(request):
+            captured["body"] = json.loads(request.data.decode())
+            return Answer()
+
+        sailings("105", "104", "20260820", opener=opener)
+        return captured["body"]
+
+    def test_schedule_id_is_null_and_not_an_empty_list(self):
+        # An empty list is accepted and then returns no sailings at all, which
+        # reads exactly like a day with no service. This is that bug, pinned.
+        body = self.sent()
+        self.assertIsNone(body["scheduleId"])
+
+    def test_the_device_is_a_number(self):
+        self.assertEqual(self.sent()["deviceType"], 1)
+
+    def test_the_stations_travel_as_codes(self):
+        body = self.sent()
+        self.assertEqual((body["sourceStation"], body["destinationStation"]), ("105", "104"))
