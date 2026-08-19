@@ -34,6 +34,14 @@ HEADERS = {
     "Accept": "application/json",
     "Origin": "https://rtl.mv",
     "Referer": "https://rtl.mv/",
+    # The payment host sits behind Cloudflare, which refuses the default
+    # urllib agent outright - "Error 1010", which reads like a permission
+    # problem and is not one. This is the same request the site makes, so it
+    # says so the same way.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    ),
 }
 TIMEOUT = 25.0
 # A day. The island list is not a thing that moves quickly.
@@ -502,8 +510,14 @@ def reserve(body: dict, token: str = "", opener=None) -> Reservation:
     return parse_reservation(payload)
 
 
-PAYMENT_URL = "https://transactions.rtl.mv/maldives/api/payment/v6/transaction"
-NATIONAL_ID = "101"
+# Read out of the site's own environment block rather than guessed at. The
+# payment service is on a different host and port from the booking one, which
+# is not something worth reconstructing by inference - the first attempt got
+# both wrong.
+PAYMENT_URL = "https://bo.rtl.mv:443/paymentservice/api/payment/v6/transaction"
+# The id, not the code. customerIdTypes carries both - National ID is id 2,
+# code "101" - and the payment wants the id while the product wants a code.
+NATIONAL_ID = "2"
 # From the site: a card payment, on a ferry, from a browser.
 PAYMENT_TYPE_CARD = 1
 VEHICLE_FERRY = 3
@@ -555,6 +569,11 @@ def payment_body(
         "deviceType": WEB_DEVICE,
         "vehicleType": VEHICLE_FERRY,
         "paymentType": PAYMENT_TYPE_CARD,
+        # From the site: 1 saves the card for next time, 0 does not, 2 uses one
+        # already saved. Not saving is the only honest default for a program
+        # that is not the one entering the card.
+        "tokenize": 0,
+        "cardId": None,
         "isConcessional": 0,
         "isDnrVerified": 0,
         "customerName": contact.name or passenger.name,
@@ -563,7 +582,10 @@ def payment_body(
         "inbound": [
             {
                 "scheduleId": sail.schedule_id,
-                "passengers": [
+                # "selectedSeats", and each entry is the person and the seat
+                # together rather than a seat with a passenger beside it. The
+                # name is the reason this took three tries.
+                "selectedSeats": [
                     {
                         "customerCategoryId": passenger.id_type,
                         "customerId": passenger.id_number,
@@ -571,6 +593,7 @@ def payment_body(
                         "dob": passenger.date_of_birth,
                         "productCode": REGULAR_PRODUCT,
                         "isPrimary": 1,
+                        "isAccompanied": 0,
                         "seatNumber": int(seat),
                         "deckCode": str(deck),
                         "passengerCount": 0,

@@ -2389,7 +2389,7 @@ class TelegramBridge(QObject):
         passenger = ferry_passenger(
             name=str(config.get("ferry_passenger_name", "")).strip(),
             id_number=self.store.get_ferry_passenger_id(config),
-            id_type=str(config.get("ferry_passenger_id_type", "101")),
+            id_type=str(config.get("ferry_passenger_id_type", "2")),
         )
         if not passenger.name or not passenger.id_number:
             client.answer_callback_query(

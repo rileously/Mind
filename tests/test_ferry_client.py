@@ -438,7 +438,7 @@ class WhoTravels(unittest.TestCase):
 
         return (
             Sailing(schedule_id="125034", fare=70, route="R1C5"),
-            Passenger(name="Mohamed Maazinu", id_number="A375667", id_type="101"),
+            Passenger(name="Mohamed Maazinu", id_number="A375667", id_type="2"),
             Contact(name="Adam", email="a@example.com", phone="9194744"),
         )
 
@@ -447,11 +447,30 @@ class WhoTravels(unittest.TestCase):
 
         sail, passenger, contact = self.parts()
         body = payment_body("00000014B909", sail, 3, passenger, contact)
-        rider = body["inbound"][0]["passengers"][0]
+        rider = body["inbound"][0]["selectedSeats"][0]
         self.assertEqual(rider["customerName"], "Mohamed Maazinu")
         self.assertEqual(rider["customerId"], "A375667")
         self.assertEqual(rider["seatNumber"], 3)
         self.assertEqual(rider["isPrimary"], 1)
+
+    def test_the_person_and_the_seat_are_one_entry(self):
+        # RTL calls it selectedSeats and puts the passenger in it. Splitting
+        # them into a seat list and a passenger list is refused with
+        # "seat.list.not.found", which names neither of the two real problems.
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        inbound = payment_body("00000014B909", sail, 3, passenger, contact)["inbound"][0]
+        self.assertIn("selectedSeats", inbound)
+        self.assertEqual(inbound["selectedSeats"][0]["customerCategoryId"], "2")
+
+    def test_the_card_is_never_kept(self):
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        body = payment_body("00000014B909", sail, 3, passenger, contact)
+        self.assertEqual(body["tokenize"], 0)
+        self.assertIsNone(body["cardId"])
 
     def test_the_booking_being_paid_for_is_named(self):
         from mind.ferry_client import payment_body
@@ -475,13 +494,19 @@ class WhoTravels(unittest.TestCase):
         with self.assertRaises(FerryError):
             payment_body("", sail, 3, Passenger(name="X", id_number="A1"), contact)
 
-    def test_nothing_in_the_request_is_a_card(self):
-        # Mind builds this and never handles a card; the bank page does.
+    def test_no_card_details_are_in_the_request(self):
+        # Mind builds this and never handles a card; the bank page does. The
+        # request does carry a cardId, which is a reference to a card already
+        # saved at RTL rather than a card - and Mind always sends it empty.
         from mind.ferry_client import payment_body
 
         sail, passenger, contact = self.parts()
-        flat = json.dumps(payment_body("00000014B909", sail, 3, passenger, contact)).lower()
-        for word in ("card", "cvv", "expiry", "pan"):
+        body = payment_body("00000014B909", sail, 3, passenger, contact)
+        self.assertIsNone(body["cardId"])
+        flat = json.dumps(body).lower()
+        # Not "pan": it hides inside isAccompanied, and a test that fails on
+        # a word rather than a field teaches nothing.
+        for word in ("cvv", "expiry", "cardnumber", "cvc", "securitycode"):
             self.assertNotIn(word, flat)
 
     def test_the_bank_page_is_found_whatever_rtl_calls_it(self):

@@ -133,7 +133,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # settings; the ID number is a government one and is kept the way the bot
     # token and the router password are.
     "ferry_passenger_name": "",
-    "ferry_passenger_id_type": "101",
+    # The id from customerIdTypes, not the code: National ID is 2.
+    "ferry_passenger_id_type": "2",
     "ferry_passenger_id_protected": "",
     "ferry_contact_email": "",
     "ferry_contact_phone": "",
