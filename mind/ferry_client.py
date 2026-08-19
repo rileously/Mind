@@ -258,6 +258,7 @@ SEATS_URL = "https://bo.rtl.mv:4455/maldives/api/booking/v3/ferries/seats"
 # rather than an empty list - an empty list is accepted and then quietly
 # returns no sailings at all, which is the worst of both answers.
 ONE_WAY = 1
+RETURN = 2
 WEB_DEVICE = 1
 REGULAR_PRODUCT = "101"
 SEAT_FREE = 1
@@ -422,12 +423,24 @@ class Reservation:
         return bool(self.booking_id)
 
 
+def _leg(sail, seats, origin_code: str, destination_code: str, deck: str) -> dict:
+    """One direction of a journey, as reserving describes it."""
+    return {
+        "scheduleId": sail.schedule_id,
+        "sourceStation": str(origin_code),
+        "destinationStation": str(destination_code),
+        "seats": [{"deckCode": str(deck), "seatNumber": int(n)} for n in seats],
+    }
+
+
 def reserve_body(
     sail,
     seats,
     origin_code: str,
     destination_code: str,
     deck: str = DEFAULT_DECK,
+    back_sail=None,
+    back_seats=None,
 ) -> dict:
     """The request RTL's own page sends when somebody presses Select.
 
@@ -438,25 +451,28 @@ def reserve_body(
     wanted = [int(s) for s in (seats if isinstance(seats, (list, tuple)) else [seats])]
     if not wanted:
         raise FerryError("No seat was chosen.")
+    coming_back = [int(n) for n in (back_seats or [])]
+    if back_sail is not None and len(coming_back) != len(wanted):
+        raise FerryError("The way back needs as many seats as the way there.")
+    # The fare RTL quotes is per person, per direction.
+    total = float(sail.fare or 0) * len(wanted)
+    if back_sail is not None:
+        total += float(back_sail.fare or 0) * len(coming_back)
     return {
         "products": [{"productCode": REGULAR_PRODUCT, "passengerCount": len(wanted)}],
         "startStation": str(origin_code),
         "endStation": str(destination_code),
-        # The fare RTL quotes is per person.
-        "totalPrice": float(sail.fare or 0) * len(wanted),
+        "totalPrice": total,
         "deviceType": WEB_DEVICE,
-        "qrType": ONE_WAY,
-        "inbound": [
-            {
-                "scheduleId": sail.schedule_id,
-                "sourceStation": str(origin_code),
-                "destinationStation": str(destination_code),
-                "seats": [
-                    {"deckCode": str(deck), "seatNumber": number} for number in wanted
-                ],
-            }
-        ],
-        "outbound": None,
+        "qrType": ONE_WAY if back_sail is None else RETURN,
+        "inbound": [_leg(sail, wanted, origin_code, destination_code, deck)],
+        # The way back runs the other way round, which is the whole of what
+        # makes it the way back.
+        "outbound": (
+            None
+            if back_sail is None
+            else [_leg(back_sail, coming_back, destination_code, origin_code, deck)]
+        ),
     }
 
 
@@ -558,6 +574,26 @@ def id_type_value(stored: str) -> str:
     return ID_TYPE_BY_CODE.get(text, text or NATIONAL_ID)
 
 
+def _riders(people, seats, deck: str) -> list:
+    """Each person with the seat they are in, for one direction."""
+    return [
+        {
+            "customerCategoryId": id_type_value(rider.id_type),
+            "customerId": rider.id_number,
+            "customerName": rider.name,
+            "dob": rider.date_of_birth,
+            "productCode": REGULAR_PRODUCT,
+            # The first person on the booking is the one RTL treats as owner.
+            "isPrimary": 1 if position == 0 else 0,
+            "isAccompanied": 0,
+            "seatNumber": int(number),
+            "deckCode": str(deck),
+            "passengerCount": position,
+        }
+        for position, (rider, number) in enumerate(zip(people, seats))
+    ]
+
+
 def payment_body(
     booking_id: str,
     sail,
@@ -565,6 +601,8 @@ def payment_body(
     people,
     contact: Contact,
     deck: str = DEFAULT_DECK,
+    back_sail=None,
+    back_seats=None,
 ) -> dict:
     """The request that turns a held seat into a ticket to pay for.
 
@@ -584,11 +622,17 @@ def payment_body(
             f"{len(wanted)} seats are held but {len(riders)} "
             f"passenger{'s' if len(riders) != 1 else ''} were given."
         )
+    coming_back = [int(n) for n in (back_seats or [])]
+    if back_sail is not None and len(coming_back) != len(wanted):
+        raise FerryError("The way back needs as many seats as the way there.")
+    total = float(sail.fare or 0) * len(wanted)
+    if back_sail is not None:
+        total += float(back_sail.fare or 0) * len(coming_back)
     return {
         "bookingId": booking_id,
         "rrn": "",
-        "qrType": ONE_WAY,
-        "totalPrice": float(sail.fare or 0) * len(wanted),
+        "qrType": ONE_WAY if back_sail is None else RETURN,
+        "totalPrice": total,
         "deviceType": WEB_DEVICE,
         "vehicleType": VEHICLE_FERRY,
         "paymentType": PAYMENT_TYPE_CARD,
@@ -605,29 +649,19 @@ def payment_body(
         "inbound": [
             {
                 "scheduleId": sail.schedule_id,
-                # "selectedSeats", and each entry is the person and the seat
-                # together rather than a seat with a passenger beside it. The
-                # name is the reason this took three tries.
-                "selectedSeats": [
-                    {
-                        "customerCategoryId": id_type_value(rider.id_type),
-                        "customerId": rider.id_number,
-                        "customerName": rider.name,
-                        "dob": rider.date_of_birth,
-                        "productCode": REGULAR_PRODUCT,
-                        # The first person on the booking is the one RTL
-                        # treats as its owner.
-                        "isPrimary": 1 if position == 0 else 0,
-                        "isAccompanied": 0,
-                        "seatNumber": number,
-                        "deckCode": str(deck),
-                        "passengerCount": position,
-                    }
-                    for position, (rider, number) in enumerate(zip(riders, wanted))
-                ],
+                "selectedSeats": _riders(riders, wanted, deck),
             }
         ],
-        "outbound": [],
+        "outbound": (
+            []
+            if back_sail is None
+            else [
+                {
+                    "scheduleId": back_sail.schedule_id,
+                    "selectedSeats": _riders(riders, coming_back, deck),
+                }
+            ]
+        ),
     }
 
 
