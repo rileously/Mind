@@ -128,6 +128,7 @@ from .telegram_ui import (
     build_held_keyboard,
     ferry_payment_text,
     ferry_payment_failed_text,
+    ferry_ask_who_text,
     FERRY_PAY,
     FERRY_HOLD,
     build_sailings_keyboard,
@@ -171,6 +172,7 @@ from .ferry_client import (
     initiate_payment as ferry_initiate_payment,
     Passenger as ferry_passenger,
     Contact as ferry_contact,
+    parse_passenger as ferry_parse_passenger,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -1157,6 +1159,11 @@ class TelegramBridge(QObject):
         prefix = str(config.get("prefix", "?"))
         request = parse_message(text, prefix)
         trigger = (request.trigger or "").lower()
+
+        # A reply to "who is travelling" is an ordinary message, so it is
+        # looked for before anything tries to read it as a command.
+        if self._ferry_passenger_reply(client, chat_id, text, config):
+            return
 
         if trigger in {"start", "menu"}:
             self._send_menu(client, chat_id, config)
@@ -2350,16 +2357,12 @@ class TelegramBridge(QObject):
         self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
         state["booking"] = held.booking_id
         self._ferry_pick[chat_id] = state
-        # Only offer payment when there is somebody to put on the ticket.
-        who = str(config.get("ferry_passenger_name", "")).strip()
-        can_pay = bool(who and self.store.get_ferry_passenger_id(config))
+        # Payment is always offerable now: who travels is asked in the chat
+        # when the button is pressed, rather than read from a saved setting.
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_held_text(
-                origin.name, destination.name, sail, int(seat), held.booking_id,
-                who if can_pay else "",
-            ),
-            build_held_keyboard(int(index), int(seat), can_pay), html=True,
+            seat_held_text(origin.name, destination.name, sail, int(seat), held.booking_id),
+            build_held_keyboard(int(index), int(seat)), html=True,
         )
 
     def _handle_ferry_pay(
@@ -2386,42 +2389,84 @@ class TelegramBridge(QObject):
             return
         if int(index) >= len(sails):
             return
-        passenger = ferry_passenger(
-            name=str(config.get("ferry_passenger_name", "")).strip(),
-            id_number=self.store.get_ferry_passenger_id(config),
-            id_type=str(config.get("ferry_passenger_id_type", "2")),
+        # Who travels is asked here rather than kept in Preferences: a ticket
+        # is often for somebody else, and a saved passenger would have to be
+        # edited on the PC before every one of those.
+        state["paying_trip"] = int(index)
+        state["paying_seat"] = int(seat)
+        self._ferry_pick[chat_id] = state
+        client.answer_callback_query(callback_id)
+        self._ferry_ask_passenger(client, chat_id, message_id)
+
+    def _ferry_ask_passenger(
+        self, client: TelegramClient, chat_id: int, message_id: object
+    ) -> None:
+        """Ask who is travelling, for this booking only."""
+        state = self._ferry_pick.get(chat_id) or {}
+        state["awaiting_passenger"] = True
+        self._ferry_pick[chat_id] = state
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY, ferry_ask_who_text(),
+            build_ferry_again_keyboard(), html=True,
         )
-        if not passenger.name or not passenger.id_number:
-            client.answer_callback_query(
-                callback_id,
-                "Fill in who travels, in Mind's Preferences, on the Telegram tab.",
-                alert=True,
+
+    def _ferry_passenger_reply(
+        self, client: TelegramClient, chat_id: int, text: str, config: dict
+    ) -> bool:
+        """A message that answers "who is travelling". True if it was one."""
+        state = self._ferry_pick.get(chat_id) or {}
+        if not state.get("awaiting_passenger"):
+            return False
+        passenger = ferry_parse_passenger(text)
+        if passenger is None:
+            client.send_message(
+                chat_id,
+                "That did not have an ID number in it. Send the name and the "
+                "ID together, like:\n\nMohamed Maazinu A375667",
             )
+            return True
+        state["awaiting_passenger"] = False
+        self._ferry_pick[chat_id] = state
+        self._ferry_pay_now(client, chat_id, None, passenger, config)
+        return True
+
+    def _ferry_pay_now(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        passenger,
+        config: dict,
+    ) -> None:
+        """Turn the held seat into a bank page for this passenger."""
+        state = self._ferry_pick.get(chat_id) or {}
+        sails = state.get("sailings") or []
+        booking = state.get("booking", "")
+        index = state.get("paying_trip", 0)
+        seat = state.get("paying_seat", 0)
+        if not booking or index >= len(sails) or not seat:
+            client.send_message(chat_id, "That booking is no longer on this screen.")
             return
+        sail = sails[index]
         contact = ferry_contact(
             name=passenger.name,
             email=str(config.get("ferry_contact_email", "")).strip(),
             phone=str(config.get("ferry_contact_phone", "")).strip(),
         )
-        client.answer_callback_query(callback_id, "Asking RTL for a payment link…")
-        sail = sails[int(index)]
         try:
             link = ferry_initiate_payment(
                 ferry_payment_body(booking, sail, int(seat), passenger, contact)
             )
         except FerryError as exc:
-            # Into the panel, not a second answer_callback_query: Telegram
-            # takes one answer per tap and quietly drops the rest, so an error
-            # reported that way is an error nobody ever sees.
-            self._replace_panel(
-                client, chat_id, message_id, PANEL_FERRY,
+            self._send_panel(
+                client, chat_id, PANEL_FERRY,
                 ferry_payment_failed_text(booking, str(exc)),
                 build_ferry_again_keyboard(), html=True,
             )
             return
         self.log.emit(f"Telegram: ferry payment link for booking {booking}")
-        self._replace_panel(
-            client, chat_id, message_id, PANEL_FERRY,
+        self._send_panel(
+            client, chat_id, PANEL_FERRY,
             ferry_payment_text(passenger.name, sail, int(seat), booking, link),
             build_ferry_again_keyboard(), html=True,
         )

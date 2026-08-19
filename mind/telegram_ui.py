@@ -1207,16 +1207,8 @@ def seat_held_text(
         f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
         f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}\n\n"
         f"Booking <code>{booking}</code>\n\n"
-        "<b>Not paid yet.</b> "
-        + (
-            f"Paying puts <b>{who}</b> on the ticket."
-            if who
-            else "Mind has nobody to put on the ticket: fill in "
-            "<b>Who travels on a ferry ticket</b> in Preferences, on the Telegram "
-            "tab, and payment can be offered here. Until then, pay for this "
-            "booking in the RTL app or at rtl.mv."
-        )
-        + " The seat goes back on sale when the hold runs out."
+        "<b>Not paid yet.</b> Continue to payment asks who is travelling, then "
+        "gives you a bank page. The seat goes back on sale when the hold runs out."
     )
 
 
@@ -1282,3 +1274,14 @@ def ferry_payment_failed_text(booking: str, reason: str) -> str:
         "Pay for it in the RTL app or at rtl.mv, where you are already signed in."
     ]
     return "\n".join(lines)
+
+
+def ferry_ask_who_text() -> str:
+    """Asking who the ticket is for, once the seat is held."""
+    return (
+        "🎫 <b>Who is travelling?</b>\n\n"
+        "Send the name and the ID number together, like:\n"
+        "<code>Mohamed Maazinu A375667</code>\n\n"
+        "This is used for this ticket only and is not saved. It does stay in "
+        "this chat's history, which is Telegram's, not Mind's."
+    )

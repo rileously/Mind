@@ -661,3 +661,31 @@ def initiate_payment(body: dict, token: str = "", opener=None) -> str:
     except ValueError as exc:
         raise FerryError("RTL answered with something that was not JSON.") from exc
     return parse_payment(payload)
+
+
+# RTL's own rule for a National ID, straight out of customerIdTypes: a letter A
+# and six digits. Checking it here means a typo is caught in the chat rather
+# than after a seat has been held for it.
+ID_PATTERN = re.compile(r"^[Aa][0-9]{6}$")
+
+
+def looks_like_id(text: str) -> bool:
+    return bool(ID_PATTERN.match((text or "").strip()))
+
+
+def parse_passenger(text: str) -> Passenger | None:
+    """"Mohamed Maazinu A375667" as a passenger.
+
+    The ID is found by its shape rather than by its position, so it can be
+    written first or last, and the rest of the words are the name. Returns None
+    when there is no ID in it, because a booking without one is refused by RTL
+    later and more confusingly.
+    """
+    words = (text or "").split()
+    number = next((w for w in words if looks_like_id(w)), "")
+    if not number:
+        return None
+    name = " ".join(w for w in words if w != number).strip(" ,")
+    if not name:
+        return None
+    return Passenger(name=name, id_number=number.upper(), id_type=NATIONAL_ID)

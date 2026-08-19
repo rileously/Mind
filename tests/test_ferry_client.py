@@ -556,3 +556,45 @@ class TheTwoNamesForOneIdType(unittest.TestCase):
             Contact(name="A"),
         )
         self.assertEqual(body["inbound"][0]["selectedSeats"][0]["customerCategoryId"], "2")
+
+
+class WhoIsTravellingThisTime(unittest.TestCase):
+    """A ticket is often for somebody else, so the passenger is asked per booking.
+
+    The ID is found by its shape rather than its position, because people
+    write the name first about as often as they write it last, and being told
+    off for word order is a poor way to buy a ferry ticket.
+    """
+
+    def test_name_then_id(self):
+        from mind.ferry_client import parse_passenger
+
+        who = parse_passenger("Mohamed Maazinu A375667")
+        self.assertEqual((who.name, who.id_number), ("Mohamed Maazinu", "A375667"))
+
+    def test_id_then_name(self):
+        from mind.ferry_client import parse_passenger
+
+        who = parse_passenger("A375667 Mohamed Maazinu")
+        self.assertEqual((who.name, who.id_number), ("Mohamed Maazinu", "A375667"))
+
+    def test_a_lowercase_id_is_still_an_id(self):
+        from mind.ferry_client import parse_passenger
+
+        self.assertEqual(parse_passenger("Adam Rilwan a123456").id_number, "A123456")
+
+    def test_no_id_is_refused_here_rather_than_by_rtl(self):
+        from mind.ferry_client import parse_passenger
+
+        self.assertIsNone(parse_passenger("Mohamed Maazinu"))
+
+    def test_a_number_of_the_wrong_shape_is_not_an_id(self):
+        from mind.ferry_client import parse_passenger
+
+        self.assertIsNone(parse_passenger("Mohamed Maazinu A37566"))
+        self.assertIsNone(parse_passenger("Mohamed Maazinu 375667"))
+
+    def test_an_id_with_no_name_is_not_a_passenger(self):
+        from mind.ferry_client import parse_passenger
+
+        self.assertIsNone(parse_passenger("A375667"))

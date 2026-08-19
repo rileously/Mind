@@ -694,9 +694,9 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
         self.assertLessEqual(len(self.client.answered), 1)
 
-    def test_payment_is_not_offered_with_nobody_to_put_on_the_ticket(self):
-        # A button whose only purpose is to explain why it cannot work asks
-        # somebody to find that out by pressing it.
+    def test_payment_is_offered_without_anything_saved(self):
+        # Who travels is asked in the chat, so a held seat can always go on to
+        # payment - including for somebody who is not the person who owns Mind.
         import mind.telegram_bridge as bridge
         from mind.ferry_client import Reservation
 
@@ -704,9 +704,7 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         bridge.ferry_reserve = lambda body: Reservation(booking_id="00000014B909")
         self.addCleanup(setattr, bridge, "ferry_reserve", original)
         self.bridge._handle_ferry_hold(self.client, 7, "cb", 500, "0.3", self.stops, self.config)
-        shown = str(self.client.edited or self.client.sent)
-        self.assertNotIn("Continue to payment", shown)
-        self.assertIn("Who travels on a ferry ticket", shown)
+        self.assertIn("Continue to payment", str(self.client.edited or self.client.sent))
 
     def test_a_held_seat_reports_its_booking_and_that_it_is_unpaid(self):
         import mind.telegram_bridge as bridge
