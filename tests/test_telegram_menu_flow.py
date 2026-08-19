@@ -639,7 +639,7 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         super().setUp()
         from mind.ferry_client import Sailing, Stop
 
-        self.sail = Sailing(
+        self.sail = Sailing.of(
             schedule_id="125034", fare=70, route="R1C5", boat="RTL109",
             departs="20260820083000", arrives="20260820092000",
             free_seats=(3, 7), taken_seats=(19,), seats_free=2, seats_total=3,
@@ -660,7 +660,7 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         self.bridge._ferry_pick[7]["wanted"] = 1
         self.bridge._handle_ferry_seat(self.client, 7, 500, "0.3", self.stops)
         shown = str(self.client.edited or self.client.sent)
-        self.assertIn("Holding takes the seat off the boat", shown)
+        self.assertIn("Holding takes these seats off every boat", shown)
         self.assertEqual(held, [])
 
     def test_the_asking_offers_a_separate_button_to_hold(self):

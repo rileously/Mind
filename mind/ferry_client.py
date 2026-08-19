@@ -262,36 +262,129 @@ RETURN = 2
 WEB_DEVICE = 1
 REGULAR_PRODUCT = "101"
 SEAT_FREE = 1
+# Every boat seen so far has one deck, and RTL still wants it named.
+DEFAULT_DECK = "1"
 
 
 @dataclass(frozen=True)
-class Sailing:
-    """One departure, and how full it is."""
+class Leg:
+    """One boat, on one part of a journey."""
 
+    schedule_id: str = ""
     route: str = ""
-    route_code: str = ""
     boat: str = ""
     departs: str = ""
     arrives: str = ""
+    from_name: str = ""
+    to_name: str = ""
+    from_code: str = ""
+    to_code: str = ""
     stops: int = 0
-    fare: float = 0.0
-    seats_free: int = 0
-    seats_total: int = 0
-    schedule_id: str = ""
-    # Which seats are actually free, so one can be pointed at rather than
-    # merely counted.
     free_seats: tuple = ()
-    # The taken ones too, so a map can be drawn with its shape intact.
     taken_seats: tuple = ()
+    deck: str = DEFAULT_DECK
 
     @property
     def departs_at(self) -> str:
-        """The time on its own, from RTL's fourteen digits."""
         return f"{self.departs[8:10]}:{self.departs[10:12]}" if len(self.departs) >= 12 else ""
 
     @property
     def arrives_at(self) -> str:
         return f"{self.arrives[8:10]}:{self.arrives[10:12]}" if len(self.arrives) >= 12 else ""
+
+    @property
+    def seats_total(self) -> int:
+        return len(self.free_seats) + len(self.taken_seats)
+
+
+@dataclass(frozen=True)
+class Sailing:
+    """One journey, which may be several boats with a wait between them.
+
+    RTL answers with a journey and the instances that make it up. Two islands
+    on opposite sides of an atoll are often not one boat, and treating each
+    instance as its own departure offers three sailings that are really one
+    trip - and books a third of it.
+    """
+
+    fare: float = 0.0
+    legs: tuple = ()
+
+    @classmethod
+    def of(cls, **fields):
+        """A journey on one boat, described the way a leg is.
+
+        Most journeys are one boat, and saying so should not mean building a
+        leg and wrapping it. The fare belongs to the journey; everything else
+        belongs to the boat.
+        """
+        fare = fields.pop("fare", 0.0)
+        # Counts are worked out from the seats themselves; accepted and
+        # ignored so a caller describing a boat does not have to know that.
+        for derived in ("seats_free", "seats_total", "route_code"):
+            fields.pop(derived, None)
+        return cls(fare=float(fare or 0), legs=(Leg(**fields),))
+
+    @property
+    def first(self):
+        return self.legs[0] if self.legs else Leg()
+
+    @property
+    def last(self):
+        return self.legs[-1] if self.legs else Leg()
+
+    @property
+    def changes(self) -> int:
+        return max(0, len(self.legs) - 1)
+
+    @property
+    def departs(self) -> str:
+        return self.first.departs
+
+    @property
+    def arrives(self) -> str:
+        return self.last.arrives
+
+    @property
+    def departs_at(self) -> str:
+        return self.first.departs_at
+
+    @property
+    def arrives_at(self) -> str:
+        return self.last.arrives_at
+
+    @property
+    def route(self) -> str:
+        return " + ".join(leg.route for leg in self.legs if leg.route)
+
+    @property
+    def boat(self) -> str:
+        return self.first.boat
+
+    @property
+    def schedule_id(self) -> str:
+        return self.first.schedule_id
+
+    @property
+    def stops(self) -> int:
+        return sum(leg.stops for leg in self.legs)
+
+    @property
+    def seats_free(self) -> int:
+        """The fullest leg decides: a seat is needed on every one of them."""
+        return min((len(leg.free_seats) for leg in self.legs), default=0)
+
+    @property
+    def seats_total(self) -> int:
+        return self.first.seats_total
+
+    @property
+    def free_seats(self) -> tuple:
+        return self.first.free_seats
+
+    @property
+    def taken_seats(self) -> tuple:
+        return self.first.taken_seats
 
     @property
     def full(self) -> bool:
@@ -322,24 +415,26 @@ def parse_sailings(payload: dict) -> list[Sailing]:
         if not isinstance(journey, dict):
             continue
         fare = journey.get("totalFare") or 0
+        legs = []
         for leg in journey.get("instances") or []:
             if not isinstance(leg, dict):
                 continue
             deck = leg.get("deck") if isinstance(leg.get("deck"), dict) else {}
             seats = [s for s in (deck.get("seats") or []) if isinstance(s, dict)]
             free = sum(1 for s in seats if s.get("status") == SEAT_FREE)
-            found.append(
-                Sailing(
+            legs.append(
+                Leg(
+                    schedule_id=str(leg.get("scheduleId") or ""),
                     route=str(leg.get("routeName") or ""),
-                    route_code=str(leg.get("routeCode") or ""),
                     boat=str(leg.get("assetName") or ""),
                     departs=str(leg.get("startTime") or ""),
                     arrives=str(leg.get("endTime") or ""),
+                    from_name=str(leg.get("startStationName") or ""),
+                    to_name=str(leg.get("endStationName") or ""),
+                    from_code=str(leg.get("startStationCode") or ""),
+                    to_code=str(leg.get("endStationCode") or ""),
                     stops=int(leg.get("intermediateStops") or 0),
-                    fare=float(fare or 0),
-                    seats_free=free,
-                    seats_total=len(seats) or int(deck.get("seatCount") or 0),
-                    schedule_id=str(leg.get("scheduleId") or ""),
+                    deck=str(deck.get("code") or DEFAULT_DECK),
                     free_seats=tuple(
                         int(s.get("code"))
                         for s in seats
@@ -352,6 +447,8 @@ def parse_sailings(payload: dict) -> list[Sailing]:
                     ),
                 )
             )
+        if legs:
+            found.append(Sailing(fare=float(fare or 0), legs=tuple(legs)))
     return found
 
 
@@ -415,7 +512,6 @@ def sailings(
 
 
 RESERVE_URL = "https://bo.rtl.mv:4455/maldives/api/booking/v3/ferries/reserveFerrySeats"
-DEFAULT_DECK = "1"
 
 
 @dataclass(frozen=True)
@@ -448,14 +544,66 @@ def _total(sail, back_sail, people: int) -> float:
     return quoted * max(1, people) if quoted and people else quoted
 
 
-def _leg(sail, seats, origin_code: str, destination_code: str, deck: str) -> dict:
-    """One direction of a journey, as reserving describes it."""
-    return {
-        "scheduleId": sail.schedule_id,
-        "sourceStation": str(origin_code),
-        "destinationStation": str(destination_code),
-        "seats": [{"deckCode": str(deck), "seatNumber": int(n)} for n in seats],
-    }
+def seats_per_leg(sail, seats) -> list:
+    """The seats for each leg of a journey.
+
+    A flat list means the same numbers on every boat, which is what somebody
+    picking one seat for a one-boat trip means. A list of lists is one set per
+    leg, for a journey that changes boats and where the seat that was free on
+    the first is taken on the second.
+    """
+    legs = sail.legs or ()
+    # A bare number is one seat, which is worth accepting: it is what a caller
+    # with a single traveller on a single boat naturally writes.
+    many = list(seats) if isinstance(seats, (list, tuple)) else [seats]
+    if many and isinstance(many[0], (list, tuple)):
+        chosen = [list(group) for group in many]
+    else:
+        chosen = [list(many) for _ in legs] if legs else [list(many)]
+    if legs and len(chosen) != len(legs):
+        raise FerryError(
+            f"This journey changes boats {len(legs) - 1} time"
+            f"{'s' if len(legs) != 2 else ''}, so it needs seats on "
+            f"{len(legs)} of them."
+        )
+    return chosen
+
+
+def _legs_for(sail, seats, origin_code: str, destination_code: str, deck: str) -> list:
+    """Every boat on a journey, as reserving describes them.
+
+    One entry per leg: a journey that changes boats is several bookings on one
+    booking, and a seat held on the first boat is no use without one on the
+    rest.
+    """
+    grouped = seats_per_leg(sail, seats)
+    legs = sail.legs or ()
+    if not legs:
+        return [
+            {
+                "scheduleId": sail.schedule_id,
+                "sourceStation": str(origin_code),
+                "destinationStation": str(destination_code),
+                "seats": [
+                    {"deckCode": str(deck), "seatNumber": int(n)} for n in grouped[0]
+                ],
+            }
+        ]
+    return [
+        {
+            "scheduleId": leg.schedule_id,
+            # Each boat carries its own two ends. Leaving them off the
+            # middle legs is refused with "destination station code not found",
+            # which is true and reads as though the journey had none.
+            "sourceStation": leg.from_code or str(origin_code),
+            "destinationStation": leg.to_code or str(destination_code),
+            "seats": [
+                {"deckCode": str(leg.deck or deck), "seatNumber": int(n)}
+                for n in grouped[position]
+            ],
+        }
+        for position, leg in enumerate(legs)
+    ]
 
 
 def reserve_body(
@@ -473,7 +621,7 @@ def reserve_body(
     every call that succeeds takes a real seat out of a real ferry and there is
     no polite way to discover a payload by trying.
     """
-    wanted = [int(s) for s in (seats if isinstance(seats, (list, tuple)) else [seats])]
+    wanted = seats_per_leg(sail, seats)[0]
     if not wanted:
         raise FerryError("No seat was chosen.")
     coming_back = [int(n) for n in (back_seats or [])]
@@ -487,13 +635,13 @@ def reserve_body(
         "totalPrice": total,
         "deviceType": WEB_DEVICE,
         "qrType": ONE_WAY if back_sail is None else RETURN,
-        "inbound": [_leg(sail, wanted, origin_code, destination_code, deck)],
+        "inbound": _legs_for(sail, seats, origin_code, destination_code, deck),
         # The way back runs the other way round, which is the whole of what
         # makes it the way back.
         "outbound": (
             None
             if back_sail is None
-            else [_leg(back_sail, coming_back, destination_code, origin_code, deck)]
+            else _legs_for(back_sail, back_seats, destination_code, origin_code, deck)
         ),
     }
 
@@ -616,6 +764,21 @@ def _riders(people, seats, deck: str) -> list:
     ]
 
 
+def _paid_legs(sail, seats, riders, deck: str) -> list:
+    """Each boat with everybody's seat on it, for the payment."""
+    grouped = seats_per_leg(sail, seats)
+    legs = sail.legs or ()
+    if not legs:
+        return [{"scheduleId": sail.schedule_id, "selectedSeats": _riders(riders, grouped[0], deck)}]
+    return [
+        {
+            "scheduleId": leg.schedule_id,
+            "selectedSeats": _riders(riders, grouped[position], str(leg.deck or deck)),
+        }
+        for position, leg in enumerate(legs)
+    ]
+
+
 def payment_body(
     booking_id: str,
     sail,
@@ -635,7 +798,7 @@ def payment_body(
     """
     if not booking_id:
         raise FerryError("There is no booking to pay for.")
-    wanted = [int(s) for s in (seats if isinstance(seats, (list, tuple)) else [seats])]
+    wanted = seats_per_leg(sail, seats)[0]
     riders = list(people) if isinstance(people, (list, tuple)) else [people]
     if not riders or any(not r.name or not r.id_number for r in riders):
         raise FerryError("Every passenger needs a name and an ID number.")
@@ -644,9 +807,10 @@ def payment_body(
             f"{len(wanted)} seats are held but {len(riders)} "
             f"passenger{'s' if len(riders) != 1 else ''} were given."
         )
-    coming_back = [int(n) for n in (back_seats or [])]
-    if back_sail is not None and len(coming_back) != len(wanted):
-        raise FerryError("The way back needs as many seats as the way there.")
+    if back_sail is not None:
+        coming_back = seats_per_leg(back_sail, back_seats)[0]
+        if len(coming_back) != len(wanted):
+            raise FerryError("The way back needs as many seats as the way there.")
     total = _total(sail, back_sail, len(wanted))
     return {
         "bookingId": booking_id,
@@ -666,21 +830,11 @@ def payment_body(
         "customerName": contact.name or riders[0].name,
         "customerEmail": contact.email,
         "customerPhone": contact.phone,
-        "inbound": [
-            {
-                "scheduleId": sail.schedule_id,
-                "selectedSeats": _riders(riders, wanted, deck),
-            }
-        ],
+        # One entry per boat, on each direction: everybody needs a seat on
+        # every leg, and a journey that changes boats has more than one.
+        "inbound": _paid_legs(sail, seats, riders, deck),
         "outbound": (
-            []
-            if back_sail is None
-            else [
-                {
-                    "scheduleId": back_sail.schedule_id,
-                    "selectedSeats": _riders(riders, coming_back, deck),
-                }
-            ]
+            [] if back_sail is None else _paid_legs(back_sail, back_seats, riders, deck)
         ),
     }
 

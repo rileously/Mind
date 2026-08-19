@@ -354,7 +354,7 @@ class TheSeatMap(unittest.TestCase):
         from mind.ferry_client import Sailing
         from mind.telegram_ui import build_seat_map_keyboard
 
-        sail = Sailing(free_seats=(1, 3), taken_seats=(2,))
+        sail = Sailing.of(free_seats=(1, 3), taken_seats=(2,))
         rows = build_seat_map_keyboard(sail, 0)["inline_keyboard"]
         first = rows[0]
         self.assertEqual(first[0]["text"], "1")
@@ -367,7 +367,7 @@ class TheSeatMap(unittest.TestCase):
         from mind.ferry_client import Sailing
         from mind.telegram_ui import build_seat_map_keyboard
 
-        sail = Sailing(free_seats=(7,))
+        sail = Sailing.of(free_seats=(7,))
         rows = build_seat_map_keyboard(sail, 2)["inline_keyboard"]
         seat = [b for row in rows for b in row if b["text"] == "7"][0]
         self.assertTrue(seat["callback_data"].endswith("2.7"))
@@ -384,7 +384,7 @@ class HoldingASeat(unittest.TestCase):
     def sail(self):
         from mind.ferry_client import Sailing
 
-        return Sailing(schedule_id="125034", fare=70, route="R1C5")
+        return Sailing.of(schedule_id="125034", fare=70, route="R1C5")
 
     def test_the_seat_travels_with_its_deck(self):
         from mind.ferry_client import reserve_body
@@ -437,7 +437,7 @@ class WhoTravels(unittest.TestCase):
         from mind.ferry_client import Contact, Passenger, Sailing
 
         return (
-            Sailing(schedule_id="125034", fare=70, route="R1C5"),
+            Sailing.of(schedule_id="125034", fare=70, route="R1C5"),
             Passenger(name="Mohamed Maazinu", id_number="A375667", id_type="2"),
             Contact(name="Adam", email="a@example.com", phone="9194744"),
         )
@@ -551,7 +551,7 @@ class TheTwoNamesForOneIdType(unittest.TestCase):
         from mind.ferry_client import Contact, Passenger, Sailing, payment_body
 
         body = payment_body(
-            "00000014B909", Sailing(schedule_id="1", fare=35), 4,
+            "00000014B909", Sailing.of(schedule_id="1", fare=35), 4,
             Passenger(name="A", id_number="A375667", id_type="101"),
             Contact(name="A"),
         )
@@ -611,7 +611,7 @@ class MoreThanOnePassenger(unittest.TestCase):
     def sail(self):
         from mind.ferry_client import Sailing
 
-        return Sailing(schedule_id="1", fare=35)
+        return Sailing.of(schedule_id="1", fare=35)
 
     def test_the_fare_is_per_person(self):
         from mind.ferry_client import reserve_body
@@ -681,7 +681,7 @@ class ThereAndBack(unittest.TestCase):
     def legs(self):
         from mind.ferry_client import Sailing
 
-        return (Sailing(schedule_id="11", fare=70), Sailing(schedule_id="22", fare=130))
+        return (Sailing.of(schedule_id="11", fare=70), Sailing.of(schedule_id="22", fare=130))
 
     def test_the_pair_price_is_used_whole(self):
         from mind.ferry_client import reserve_body
@@ -693,7 +693,7 @@ class ThereAndBack(unittest.TestCase):
     def test_a_one_way_still_scales_with_its_seats(self):
         from mind.ferry_client import Sailing, reserve_body
 
-        body = reserve_body(Sailing(schedule_id="1", fare=35), [1, 2], "105", "106")
+        body = reserve_body(Sailing.of(schedule_id="1", fare=35), [1, 2], "105", "106")
         self.assertEqual(body["totalPrice"], 70)
 
     def test_a_return_is_marked_as_one(self):
@@ -734,7 +734,7 @@ class ThereAndBack(unittest.TestCase):
     def test_a_one_way_payment_carries_no_outbound(self):
         from mind.ferry_client import Contact, Passenger, Sailing, payment_body
 
-        body = payment_body("B1", Sailing(schedule_id="1", fare=35), [1],
+        body = payment_body("B1", Sailing.of(schedule_id="1", fare=35), [1],
                             [Passenger(name="A", id_number="A000001")], Contact(name="A"))
         self.assertEqual(body["outbound"], [])
 
@@ -756,7 +756,91 @@ class ThereAndBack(unittest.TestCase):
             captured["body"] = _json.loads(request.data.decode())
             return Answer()
 
-        sailings("105", "106", "20260820", opener=opener, after=Sailing(schedule_id="125034"))
+        sailings("105", "106", "20260820", opener=opener, after=Sailing.of(schedule_id="125034"))
         self.assertEqual(captured["body"]["scheduleId"], ["125034"])
         self.assertEqual(captured["body"]["qrType"], 2)
         self.assertIsNotNone(captured["body"]["outboundTripDate"])
+
+
+class AJourneyThatChangesBoats(unittest.TestCase):
+    """RTL answers with a journey and the boats that make it up.
+
+    Kulhudhuffushi to Baarah is three boats with waits between them. Treating
+    each as its own departure offers three sailings that are really one trip,
+    and books a third of it.
+    """
+
+    def journey(self):
+        from mind.ferry_client import Leg, Sailing
+
+        return Sailing(
+            fare=170,
+            legs=(
+                Leg(schedule_id="1", route="R1C9", departs="20260820091500",
+                    arrives="20260820094500", from_name="A", to_name="B",
+                    from_code="104", to_code="110", free_seats=(1, 2, 3)),
+                Leg(schedule_id="2", route="S1C6", departs="20260820143000",
+                    arrives="20260820145500", from_name="B", to_name="C",
+                    from_code="110", to_code="112", free_seats=(4, 5)),
+                Leg(schedule_id="3", route="S1C5", departs="20260820151500",
+                    arrives="20260820154500", from_name="C", to_name="D",
+                    from_code="112", to_code="115", free_seats=(6,)),
+            ),
+        )
+
+    def test_one_journey_not_three_sailings(self):
+        self.assertEqual(self.journey().changes, 2)
+
+    def test_it_leaves_on_the_first_boat_and_arrives_on_the_last(self):
+        trip = self.journey()
+        self.assertEqual((trip.departs_at, trip.arrives_at), ("09:15", "15:45"))
+
+    def test_the_fullest_boat_decides_how_many_can_travel(self):
+        # Three seats on the first is no use if the last has one.
+        self.assertEqual(self.journey().seats_free, 1)
+
+    def test_every_boat_is_named(self):
+        self.assertEqual(self.journey().route, "R1C9 + S1C6 + S1C5")
+
+    def test_a_seat_is_held_on_every_boat(self):
+        from mind.ferry_client import reserve_body
+
+        body = reserve_body(self.journey(), [[1], [4], [6]], "104", "115")
+        self.assertEqual(len(body["inbound"]), 3)
+        self.assertEqual([b["scheduleId"] for b in body["inbound"]], ["1", "2", "3"])
+        self.assertEqual([b["seats"][0]["seatNumber"] for b in body["inbound"]], [1, 4, 6])
+
+    def test_each_boat_carries_its_own_two_ends(self):
+        # Leaving them off the middle boats is refused with "destination
+        # station code not found", which reads as though the journey had none.
+        from mind.ferry_client import reserve_body
+
+        middle = reserve_body(self.journey(), [[1], [4], [6]], "104", "115")["inbound"][1]
+        self.assertEqual((middle["sourceStation"], middle["destinationStation"]), ("110", "112"))
+
+    def test_the_fare_is_for_the_journey_not_per_boat(self):
+        from mind.ferry_client import reserve_body
+
+        body = reserve_body(self.journey(), [[1], [4], [6]], "104", "115")
+        self.assertEqual(body["totalPrice"], 170)
+
+    def test_seats_for_the_wrong_number_of_boats_are_refused(self):
+        from mind.ferry_client import FerryError, reserve_body
+
+        with self.assertRaises(FerryError) as caught:
+            reserve_body(self.journey(), [[1], [4]], "104", "115")
+        self.assertIn("changes boats", str(caught.exception))
+
+    def test_one_seat_written_plainly_means_it_on_every_boat(self):
+        from mind.ferry_client import seats_per_leg
+
+        self.assertEqual(seats_per_leg(self.journey(), 7), [[7], [7], [7]])
+
+    def test_everybody_gets_a_seat_on_every_boat_when_paying(self):
+        from mind.ferry_client import Contact, Passenger, payment_body
+
+        who = [Passenger(name="A", id_number="A000001")]
+        body = payment_body("B1", self.journey(), [[1], [4], [6]], who, Contact(name="A"))
+        self.assertEqual(len(body["inbound"]), 3)
+        seats = [b["selectedSeats"][0]["seatNumber"] for b in body["inbound"]]
+        self.assertEqual(seats, [1, 4, 6])

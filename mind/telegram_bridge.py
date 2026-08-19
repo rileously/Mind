@@ -137,6 +137,8 @@ from .telegram_ui import (
     build_seats_confirm_keyboard,
     count_text,
     seats_pick_text,
+    leg_seats_text,
+    journey_summary,
     ask_who_text,
     FERRY_COUNT,
     FERRY_WAY,
@@ -2361,7 +2363,11 @@ class TelegramBridge(QObject):
         value: str,
         stops: list,
     ) -> None:
-        """A seat was tapped: say what it is, and hand the booking over."""
+        """A seat was tapped, on whichever boat is being chosen for.
+
+        A journey that changes boats needs a seat on every one of them, so
+        this walks the legs in turn rather than assuming there is one.
+        """
         state = self._ferry_pick.get(chat_id) or {}
         sails = state.get("sailings") or []
         origin = ferry_stop_by_code(stops, state.get("origin", ""))
@@ -2371,44 +2377,65 @@ class TelegramBridge(QObject):
             return
         if int(index) >= len(sails) or not seat.isdigit():
             return
-        leg = state.get("leg", "out")
-        # Kept before the swap: the summary shows both legs, and the way there
-        # is not in the list of ways back.
+        direction = state.get("leg", "out")
         outbound = sails
-        if leg == "back":
+        if direction == "back":
             sails = state.get("back_sailings") or sails
         sail = sails[int(index)]
+        legs = sail.legs or ()
+        at = int(state.get("leg_at", 0))
+        if at >= len(legs):
+            at = 0
+        boat = legs[at]
         wanted = int(state.get("wanted", 1))
-        picked = list(state.get("picked", []))
+        chosen = [list(group) for group in state.get("picked_legs", [])]
+        while len(chosen) < len(legs):
+            chosen.append([])
+        picked = chosen[at]
         number = int(seat)
-        # Tapping a picked seat takes it back, which is how somebody changes
-        # their mind without starting the whole thing again.
+        # Tapping a picked seat gives it back, so somebody can change their
+        # mind without starting the journey again.
         if number in picked:
             picked.remove(number)
         elif len(picked) < wanted:
             picked.append(number)
+        chosen[at] = picked
+        state["picked_legs"] = chosen
         state["picked"] = picked
         self._ferry_pick[chat_id] = state
+
         if len(picked) < wanted:
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
-                seats_pick_text(origin.name, destination.name, sail, wanted, picked),
-                build_seat_map_keyboard(sail, int(index), picked), html=True,
+                leg_seats_text(boat, at, len(legs), wanted, picked),
+                build_seat_map_keyboard(boat, int(index), picked), html=True,
             )
             return
-        if leg == "back":
+
+        if at + 1 < len(legs):
+            # On to the next boat. Its seats are its own: the one that was
+            # free on this leg may be taken on the next.
+            state["leg_at"] = at + 1
+            self._ferry_pick[chat_id] = state
+            following = legs[at + 1]
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                leg_seats_text(following, at + 1, len(legs), wanted, []),
+                build_seat_map_keyboard(following, int(index)), html=True,
+            )
+            return
+
+        state["leg_at"] = 0
+        if direction == "back":
             out_sail = outbound[int(state.get("paying_trip", 0))]
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
-                return_summary(out_sail, state.get("picked_out", []), sail, picked),
-                build_return_hold_keyboard(state.get("picked_out", []), picked), html=True,
+                return_summary(out_sail, state.get("picked_out", []), sail, chosen),
+                build_return_hold_keyboard(state.get("picked_out", []), chosen), html=True,
             )
             return
         if state.get("returning"):
-            # The way there is chosen; now what comes back after it. RTL
-            # prices the pair, so this second ask is also where the real total
-            # comes from.
-            state["picked_out"] = picked
+            state["picked_out"] = chosen
             try:
                 back = ferry_sailings(
                     origin.code, destination.code, time.strftime("%Y%m%d"),
@@ -2420,22 +2447,18 @@ class TelegramBridge(QObject):
                     build_ferry_again_keyboard(), html=True,
                 )
                 return
-            state["back_sailings"] = back
-            state["leg"] = "back"
-            state["picked"] = []
+            state.update({"back_sailings": back, "leg": "back", "picked_legs": [], "picked": []})
             self._ferry_pick[chat_id] = state
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
-                back_sailings_text(
-                    origin.name, destination.name, state.get("when", ""), back
-                ),
+                back_sailings_text(origin.name, destination.name, state.get("when", ""), back),
                 build_back_sailings_keyboard(back), html=True,
             )
             return
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seats_pick_text(origin.name, destination.name, sail, wanted, picked),
-            build_seats_confirm_keyboard(int(index), picked), html=True,
+            journey_summary(sail, chosen),
+            build_seats_confirm_keyboard(int(index), chosen), html=True,
         )
 
     def _handle_ferry_hold(
@@ -2455,8 +2478,18 @@ class TelegramBridge(QObject):
         destination = ferry_stop_by_code(stops, state.get("destination", ""))
         index, _, listed = value.partition(".")
         there, _, home = listed.partition("|")
-        seats = [int(n) for n in there.split(",") if n.strip().isdigit()]
-        back_seats = [int(n) for n in home.split(",") if n.strip().isdigit()]
+
+        def groups(text):
+            # Boats separated by a semicolon, seats within one by a comma.
+            found = [
+                [int(n) for n in part.split(",") if n.strip().isdigit()]
+                for part in text.split(";")
+                if part.strip()
+            ]
+            return [g for g in found if g]
+
+        seats = groups(there)
+        back_seats = groups(home)
         if origin is None or destination is None or not index.isdigit() or not seats:
             return
         if int(index) >= len(sails):
@@ -2465,7 +2498,7 @@ class TelegramBridge(QObject):
         back_list = state.get("back_sailings") or []
         back_sail = back_list[0] if (back_seats and back_list) else None
         for candidate in back_list:
-            if back_seats and set(back_seats) <= set(candidate.free_seats):
+            if back_seats and set(back_seats[0]) <= set(candidate.free_seats):
                 back_sail = candidate
                 break
         client.answer_callback_query(
@@ -2486,7 +2519,7 @@ class TelegramBridge(QObject):
                 f"🚤 {exc}", build_ferry_again_keyboard(), html=True,
             )
             return
-        shown = ", ".join(str(n) for n in seats)
+        shown = " / ".join(", ".join(str(n) for n in group) for group in seats)
         self.log.emit(f"Telegram: held ferry seats {shown}, booking {held.booking_id}")
         state["booking"] = held.booking_id
         state["held_seats"] = seats
@@ -2521,8 +2554,15 @@ class TelegramBridge(QObject):
         sails = state.get("sailings") or []
         booking = state.get("booking", "")
         index, _, listed = value.partition(".")
-        # A list, not one number: "0.4,5" is two seats on the first sailing.
-        seats = [int(n) for n in listed.split(",") if n.strip().isdigit()]
+        # Boats separated by a semicolon, seats within one by a comma: "0.2;2;2"
+        # is one seat on each of three boats.
+        there = listed.partition("|")[0]
+        seats = [
+            [int(n) for n in part.split(",") if n.strip().isdigit()]
+            for part in there.split(";")
+            if part.strip()
+        ]
+        seats = [group for group in seats if group]
         if not booking or not index.isdigit() or not seats:
             return
         if int(index) >= len(sails):
@@ -2565,13 +2605,18 @@ class TelegramBridge(QObject):
                 "Mohamed Maazinu A375667",
             )
             return True
-        if held and len(people) != len(held):
+        # held is a list per boat; the people are the seats on any one of them,
+        # not the number of boats. A journey with three boats and one traveller
+        # is one passenger, not three.
+        needed = len(held[0]) if held and isinstance(held[0], (list, tuple)) else len(held)
+        if needed and len(people) != needed:
             # Caught here rather than by RTL, which refuses it with a field name.
+            was = "was" if len(people) == 1 else "were"
             client.send_message(
                 chat_id,
-                f"{len(held)} seats are held but {len(people)} "
-                f"passenger{'s' if len(people) != 1 else ''} were given. "
-                "Send one line per seat.",
+                f"{needed} seat{'s' if needed != 1 else ''} held but "
+                f"{len(people)} passenger{'s' if len(people) != 1 else ''} {was} "
+                "given. Send one line per passenger.",
             )
             return True
         state["awaiting_passenger"] = False
@@ -2622,13 +2667,16 @@ class TelegramBridge(QObject):
             client, chat_id, PANEL_FERRY,
             ferry_payment_text(
                 ", ".join(p.name for p in people), sail,
-                ", ".join(str(n) for n in seats), booking, link,
+                # Seats per boat, read the way they were picked. The number of
+                # boats is not the number of travellers.
+                " / ".join(", ".join(str(n) for n in group) for group in seats),
+                booking, link,
                 back_sail=state.get("back_sail"),
                 back_seats=state.get("held_back_seats") or None,
                 total=(
                     float(state["back_sail"].fare or 0)
                     if state.get("back_sail") is not None
-                    else float(sail.fare or 0) * len(seats)
+                    else float(sail.fare or 0) * len(people)
                 ),
             ),
             build_ferry_again_keyboard(), html=True,
@@ -2648,17 +2696,16 @@ class TelegramBridge(QObject):
             return
         sail = sails[index]
         wanted = max(1, min(int(value), MAX_PASSENGERS, sail.seats_free))
-        state.update({"wanted": wanted, "picked": []})
+        state.update({"wanted": wanted, "picked": [], "picked_legs": [], "leg_at": 0})
         self._ferry_pick[chat_id] = state
-        origin = ferry_stop_by_code(self._ferry_stops()[0], state.get("origin", ""))
-        destination = ferry_stop_by_code(self._ferry_stops()[0], state.get("destination", ""))
+        # Straight to the first boat, named as one of however many there are,
+        # so a journey that changes boats says so before any seat is picked.
+        legs = sail.legs or ()
+        first = legs[0]
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seats_pick_text(
-                origin.name if origin else "", destination.name if destination else "",
-                sail, wanted, [],
-            ),
-            build_seat_map_keyboard(sail, index), html=True,
+            leg_seats_text(first, 0, len(legs), wanted, []),
+            build_seat_map_keyboard(first, index), html=True,
         )
 
     def _handle_search(

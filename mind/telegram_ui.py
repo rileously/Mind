@@ -1218,8 +1218,14 @@ FERRY_PAY = "y"
 
 
 def seat_list(seats) -> str:
-    """Seat numbers as they travel on a button: "3,4,5"."""
+    """Seat numbers as they travel on a button.
+
+    "3,4" for one boat, "3,4;7,8" when the journey changes boats and each set
+    belongs to a different one.
+    """
     many = seats if isinstance(seats, (list, tuple)) else [seats]
+    if many and isinstance(many[0], (list, tuple)):
+        return ";".join(",".join(str(n) for n in group) for group in many)
     return ",".join(str(n) for n in many)
 
 def build_held_keyboard(trip_index: int, seats, can_pay: bool = True) -> dict:
@@ -1266,7 +1272,11 @@ def ferry_payment_text(
         f"<b>MVR {(sail.fare if total is None else total):.0f}</b>",
     ]
     if back_sail is not None:
-        coming = ", ".join(str(n) for n in (back_seats or []))
+        many = back_seats or []
+        if many and isinstance(many[0], (list, tuple)):
+            coming = " / ".join(", ".join(str(n) for n in g) for g in many)
+        else:
+            coming = ", ".join(str(n) for n in many)
         lines.append(f"Back {back_sail.departs_at} → {back_sail.arrives_at} · seats {coming}")
     lines += [
         f"Booking <code>{booking}</code>",
@@ -1419,9 +1429,14 @@ def seats_pick_text(origin: str, destination: str, sail, wanted: int, picked) ->
 
 
 def build_seats_confirm_keyboard(trip_index: int, picked) -> dict:
-    """Once enough seats are picked: hold them, or start the picking again."""
-    chosen = ",".join(str(seat) for seat in picked)
-    listed = ", ".join(str(seat) for seat in picked)
+    """Once enough seats are picked: hold them, or start the picking again.
+
+    Boats are separated by a semicolon and seats within one by a comma, so a
+    journey that changes boats keeps each set with the boat it belongs to.
+    """
+    groups = picked if picked and isinstance(picked[0], (list, tuple)) else [picked]
+    chosen = seat_groups(groups)
+    listed = " / ".join(", ".join(str(n) for n in group) for group in groups)
     return {
         "inline_keyboard": [
             [
@@ -1514,9 +1529,12 @@ def build_back_sailings_keyboard(sailings: list) -> dict:
 
 
 def return_summary(out_sail, out_seats, back_sail, back_seats) -> str:
-    """Both legs, before anything is held."""
-    there = ", ".join(str(n) for n in out_seats)
-    home = ", ".join(str(n) for n in back_seats)
+    """Both directions, before anything is held."""
+    def listed(groups):
+        many = groups if groups and isinstance(groups[0], (list, tuple)) else [groups]
+        return " / ".join(", ".join(str(n) for n in group) for group in many)
+
+    there, home = listed(out_seats), listed(back_seats)
     return (
         f"⇄ <b>Return</b>\n\n"
         f"There  <b>{out_sail.departs_at} → {out_sail.arrives_at}</b> · seats {there}\n"
@@ -1528,8 +1546,10 @@ def return_summary(out_sail, out_seats, back_sail, back_seats) -> str:
 
 
 def build_return_hold_keyboard(out_seats, back_seats) -> dict:
-    """Hold both legs on one booking."""
-    both = ",".join(str(n) for n in out_seats) + "|" + ",".join(str(n) for n in back_seats)
+    """Hold both directions on one booking."""
+    there = out_seats if out_seats and isinstance(out_seats[0], (list, tuple)) else [out_seats]
+    home = back_seats if back_seats and isinstance(back_seats[0], (list, tuple)) else [back_seats]
+    both = seat_groups(there) + "|" + seat_groups(home)
     return {
         "inline_keyboard": [
             [{"text": "✅  Hold both", "callback_data": ferry_callback(FERRY_HOLD, f"0.{both}")}],
@@ -1539,3 +1559,49 @@ def build_return_hold_keyboard(out_seats, back_seats) -> dict:
             ],
         ]
     }
+
+
+def seat_groups(groups) -> str:
+    """Seats for several boats, as they travel on a button: "3,4;7,8"."""
+    return ";".join(",".join(str(n) for n in group) for group in groups)
+
+
+def leg_seats_text(leg, at: int, total: int, wanted: int, picked) -> str:
+    """Which boat is being chosen for, when a journey has more than one."""
+    chosen = list(picked or [])
+    left = wanted - len(chosen)
+    which = f"Boat {at + 1} of {total}\n" if total > 1 else ""
+    so_far = f"\nPicked: <b>{', '.join(str(n) for n in chosen)}</b>" if chosen else ""
+    asking = (
+        f"Pick {left} more seat{'s' if left != 1 else ''}."
+        if left > 0
+        else "That is all of them."
+    )
+    return (
+        f"{which}🚤 <b>{leg.from_name}</b> {leg.departs_at} → "
+        f"<b>{leg.to_name}</b> {leg.arrives_at}\n"
+        f"{leg.route} · {len(leg.free_seats)} free{so_far}\n\n"
+        f"{asking}\n"
+        "Three each side of the aisle, as they are on the boat. ✕ is taken."
+    )
+
+
+def journey_summary(sail, groups) -> str:
+    """Every boat and the seats picked on it, before anything is held."""
+    lines = [f"🚤 <b>{sail.departs_at} → {sail.arrives_at}</b> · MVR {sail.fare:.0f}"]
+    if sail.changes:
+        lines.append(
+            f"{sail.changes} boat change{'s' if sail.changes != 1 else ''} on the way."
+        )
+    lines.append("")
+    for leg, group in zip(sail.legs, groups):
+        seats = ", ".join(str(n) for n in group)
+        lines.append(
+            f"<b>{leg.departs_at}</b> {leg.from_name} → {leg.to_name} · seats {seats}"
+        )
+    lines += [
+        "",
+        "Holding takes these seats off every boat until paid for or the hold "
+        "runs out. Mind cannot pay: that needs your card.",
+    ]
+    return "\n".join(lines)
