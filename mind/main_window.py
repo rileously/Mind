@@ -1489,7 +1489,10 @@ class PhonePage(QWidget):
         # Mirroring is scrcpy's window, over the connection Mind already has.
         # A machine without it does not get a button that cannot work.
         self.mirror_button = QPushButton("Mirror screen")
-        self.mirror_button.setToolTip("Open the phone's screen on this PC")
+        self.mirror_button.setToolTip(
+            "Open the phone's screen on this PC. Over Wi-Fi it is streamed "
+            "smaller and at thirty frames, so it keeps up."
+        )
         self.mirror_button.clicked.connect(self._mirror)
         self.mirror_button.setVisible(bool(find_scrcpy()))
         toolbar.addWidget(self.enabled_switch)

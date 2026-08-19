@@ -606,6 +606,74 @@ class ForgettingAPhone(unittest.TestCase):
             Phone(serial="").disconnect("not-an-address")
 
 
+class MirroringOverTheAir(unittest.TestCase):
+    """A phone's screen is a lot of pixels to push through a radio.
+
+    The full panel at the phone's own refresh rate is what makes wireless
+    mirroring lag - the picture does not look worse, it arrives late. Asking
+    for less is the difference, and only over the air: a cable has no reason to
+    be given a smaller picture.
+    """
+
+    def spy(self):
+        started = []
+
+        def spawn(command, **_kwargs):
+            started.append(command)
+
+        return started, spawn
+
+    def test_a_phone_on_the_network_is_asked_for_less(self):
+        from mind.adb_client import mirror
+
+        started, spawn = self.spy()
+        self.assertTrue(mirror("192.168.18.5:39475", scrcpy="scrcpy.exe", spawn=spawn))
+        self.assertIn("--max-size=1200", started[0])
+        self.assertIn("--max-fps=30", started[0])
+
+    def test_an_mdns_phone_counts_as_being_on_the_network(self):
+        from mind.adb_client import mirror
+
+        started, spawn = self.spy()
+        mirror("adb-5C06-x._adb-tls-connect._tcp.", scrcpy="scrcpy.exe", spawn=spawn)
+        self.assertIn("--max-size=1200", started[0])
+
+    def test_a_phone_on_a_cable_is_asked_for_everything(self):
+        from mind.adb_client import mirror
+
+        started, spawn = self.spy()
+        mirror("5C061VDCR0003N", scrcpy="scrcpy.exe", spawn=spawn)
+        self.assertNotIn("--max-size=1200", started[0])
+        self.assertEqual(started[0][-1], "5C061VDCR0003N")
+
+    def test_the_phone_is_still_the_one_named(self):
+        from mind.adb_client import mirror
+
+        started, spawn = self.spy()
+        mirror("192.168.18.5:39475", scrcpy="scrcpy.exe", spawn=spawn)
+        self.assertIn("-s", started[0])
+        self.assertIn("192.168.18.5:39475", started[0])
+
+    def test_no_scrcpy_installed_is_not_a_crash(self):
+        # Patched, because an empty argument means "go and look for it" and
+        # this machine has one - which would make the test pass or fail on
+        # what happens to be installed.
+        import mind.adb_client as adb
+
+        started, spawn = self.spy()
+        with unittest.mock.patch.object(adb, "find_scrcpy", return_value=""):
+            self.assertFalse(adb.mirror("192.168.18.5:39475", spawn=spawn))
+        self.assertEqual(started, [])
+
+    def test_the_options_carry_their_values(self):
+        # Written with an equals sign so nothing has to guess whether the next
+        # argument belongs to the flag before it.
+        from mind.adb_client import WIRELESS_MIRROR_OPTIONS
+
+        for option in WIRELESS_MIRROR_OPTIONS:
+            self.assertIn("=", option)
+
+
 class WhatThePhoneSays(unittest.TestCase):
     """adb speaks UTF-8, and this machine may not.
 

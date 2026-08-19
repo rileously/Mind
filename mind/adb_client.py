@@ -603,20 +603,46 @@ def find_scrcpy() -> str:
     return ""
 
 
-def mirror(serial: str = "", scrcpy: str = "") -> bool:
+# What a phone's screen is worth sending over the air. The full panel is
+# 1080x2424 at whatever the phone refreshes at, which is a lot of pixels to
+# push through a radio and shows up as a picture that lags rather than one that
+# looks worse. Under a thousand-odd pixels and thirty frames it stays readable
+# in a desktop window and stops being the thing the link cannot keep up with.
+#
+# Both flags are old enough that every scrcpy worth having takes them, which
+# matters because Mind bundles no copy and uses whichever one is installed.
+WIRELESS_MIRROR_OPTIONS = ("--max-size=1200", "--max-fps=30")
+
+
+def is_wireless(serial: str) -> bool:
+    """Whether this phone is reached over the network rather than a cable.
+
+    A USB serial is the number stamped on the phone. Anything with a port in it
+    or an mDNS name arrived over the air, and it is the air that is slow.
+    """
+    return ":" in (serial or "") or "._tcp" in (serial or "")
+
+
+def mirror(serial: str = "", scrcpy: str = "", spawn=None) -> bool:
     """Open the phone's screen on this PC. True if it was started.
 
     Left running on its own rather than waited for - it is a window the user
     closes when they are done with it, not a command with an answer.
+
+    Over the air it is asked for less: see the note on the options above. On a
+    cable it is asked for everything, because there is no reason not to.
     """
     program = scrcpy or find_scrcpy()
     if not program:
         return False
+    start = spawn or subprocess.Popen
     command = [program]
     if serial:
         command += ["-s", serial]
+    if is_wireless(serial):
+        command += list(WIRELESS_MIRROR_OPTIONS)
     try:
-        subprocess.Popen(
+        start(
             command,
             creationflags=CREATE_NO_WINDOW,
             stdout=subprocess.DEVNULL,
