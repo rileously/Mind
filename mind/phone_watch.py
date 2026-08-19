@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
-from .adb_client import AdbError, CallState, Phone, find_adb
+from .adb_client import AdbError, CallState, Phone, attached, find_adb
 from .config_store import ConfigStore
 
 
@@ -57,6 +57,10 @@ class PhoneStatus:
     model: str = ""
     battery: int = -1
     trouble: str = ""
+    # Set when the phone answered to a different serial than the one saved, so
+    # the watcher can write the working one down rather than rediscovering it
+    # on every poll for the rest of the session.
+    found_serial: str = ""
 
     @property
     def name(self) -> str:
@@ -65,6 +69,30 @@ class PhoneStatus:
     @property
     def away(self) -> bool:
         return bool(self.trouble)
+
+
+def rediscovered(entry: PhoneEntry, devices: list) -> str:
+    """The serial adb is using for this phone now, if it differs from ours.
+
+    Wireless debugging hands out a new port whenever it comes back, and adb
+    finds the phone again over mDNS under whatever name that produced. A serial
+    written down once therefore stops working while the phone is sitting on the
+    same network, plugged in, perfectly reachable - so the fix is to ask adb
+    what it is calling the phone rather than to insist on the old answer.
+
+    The hardware serial is what makes this safe: it is stamped into the mDNS
+    name and does not change, so the phone is matched by what it is rather than
+    by how it is currently addressed.
+    """
+    for device in devices:
+        if not getattr(device, "ready", True):
+            continue
+        if same_serial(device.serial, entry.serial):
+            return device.serial
+        found = hardware_from_serial(device.serial)
+        if found and entry.hardware and found == entry.hardware:
+            return device.serial
+    return ""
 
 
 def hardware_from_serial(serial: str) -> str:
@@ -247,7 +275,33 @@ class PhonePoll(QObject):
         self.store = store
 
     def run(self) -> None:
-        self.finished.emit([self._visit(entry) for entry in configured_phones(self.store)])
+        statuses = [self._visit(entry) for entry in configured_phones(self.store)]
+        if any(status.away for status in statuses):
+            # Asked once, and only when something is actually missing, so a
+            # house where every phone answers pays nothing for this.
+            try:
+                devices = attached()
+            except AdbError:
+                devices = []
+            if devices:
+                statuses = [
+                    self._again(status, devices) if status.away else status
+                    for status in statuses
+                ]
+        self.finished.emit(statuses)
+
+    def _again(self, status: PhoneStatus, devices: list) -> PhoneStatus:
+        """Try the phone once more, under the serial adb is using for it."""
+        serial = rediscovered(status.entry, devices)
+        # Compared exactly, not with same_serial: a trailing dot is the whole
+        # difference in the case this exists to fix, and adb refuses the name
+        # without it.
+        if not serial or serial == status.entry.serial:
+            return status
+        fresh = self._visit(replace(status.entry, serial=serial))
+        if fresh.away:
+            return status
+        return replace(fresh, found_serial=serial)
 
     def _visit(self, entry: PhoneEntry) -> PhoneStatus:
         phone = Phone(serial=entry.serial)
@@ -380,10 +434,29 @@ class PhoneWatcher(QObject):
                     who = call.caller or "an unknown number"
                     self.log.emit(f"{status.name} is ringing: {who}")
         self.statuses = fresh
+        self._remember_serials(fresh)
         self._tidy_thread()
         self.state_changed.emit(list(self.statuses))
         for status in changed:
             self.call_changed.emit(status)
+
+    def _remember_serials(self, statuses: list) -> None:
+        """Write down any serial that turned out to be the working one.
+
+        Only when one changed, because this is on a timer and the settings file
+        should not be rewritten every few seconds for no reason.
+        """
+        corrections = [s for s in statuses if s.found_serial]
+        if not corrections:
+            return
+        entries = configured_phones(self.store)
+        for status in corrections:
+            entries = merge_phone(
+                entries, replace(status.entry, serial=status.found_serial)
+            )
+        save_phones(self.store, entries)
+        for status in corrections:
+            self.log.emit(f"{status.name} answers to a new address; saved.")
 
     def _tidy_thread(self) -> None:
         self._busy = False

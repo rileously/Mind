@@ -421,6 +421,62 @@ adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.   device product:frankel model:
         self.assertTrue(merged[0].serial.endswith("._tcp."))
 
 
+class FindingThePhoneAgain(unittest.TestCase):
+    """Wireless debugging comes back on a new port, under a new name.
+
+    A serial written down once therefore stops working while the phone is on
+    the same network, plugged in and perfectly reachable. The hardware serial
+    is stamped into the mDNS name and does not change, so the phone can be
+    recognised by what it is rather than by how it is currently addressed.
+    """
+
+    def entry(self, serial, hardware="5C061VDCR0003N"):
+        from mind.phone_watch import PhoneEntry
+
+        return PhoneEntry(id="p1", serial=serial, label="Pixel 10", hardware=hardware)
+
+    def device(self, serial, ready=True):
+        from mind.adb_client import AndroidDevice
+
+        return AndroidDevice(serial=serial, state="device" if ready else "offline")
+
+    def test_the_same_name_with_its_dot_is_offered_back(self):
+        from mind.phone_watch import rediscovered
+
+        dotted = "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp."
+        found = rediscovered(self.entry(dotted.rstrip(".")), [self.device(dotted)])
+        self.assertEqual(found, dotted)
+
+    def test_a_phone_that_came_back_on_an_address_is_recognised(self):
+        from mind.phone_watch import rediscovered
+
+        # No mDNS name at all now, but the hardware serial still matches.
+        entry = self.entry("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
+        found = rediscovered(entry, [self.device("adb-5C061VDCR0003N-x._adb-tls-connect._tcp.")])
+        self.assertEqual(found, "adb-5C061VDCR0003N-x._adb-tls-connect._tcp.")
+
+    def test_another_phone_is_not_adopted(self):
+        from mind.phone_watch import rediscovered
+
+        entry = self.entry("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
+        other = self.device("adb-2B031JEGR06967-pfp4P2._adb-tls-connect._tcp.")
+        self.assertEqual(rediscovered(entry, [other]), "")
+
+    def test_an_offline_transport_is_not_worth_adopting(self):
+        from mind.phone_watch import rediscovered
+
+        dotted = "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp."
+        entry = self.entry(dotted.rstrip("."))
+        self.assertEqual(rediscovered(entry, [self.device(dotted, ready=False)]), "")
+
+    def test_an_entry_with_no_hardware_matches_only_by_name(self):
+        from mind.phone_watch import rediscovered
+
+        entry = self.entry("something-else._adb-tls-connect._tcp.", hardware="")
+        other = self.device("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
+        self.assertEqual(rediscovered(entry, [other]), "")
+
+
 class WhatThePhoneSays(unittest.TestCase):
     """adb speaks UTF-8, and this machine may not.
 
