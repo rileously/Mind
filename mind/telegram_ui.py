@@ -814,6 +814,7 @@ def hotspot_text(
     enabled: bool = True,
     match_home: bool = True,
     band: str = "",
+    fault: str = "",
 ) -> str:
     """What the hotspot panel says.
 
@@ -852,6 +853,12 @@ def hotspot_text(
                 "It is a network of its own, so a phone joins it the first time "
                 "from its Wi-Fi list and remembers it after that.",
             ]
+        if fault:
+            # Last, because it is the part worth leaving on screen. The radio
+            # being up is not the same as the hotspot working, and a device
+            # that cannot join says only that its IP configuration failed -
+            # which points at the phone rather than at this.
+            lines += ["", f"⚠️ {fault}"]
         return "\n".join(lines)
     if state == "intransition":
         return f"📡 {name} is still coming up. Refresh in a moment."

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -132,6 +133,33 @@ def parse_profile_key(payload: str) -> str:
     return ""
 
 
+# Internet Connection Sharing puts the hotspot behind this address and answers
+# DHCP on it. A client that associates and never hears back sits there until it
+# gives up, and the phone calls that "IP configuration failed" - a sentence with
+# nothing in it about which end went wrong.
+ICS_GATEWAY = "192.168.137.1"
+DHCP_SERVER_PORT = "67"
+# ICS does not claim the port the instant the radio comes up; on this hardware
+# it took several seconds. Judging it immediately reports a fault that is really
+# just being early, so the check waits before it complains.
+DHCP_WAIT_SECONDS = 15.0
+DHCP_POLL_SECONDS = 1.5
+
+
+def parse_dhcp_addresses(payload: str) -> tuple[str, ...]:
+    """Every address with something listening on the DHCP server port."""
+    found: list[str] = []
+    for line in (payload or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0].upper() != "UDP":
+            continue
+        address, separator, port = parts[1].rpartition(":")
+        if separator and port == DHCP_SERVER_PORT and address:
+            found.append(address)
+    # Ordered, and each address once: two adapters can share one allocator.
+    return tuple(dict.fromkeys(found))
+
+
 def _default_runner(arguments: list[str], timeout: float) -> tuple[int, str, str]:
     try:
         done = subprocess.run(
@@ -197,6 +225,45 @@ class Hotspot:
         if band and band in {value for value, _label in BANDS}:
             extra += ["-Band", band]
         return self._call("configure", CHANGE_TIMEOUT, *extra)
+
+
+def dhcp_fault(run=_default_runner, wait: float = DHCP_WAIT_SECONDS) -> str:
+    """Empty when a device can expect an address, a sentence when it cannot.
+
+    Everything else about a hotspot can look right while this is wrong: the
+    radio is up, the name is being broadcast, the password is accepted, and the
+    device still cannot join because nothing answered its request for an
+    address. The failure surfaces on the phone, in words that do not point
+    here, so it is worth naming from this end.
+    """
+    deadline = time.monotonic() + max(0.0, wait)
+    listening: tuple[str, ...] = ()
+    while True:
+        try:
+            _code, out, _err = run(["netstat", "-ano", "-p", "UDP"], 15.0)
+        except HotspotError:
+            # Not being able to look is not the same as finding something
+            # wrong, and guessing would put a warning under a working hotspot.
+            return ""
+        listening = parse_dhcp_addresses(out)
+        if ICS_GATEWAY in listening:
+            return ""
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(DHCP_POLL_SECONDS)
+
+    if not listening:
+        return (
+            "Windows is not handing out addresses for the hotspot, so a device "
+            "will connect and then say its IP configuration failed. Restarting "
+            "Internet Connection Sharing usually settles it."
+        )
+    elsewhere = ", ".join(listening)
+    return (
+        "Windows is sharing through another network instead of the hotspot "
+        f"({elsewhere}), so a device will connect and then say its IP "
+        "configuration failed."
+    )
 
 
 def current_wifi(run=_default_runner) -> tuple[str, str]:

@@ -18,6 +18,8 @@ from mind.hotspot import (
     HotspotError,
     HotspotState,
     current_wifi,
+    dhcp_fault,
+    parse_dhcp_addresses,
     parse_current_ssid,
     parse_profile_key,
     parse_report,
@@ -190,6 +192,68 @@ class ANameOfItsOwn(unittest.TestCase):
         run = Recorder(ON)
         Hotspot(run=run).configure("Toilet", "open door ")
         self.assertIn("open door ", run.calls[0])
+
+
+NETSTAT_SERVED = """
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  UDP    0.0.0.0:53             *:*                                    3872
+  UDP    172.24.240.1:67        *:*                                    3872
+  UDP    192.168.137.1:67       *:*                                    3872
+"""
+NETSTAT_ELSEWHERE = """
+  Proto  Local Address          Foreign Address        State           PID
+  UDP    0.0.0.0:53             *:*                                    3872
+  UDP    172.24.240.1:67        *:*                                    3872
+"""
+NETSTAT_NOBODY = """
+  Proto  Local Address          Foreign Address        State           PID
+  UDP    0.0.0.0:53             *:*                                    3872
+"""
+
+
+class HandingOutAddresses(unittest.TestCase):
+    """Whether a device that joins can expect an address.
+
+    Everything else can look right while this is wrong: the radio up, the name
+    broadcast, the password accepted, and the phone still saying its IP
+    configuration failed - a sentence with nothing in it about which end is at
+    fault. Internet Connection Sharing serves one allocator, and another
+    virtual switch can be holding it.
+    """
+
+    def test_the_port_is_read_off_every_listening_address(self):
+        self.assertEqual(
+            parse_dhcp_addresses(NETSTAT_SERVED), ("172.24.240.1", "192.168.137.1")
+        )
+
+    def test_ports_that_merely_end_in_67_are_not_counted(self):
+        payload = "  UDP    192.168.137.1:1067     *:*                     3872"
+        self.assertEqual(parse_dhcp_addresses(payload), ())
+
+    def test_tcp_is_not_dhcp(self):
+        payload = "  TCP    192.168.137.1:67       0.0.0.0:0     LISTENING   3872"
+        self.assertEqual(parse_dhcp_addresses(payload), ())
+
+    def test_nothing_is_wrong_when_the_hotspot_is_served(self):
+        self.assertEqual(dhcp_fault(run=Recorder(NETSTAT_SERVED), wait=0), "")
+
+    def test_another_network_holding_it_is_named(self):
+        fault = dhcp_fault(run=Recorder(NETSTAT_ELSEWHERE), wait=0)
+        self.assertIn("172.24.240.1", fault)
+        self.assertIn("IP configuration failed", fault)
+
+    def test_nobody_serving_it_reads_differently(self):
+        fault = dhcp_fault(run=Recorder(NETSTAT_NOBODY), wait=0)
+        self.assertIn("not handing out addresses", fault)
+
+    def test_not_being_able_to_look_is_not_a_fault(self):
+        # A warning under a working hotspot is worse than no warning at all.
+        def refuse(arguments, timeout):
+            raise HotspotError("netstat is not on this machine")
+
+        self.assertEqual(dhcp_fault(run=refuse, wait=0), "")
 
 
 if __name__ == "__main__":

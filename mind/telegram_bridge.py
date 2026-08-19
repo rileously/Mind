@@ -128,7 +128,7 @@ from .telegram_ui import (
 )
 from dataclasses import replace as replace_device
 
-from .hotspot import Hotspot, HotspotError, band_label, current_wifi
+from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
 from .network_scanner import router_credentials
 from .adb_client import AdbError
@@ -267,6 +267,10 @@ class TelegramBridge(QObject):
         # back to whoever asked for it.
         self._hotspot_chat: int | None = None
         self._hotspot_idle_since: float | None = None
+        # Why a hotspot that is plainly up still cannot be joined. Checked
+        # when it starts, because the answer lives on this machine and the
+        # error appears on the phone.
+        self._hotspot_fault = ""
 
     # -- lifecycle -------------------------------------------------------
 
@@ -765,6 +769,7 @@ class TelegramBridge(QObject):
             idle_minutes=HOTSPOT_IDLE_SECONDS // 60,
             match_home=match_home,
             band=band_label(state.band),
+            fault=self._hotspot_fault if state.is_on else "",
         )
         return text, build_hotspot_keyboard(
             state.state, matched, state.clients, match_home
@@ -812,11 +817,16 @@ class TelegramBridge(QObject):
                     self._hotspot_chat = chat_id
                     self._hotspot_idle_since = time.monotonic()
                     self.log.emit(f"Telegram: hotspot on as {state.ssid or 'the saved name'}")
+                    # The radio being up is not the same as the hotspot working.
+                    self._hotspot_fault = dhcp_fault()
+                    if self._hotspot_fault:
+                        self.log.emit(f"Telegram: hotspot cannot hand out addresses - {self._hotspot_fault}")
             elif index == HOTSPOT_STOP:
                 client.answer_callback_query(callback_id, "Stopping the hotspot…")
                 radio.stop()
                 self._hotspot_chat = None
                 self._hotspot_idle_since = None
+                self._hotspot_fault = ""
                 self.log.emit("Telegram: hotspot off")
             elif index == HOTSPOT_MATCH:
                 client.answer_callback_query(callback_id, "Renaming…")

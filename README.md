@@ -77,7 +77,8 @@ launch; a folder still in use is never touched.
   does not reach, optionally carrying the home network's own name so a phone moves
   onto it by itself or a name and password of its own, switching off once nothing
   has used it for five minutes, on 2.4 GHz for reach or 5 GHz for speed (Windows
-  offers no open hotspot, only WPA2 and WPA3)
+  offers no open hotspot, only WPA2 and WPA3), saying so when Windows is handing
+  out addresses for another network and joining devices will fail
 - Diagnostics view with no API-key logging
 
 ## Privacy
