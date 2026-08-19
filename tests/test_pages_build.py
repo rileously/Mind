@@ -45,6 +45,7 @@ class PageBuildTests(unittest.TestCase):
             ("NotificationsPage", (self.store,)),
             ("NetworkDevicesPage", (self.store, None)),
             ("PhonePage", (self.store, None)),
+            ("MessagesPage", (self.store,)),
             ("SettingsPage", (self.store,)),
             ("DiagnosticsPage", (self.store.root,)),
         ):
@@ -65,6 +66,7 @@ class PageBuildTests(unittest.TestCase):
             ("DashboardPage", (self.store,)),
             ("NetworkDevicesPage", (self.store, None)),
             ("PhonePage", (self.store, None)),
+            ("MessagesPage", (self.store,)),
             ("SettingsPage", (self.store,)),
         ):
             with self.subTest(page=name):

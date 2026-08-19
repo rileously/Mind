@@ -73,6 +73,8 @@ launch; a folder still in use is never touched.
 - Per-user Windows startup registration
 - First-run offer to install into the Programs folder with a Start Menu entry
 - Automatic cleanup of runtime folders left behind by a crash or forced shutdown
+- Read the phone's messages on the desktop, searchable, with unread marked - no app
+  on the phone and nothing stored on the PC
 - Telegram button that turns this PC into a Wi-Fi hotspot for the rooms the router
   does not reach, optionally carrying the home network's own name so a phone moves
   onto it by itself or a name and password of its own, switching off once nothing

@@ -9,7 +9,16 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QThread, QThreadPool, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import (
+    QObject,
+    QRunnable,
+    QThread,
+    QThreadPool,
+    QTimer,
+    QUrl,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -90,6 +99,7 @@ from .selection import (
 )
 from .hotspot import BANDS as HOTSPOT_BAND_CHOICES
 from .ocr import OcrError, extract_text_from_image
+from .sms import matching, read_messages, unread
 from .selection_monitor import SelectionMonitor
 from .single_instance import action_message_id, show_message_id
 from .shell_menu import apply as shell_menu_apply, describe as shell_menu_describe
@@ -1036,6 +1046,7 @@ class NotificationsPage(QWidget):
 ROUTER_PASSWORD_MASK = "•" * 10
 HOTSPOT_PASSWORD_MASK = "•" * 10
 HOTSPOT_BANDS = HOTSPOT_BAND_CHOICES
+MESSAGE_LIMIT = 300
 
 
 class NetworkDevicesPage(QWidget):
@@ -1788,6 +1799,172 @@ class PhonePage(QWidget):
                 self.watcher.poll_now()
 
         self._act("Connecting", connect_and_remember)
+
+
+class _MessagesSignals(QObject):
+    completed = Signal(bool, object)
+
+
+class MessagesWorker(QRunnable):
+    """Reads the phone's messages off the interface thread.
+
+    It takes a few seconds on a phone with a few thousand of them, which is
+    long enough to freeze a window that asked for them from the wrong thread.
+    """
+
+    def __init__(self, store: ConfigStore, limit: int):
+        super().__init__()
+        self.store = store
+        self.limit = limit
+        self.signals = _MessagesSignals()
+
+    def run(self) -> None:
+        try:
+            phone = phone_for(self.store)
+            if not phone.serial:
+                self.signals.completed.emit(False, "No phone is paired yet.")
+                return
+            self.signals.completed.emit(True, read_messages(phone, self.limit))
+        except AdbError as exc:
+            self.signals.completed.emit(False, str(exc))
+
+
+class MessagesPage(QWidget):
+    """The phone's messages, on the desk.
+
+    Reading, and only reading. The phone is the thing that sends messages and
+    it is in the room; what is missing at a desk is being able to see the code
+    that just arrived without picking the phone up.
+
+    Nothing is stored. The list is what the phone said when it was last asked,
+    held for as long as the window is open and no longer, which is the same
+    promise the rest of Mind makes about text it handles.
+    """
+
+    def __init__(self, store: ConfigStore, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.store = store
+        self.thread_pool = QThreadPool.globalInstance()
+        self._messages: list = []
+        self._shown: list = []
+        self._busy = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(30, 26, 30, 26)
+        root.setSpacing(16)
+        root.addWidget(page_header(
+            "Messages",
+            "Read the messages on your phone, from here.",
+            "MESSAGES",
+        ))
+
+        toolbar_card = Card(variant="InsetCard")
+        toolbar = QHBoxLayout(toolbar_card)
+        toolbar.setContentsMargins(14, 12, 14, 12)
+        toolbar.setSpacing(10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search messages and senders")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._render)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.setProperty("primary", True)
+        self.refresh_button.clicked.connect(self.refresh)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        toolbar.addWidget(self.search, 1)
+        toolbar.addWidget(self.refresh_button)
+        root.addWidget(toolbar_card)
+        root.addWidget(self.status_label)
+
+        self.list = QListWidget()
+        self.list.setMinimumHeight(260)
+        self.list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list.currentRowChanged.connect(self._show_selected)
+        root.addWidget(self.list, 1)
+
+        self.body = QPlainTextEdit()
+        self.body.setReadOnly(True)
+        self.body.setMinimumHeight(150)
+        self.body.setPlaceholderText("Select a message to read it.")
+        root.addWidget(self.body)
+
+    # -- asking the phone -------------------------------------------------
+
+    def refresh(self) -> None:
+        if self._busy:
+            return
+        if not configured_phones(self.store):
+            # Answered here rather than in the worker, so opening this page on a
+            # machine with no phone says so at once instead of starting a thread
+            # to find out.
+            self.status_label.setText(
+                "No phone is paired yet. Pair one on the Phone page first."
+            )
+            return
+        self._busy = True
+        self.refresh_button.setEnabled(False)
+        self.status_label.setText("Asking the phone...")
+        worker = MessagesWorker(self.store, MESSAGE_LIMIT)
+        worker.signals.completed.connect(self._arrived)
+        self.thread_pool.start(worker)
+
+    def _arrived(self, ok: bool, payload) -> None:
+        self._busy = False
+        self.refresh_button.setEnabled(True)
+        if not ok:
+            # The phone's own words. "device not found" means something
+            # different from "permission denied", and both need the person
+            # reading them to do something different.
+            self.status_label.setText(str(payload))
+            return
+        self._messages = list(payload)
+        self._render()
+
+    # -- showing them -----------------------------------------------------
+
+    def _render(self) -> None:
+        self._shown = matching(self._messages, self.search.text())
+        self.list.blockSignals(True)
+        self.list.clear()
+        for message in self._shown:
+            mark = "  " if message.read or message.outgoing else "● "
+            who = message.address or "Unknown"
+            arrow = "To " if message.outgoing else ""
+            item = QListWidgetItem(
+                f"{mark}{arrow}{who}   {message.when_label()}\n     {message.preview}"
+            )
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        self.body.setPlainText("")
+        self._say_what_is_here()
+
+    def _say_what_is_here(self) -> None:
+        if not self._messages:
+            self.status_label.setText(
+                "No messages yet. Press Refresh, with the phone paired and "
+                "wireless debugging on."
+            )
+            return
+        waiting = unread(self._messages)
+        shown = len(self._shown)
+        total = len(self._messages)
+        if shown == total:
+            counted = f"{total} messages"
+        else:
+            counted = f"{shown} of {total} messages"
+        if waiting:
+            counted += f", {waiting} unread"
+        self.status_label.setText(counted + ".")
+
+    def _show_selected(self, row: int) -> None:
+        if not 0 <= row < len(self._shown):
+            self.body.setPlainText("")
+            return
+        message = self._shown[row]
+        who = message.address or "Unknown"
+        heading = f"{'To' if message.outgoing else 'From'} {who}   {message.when_label()}"
+        self.body.setPlainText(f"{heading}\n\n{message.body}")
 
 
 class SettingsPage(QWidget):
@@ -2978,6 +3155,7 @@ class MindWindow(QMainWindow):
             ("◔", "Notifications", "watchers alerts battery disk memory idle folder telegram"),
             ("◈", "Wi-Fi devices", "network devices wifi lan ip mac vendor who is connected"),
             ("☎", "Phone", "android adb call answer hang up dial ring battery pair wireless debugging"),
+            ("✉", "Messages", "sms text messages inbox otp code read phone android"),
             ("⚙", "Preferences", "settings behavior typing spelling definition dictionary tooltip theme startup palette shortcut"),
             ("▥", "Diagnostics", "logs troubleshooting system health data folder"),
         ]
@@ -3026,6 +3204,7 @@ class MindWindow(QMainWindow):
         self.notifications = NotificationsPage(self.store)
         self.network = NetworkDevicesPage(self.store, self.scanner)
         self.phone = PhonePage(self.store, self.phone_watcher)
+        self.messages = MessagesPage(self.store)
         self.settings = SettingsPage(self.store)
         self.diagnostics = DiagnosticsPage(self.store.root)
         for page in [
@@ -3035,6 +3214,7 @@ class MindWindow(QMainWindow):
             self.notifications,
             self.network,
             self.phone,
+            self.messages,
             self.settings,
             self.diagnostics,
         ]:
@@ -3098,6 +3278,7 @@ class MindWindow(QMainWindow):
             self.notifications,
             self.network,
             self.phone,
+            self.messages,
             self.settings,
             self.diagnostics,
         ]
