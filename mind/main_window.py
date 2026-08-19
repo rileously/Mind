@@ -1511,7 +1511,14 @@ class PhonePage(QWidget):
         self.pair_code.setMaximumWidth(130)
         self.pair_button = QPushButton("Pair")
         self.pair_button.clicked.connect(self._pair)
+        # First, because it is the way that needs nothing typed. The address
+        # and the six-digit code stay beside it for a phone whose camera is
+        # not available, or a version of Android without the QR screen.
+        self.scan_button = QPushButton("Scan QR code")
+        self.scan_button.setProperty("primary", True)
+        self.scan_button.clicked.connect(self._pair_by_qr)
         pair.addWidget(QLabel("Pair a phone"))
+        pair.addWidget(self.scan_button)
         pair.addWidget(self.pair_address, 1)
         pair.addWidget(self.pair_code)
         pair.addWidget(self.pair_button)
@@ -1749,6 +1756,21 @@ class PhonePage(QWidget):
             )
 
         self._act("Dialling", dial_and_show)
+
+    def _pair_by_qr(self) -> None:
+        """Show a code and let the phone's camera do the typing."""
+        from .pair_dialog import PairDialog
+
+        dialog = PairDialog(self)
+        dialog.paired.connect(self._after_qr_pairing)
+        dialog.exec()
+
+    def _after_qr_pairing(self, spoken: str) -> None:
+        # Pairing is not connecting: adb finds the phone over mDNS a moment
+        # later, and the watcher picks it up from there.
+        self.status_label.setText(spoken)
+        if self.watcher is not None:
+            self.watcher.poll_now()
 
     def _pair(self) -> None:
         address = self.pair_address.text().strip()

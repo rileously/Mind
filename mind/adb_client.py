@@ -505,7 +505,11 @@ SCRCPY_LOCATIONS = (
 )
 
 
-def parse_mdns(payload: str) -> list[tuple[str, str]]:
+CONNECT_SERVICE = "_adb-tls-connect"
+PAIRING_SERVICE = "_adb-tls-pairing"
+
+
+def parse_mdns(payload: str, service: str = CONNECT_SERVICE) -> list[tuple[str, str]]:
     """The phones adb can see advertising themselves, and where they are.
 
     Worth having separately from "adb devices": a phone announces itself over
@@ -518,10 +522,10 @@ def parse_mdns(payload: str) -> list[tuple[str, str]]:
     for line in (payload or "").splitlines():
         parts = line.split()
         # name, service type, address. The heading line has no address on it.
-        # Only the connecting service: a phone also advertises a pairing port,
-        # which is a different port for a different purpose and would be
-        # offered here as though it were the one to talk to.
-        if len(parts) < 3 or not parts[1].startswith("_adb-tls-connect"):
+        # One service at a time, because a phone advertises two: a port to
+        # connect on and a port to pair on. They are not interchangeable, and
+        # offering one where the other is wanted gets nowhere.
+        if len(parts) < 3 or not parts[1].startswith(service):
             continue
         address = parts[2]
         if ":" not in address:
@@ -530,7 +534,9 @@ def parse_mdns(payload: str) -> list[tuple[str, str]]:
     return found
 
 
-def mdns_services(adb: str = "", run=_default_runner) -> list[tuple[str, str]]:
+def mdns_services(
+    adb: str = "", run=_default_runner, service: str = CONNECT_SERVICE
+) -> list[tuple[str, str]]:
     """Ask adb what is advertising itself. Empty if it cannot say."""
     binary = adb or find_adb()
     if not binary:
@@ -541,7 +547,7 @@ def mdns_services(adb: str = "", run=_default_runner) -> list[tuple[str, str]]:
         return []
     if code != 0:
         return []
-    return parse_mdns(out)
+    return parse_mdns(out, service)
 
 
 def restart_server(adb: str = "", run=_default_runner) -> bool:

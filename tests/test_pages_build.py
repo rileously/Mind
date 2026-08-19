@@ -76,6 +76,33 @@ class PageBuildTests(unittest.TestCase):
                     refresh()
 
 
+class ThePairingWindow(unittest.TestCase):
+    """It has to open, and drawing the code must not be what stops it."""
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+
+        self.app = QApplication.instance() or QApplication([])
+
+    def test_a_code_can_be_drawn(self):
+        from mind.adb_pairing import new_name, new_password, qr_payload
+        from mind.pair_dialog import qr_pixmap
+
+        pixmap = qr_pixmap(qr_payload(new_name(), new_password()))
+        self.assertFalse(pixmap.isNull())
+        self.assertGreater(pixmap.width(), 100)
+
+    def test_the_window_opens_and_closes_without_leaving_a_worker(self):
+        from mind.pair_dialog import PairDialog
+
+        dialog = PairDialog()
+        self.addCleanup(dialog.deleteLater)
+        self.assertIsNotNone(dialog._worker)
+        dialog.reject()
+        # Cancelled, so the thread stops looking for a phone nobody is pairing.
+        self.assertFalse(dialog._worker._wanted)
+
+
 class MessagesPageStatus(unittest.TestCase):
     """What the Messages page says while it does not yet have messages.
 

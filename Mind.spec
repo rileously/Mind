@@ -35,7 +35,7 @@ a = Analysis(
         (str(project_dir / "mind" / "windows_toast.ps1"), "mind"),
         (str(project_dir / "mind" / "windows_hotspot.ps1"), "mind"),
     ] + spellchecker_data + shell_menu_data,
-    hiddenimports=["spellchecker"] + mind_submodules,
+    hiddenimports=["spellchecker", "segno"] + mind_submodules,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
