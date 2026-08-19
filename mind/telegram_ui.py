@@ -1080,7 +1080,8 @@ def seat_pick_text(origin: str, destination: str, sail) -> str:
     return (
         f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
         f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · MVR {sail.fare:.0f}\n\n"
-        f"{sail.seats_free} seats free. Pick one."
+        f"{sail.seats_free} seats free. Pick one.\n"
+        "Three each side of the aisle, as they are on the boat. ✕ is taken."
     )
 
 
@@ -1095,3 +1096,66 @@ def seat_chosen_text(origin: str, destination: str, sail, seat: int, when: str) 
         "reserving needs your account, and paying needs your card.\n\n"
         "<a href=\"https://rtl.mv\">rtl.mv</a>"
     )
+
+
+# The boat's own arrangement: six across, three on each side of the aisle.
+SEATS_PER_ROW = 6
+SEATS_PER_SIDE = 3
+
+
+def seat_rows(seat_codes: list, per_row: int = SEATS_PER_ROW) -> list:
+    """The seats laid out the way they are on the boat.
+
+    Six to a row, numbered along it, which is what the booking page draws as
+    Left Side and Right Side. A seat keeps the column its number gives it, so
+    a row that is missing seats keeps its shape rather than closing the gap and
+    sliding everything one place along.
+    """
+    codes = sorted(int(c) for c in seat_codes)
+    if not codes:
+        return []
+    rows: list[list] = []
+    highest = max(codes)
+    present = set(codes)
+    for start in range(1, highest + 1, per_row):
+        row = [n if n in present else None for n in range(start, start + per_row)]
+        if any(n is not None for n in row):
+            rows.append(row)
+    return rows
+
+
+def build_seat_map_keyboard(sail, trip_index: int) -> dict:
+    """Every seat in its place: the free ones tappable, the taken ones shown.
+
+    A list of free numbers says how many are left. A map says where they are,
+    which is the part somebody choosing actually cares about - by a window, at
+    the front, away from the engine.
+    """
+    free = set(sail.free_seats)
+    every = set(free) | set(getattr(sail, "taken_seats", ()) or ())
+    if not every:
+        every = free
+    rows: list[list[dict]] = []
+    for row in seat_rows(sorted(every)):
+        buttons = []
+        for seat in row:
+            if seat is None:
+                buttons.append({"text": " ", "callback_data": CB_NOOP})
+            elif seat in free:
+                buttons.append(
+                    {
+                        "text": str(seat),
+                        "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
+                    }
+                )
+            else:
+                # Taken. Shown rather than hidden, so the map keeps its shape.
+                buttons.append({"text": "✕", "callback_data": CB_NOOP})
+        rows.append(buttons)
+    rows.append(
+        [
+            {"text": "‹  Sailings", "callback_data": ferry_callback(FERRY_TRIP, "back")},
+            {"text": "‹  Menu", "callback_data": CB_MENU},
+        ]
+    )
+    return {"inline_keyboard": rows}

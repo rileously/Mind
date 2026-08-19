@@ -324,3 +324,50 @@ class TheRequestRtlAcceptsel(unittest.TestCase):
     def test_the_stations_travel_as_codes(self):
         body = self.sent()
         self.assertEqual((body["sourceStation"], body["destinationStation"]), ("105", "104"))
+
+
+class TheSeatMap(unittest.TestCase):
+    """The boat's own arrangement: six across, three each side of the aisle."""
+
+    def rows(self, codes):
+        from mind.telegram_ui import seat_rows
+
+        return seat_rows(codes)
+
+    def test_six_to_a_row(self):
+        self.assertEqual(self.rows(range(1, 13)), [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]])
+
+    def test_a_seat_keeps_the_column_its_number_gives_it(self):
+        # Closing the gap would slide every seat after it one place along, and
+        # somebody would pick a window seat and get the aisle.
+        rows = self.rows([1, 3, 4, 6])
+        self.assertEqual(rows, [[1, None, 3, 4, None, 6]])
+
+    def test_a_short_last_row_stays_where_its_numbers_put_it(self):
+        rows = self.rows(range(1, 45))
+        self.assertEqual(rows[-1], [43, 44, None, None, None, None])
+
+    def test_no_seats_at_all(self):
+        self.assertEqual(self.rows([]), [])
+
+    def test_taken_seats_keep_the_shape_and_cannot_be_picked(self):
+        from mind.ferry_client import Sailing
+        from mind.telegram_ui import build_seat_map_keyboard
+
+        sail = Sailing(free_seats=(1, 3), taken_seats=(2,))
+        rows = build_seat_map_keyboard(sail, 0)["inline_keyboard"]
+        first = rows[0]
+        self.assertEqual(first[0]["text"], "1")
+        self.assertEqual(first[1]["text"], "✕")
+        self.assertEqual(first[2]["text"], "3")
+        # The taken one leads nowhere.
+        self.assertNotIn("2", first[1]["callback_data"])
+
+    def test_a_free_seat_carries_its_sailing_and_its_number(self):
+        from mind.ferry_client import Sailing
+        from mind.telegram_ui import build_seat_map_keyboard
+
+        sail = Sailing(free_seats=(7,))
+        rows = build_seat_map_keyboard(sail, 2)["inline_keyboard"]
+        seat = [b for row in rows for b in row if b["text"] == "7"][0]
+        self.assertTrue(seat["callback_data"].endswith("2.7"))

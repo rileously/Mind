@@ -124,7 +124,7 @@ from .telegram_ui import (
     seat_pick_text,
     seat_chosen_text,
     build_sailings_keyboard,
-    build_seats_keyboard,
+    build_seat_map_keyboard,
     FERRY_TRIP,
     FERRY_SEAT,
     ferry_pick_text,
@@ -2258,7 +2258,7 @@ class TelegramBridge(QObject):
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
             seat_pick_text(origin.name, destination.name, sail),
-            build_seats_keyboard(sail, int(value)), html=True,
+            build_seat_map_keyboard(sail, int(value)), html=True,
         )
 
     def _handle_ferry_seat(

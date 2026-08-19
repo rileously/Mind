@@ -272,6 +272,8 @@ class Sailing:
     # Which seats are actually free, so one can be pointed at rather than
     # merely counted.
     free_seats: tuple = ()
+    # The taken ones too, so a map can be drawn with its shape intact.
+    taken_seats: tuple = ()
 
     @property
     def departs_at(self) -> str:
@@ -333,6 +335,11 @@ def parse_sailings(payload: dict) -> list[Sailing]:
                         int(s.get("code"))
                         for s in seats
                         if s.get("status") == SEAT_FREE and str(s.get("code", "")).isdigit()
+                    ),
+                    taken_seats=tuple(
+                        int(s.get("code"))
+                        for s in seats
+                        if s.get("status") != SEAT_FREE and str(s.get("code", "")).isdigit()
                     ),
                 )
             )
