@@ -498,6 +498,17 @@ class Phone:
             raise AdbError(answer.strip().splitlines()[0])
         return answer
 
+    def disconnect(self, address: str) -> str:
+        """Drop one connection. Being already gone is not a failure.
+
+        It does not stay dropped on its own: a paired phone that is still
+        advertising is picked up again within seconds. This is for a phone that
+        has been taken off the list, where nothing will ask for it afterwards.
+        """
+        if not re.fullmatch(r"[\w.\-]+:\d{1,5}", (address or "").strip()):
+            raise AdbError(f"{address!r} is not an address and port, like 192.168.18.5:5555.")
+        return self._adb("disconnect", address.strip(), timeout=20.0)
+
 
 SCRCPY_LOCATIONS = (
     r"%LOCALAPPDATA%\Programs\scrcpy\scrcpy.exe",

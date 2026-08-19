@@ -199,6 +199,18 @@ def save_phones(store: ConfigStore, entries: list[PhoneEntry]) -> None:
     store.save(config)
 
 
+def forget_phone(entries: list[PhoneEntry], phone_id: str) -> list[PhoneEntry]:
+    """Every phone but that one.
+
+    Removing it from the list is what stops Mind watching it, and stops it
+    being reconnected: nothing visits a phone that is not configured, so the
+    nudge that goes looking for a missing one never runs for this one again.
+    """
+    if not phone_id:
+        return list(entries)
+    return [entry for entry in entries if entry.id != phone_id]
+
+
 def next_id(entries: list[PhoneEntry]) -> str:
     taken = {entry.id for entry in entries}
     index = 1

@@ -565,6 +565,47 @@ class NudgingAdb(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class ForgettingAPhone(unittest.TestCase):
+    """Taking a phone off the list is what stops Mind reaching for it.
+
+    Nothing visits a phone that is not configured, so the nudge that goes
+    looking for a missing one never runs for a forgotten one either. Without
+    that, forgetting would be undone by the next poll.
+    """
+
+    def entries(self):
+        from mind.phone_watch import PhoneEntry
+
+        return [
+            PhoneEntry(id="p1", serial="a._tcp.", label="Pixel 10", hardware="AAA"),
+            PhoneEntry(id="p2", serial="b._tcp.", label="Pixel 6a", hardware="BBB"),
+        ]
+
+    def test_the_chosen_phone_goes_and_the_other_stays(self):
+        from mind.phone_watch import forget_phone
+
+        left = forget_phone(self.entries(), "p1")
+        self.assertEqual([e.id for e in left], ["p2"])
+
+    def test_forgetting_nothing_removes_nothing(self):
+        from mind.phone_watch import forget_phone
+
+        self.assertEqual(len(forget_phone(self.entries(), "")), 2)
+
+    def test_a_phone_that_is_not_there_removes_nothing(self):
+        from mind.phone_watch import forget_phone
+
+        self.assertEqual(len(forget_phone(self.entries(), "p9")), 2)
+
+    def test_an_address_is_checked_before_it_is_dropped(self):
+        # The same guard connect has: a serial where an address belongs would
+        # otherwise be handed to adb as one.
+        from mind.adb_client import AdbError, Phone
+
+        with self.assertRaises(AdbError):
+            Phone(serial="").disconnect("not-an-address")
+
+
 class WhatThePhoneSays(unittest.TestCase):
     """adb speaks UTF-8, and this machine may not.
 

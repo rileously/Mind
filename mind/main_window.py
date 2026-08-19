@@ -118,9 +118,11 @@ from .phone_watch import (
     PhoneEntry,
     PhoneWatcher,
     configured_phones,
+    forget_phone,
     hardware_from_serial,
     merge_phone,
     phone_for,
+    same_serial,
     save_phones,
 )
 from .telegram_ui import call_alert_text
@@ -1553,6 +1555,17 @@ class PhonePage(QWidget):
         self.phone_list.currentRowChanged.connect(lambda _row: self._sync_actions())
         root.addWidget(self.phone_list)
 
+        forget_row = QHBoxLayout()
+        forget_row.addStretch(1)
+        self.forget_phone_button = QPushButton("Forget")
+        self.forget_phone_button.setProperty("danger", True)
+        self.forget_phone_button.setToolTip(
+            "Stop watching this phone and take it off the list"
+        )
+        self.forget_phone_button.clicked.connect(self._forget_phone)
+        forget_row.addWidget(self.forget_phone_button)
+        root.addLayout(forget_row)
+
         self.detail = QLabel("")
         self.detail.setObjectName("Muted")
         self.detail.setWordWrap(True)
@@ -1662,6 +1675,7 @@ class PhonePage(QWidget):
         in_a_call = busy and not ringing
         self.mute_button.setEnabled(in_a_call and not self._busy)
         self.mute_button.setText("Unmute" if self._muted else "Mute")
+        self.forget_phone_button.setEnabled(bool(self._chosen_id()))
 
     def _call_changed(self, _call) -> None:
         self._show_state()
@@ -1756,6 +1770,41 @@ class PhonePage(QWidget):
             )
 
         self._act("Dialling", dial_and_show)
+
+    def _forget_phone(self) -> None:
+        """Take this phone off the list, and stop reaching for it."""
+        phone_id = self._chosen_id()
+        entries = configured_phones(self.store)
+        going = next((entry for entry in entries if entry.id == phone_id), None)
+        if going is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Forget this phone?",
+            f"""Mind will stop watching {going.name} and take it off the list.
+
+Pair it again to bring it back. Nothing changes on the phone itself - turn wireless debugging off there if you want it to stop offering itself to this PC.""",
+        )
+        if answer != QMessageBox.Yes:
+            return
+        save_phones(self.store, forget_phone(entries, phone_id))
+        config = self.store.load()
+        # It is consulted before the list, so leaving it behind would name a
+        # phone that is no longer there.
+        if same_serial(str(config.get("phone_serial", "")), going.serial):
+            config["phone_serial"] = ""
+            config["phone_address"] = ""
+            self.store.save(config)
+        # Best effort, and not worth reporting: adb lets go anyway once nothing
+        # asks for it, and a phone that is already gone is not a failure.
+        if going.address:
+            try:
+                Phone(serial="").disconnect(going.address)
+            except AdbError:
+                pass
+        self.status_label.setText(f"{going.name} forgotten.")
+        if self.watcher is not None:
+            self.watcher.poll_now()
 
     def _pair_by_qr(self) -> None:
         """Show a code and let the phone's camera do the typing."""
