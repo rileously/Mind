@@ -14,6 +14,7 @@ phone number and becomes a command.
 import unittest
 import unittest.mock
 
+from mind.phone_watch import same_serial
 from mind.adb_client import (
     AdbError,
     AndroidDevice,
@@ -363,6 +364,61 @@ class CallerCarriesOverTests(unittest.TestCase):
         self.assertTrue(watch.status("p1").call.ringing)
         self.assertFalse(watch.status("p2").call.busy)
         self.assertEqual(watch.busy_status.entry.id, "p1")
+
+
+class TheTrailingDot(unittest.TestCase):
+    """The dot adb puts on an mDNS name, and will not work without.
+
+    A fully qualified name ends in the root label, so adb lists the phone as
+    "...._tcp." and refuses "...._tcp". A serial stored without it names
+    nothing, and the phone answering pings two metres away reports as "device
+    not found" - which reads like the phone is gone rather than like the name
+    is short by one character.
+    """
+
+    def test_the_dot_survives_being_read_from_adb(self):
+        listing = """List of devices attached
+adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.   device product:frankel model:Pixel_10 device:frankel transport_id:1
+"""
+        found = parse_devices(listing)
+        self.assertEqual(len(found), 1)
+        self.assertTrue(found[0].serial.endswith("._tcp."))
+
+    def test_the_same_phone_written_both_ways_is_one_phone(self):
+        dotted = "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp."
+        self.assertTrue(same_serial(dotted, dotted.rstrip(".")))
+
+    def test_two_different_phones_are_still_two(self):
+        self.assertFalse(
+            same_serial(
+                "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.",
+                "adb-2B031JEGR06967-pfp4P2._adb-tls-connect._tcp.",
+            )
+        )
+
+    def test_two_empty_serials_do_not_match_each_other(self):
+        # Otherwise an entry with no serial adopts the next phone discovered.
+        self.assertFalse(same_serial("", ""))
+
+    def test_rediscovery_updates_the_entry_rather_than_adding_a_second(self):
+        from mind.phone_watch import PhoneEntry, merge_phone
+
+        stored = PhoneEntry(
+            id="p1",
+            serial="adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp",
+            label="Pixel 10",
+            hardware="5C061VDCR0003N",
+        )
+        found = PhoneEntry(
+            id="",
+            serial="adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.",
+            label="Pixel 10",
+            hardware="5C061VDCR0003N",
+        )
+        merged = merge_phone([stored], found)
+        self.assertEqual(len(merged), 1)
+        # And it takes the form adb will actually accept.
+        self.assertTrue(merged[0].serial.endswith("._tcp."))
 
 
 if __name__ == "__main__":

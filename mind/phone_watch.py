@@ -146,6 +146,18 @@ def next_id(entries: list[PhoneEntry]) -> str:
     return f"p{index}"
 
 
+def same_serial(one: str, other: str) -> bool:
+    """Whether two serials name the same phone.
+
+    adb lists an mDNS device with a trailing dot - the root label every fully
+    qualified name ends in - and will not accept the name without it. A serial
+    saved without that dot therefore looks different from the one adb reports
+    and is refused when it is used, which reads as "device not found" for a
+    phone sitting on the same network answering pings.
+    """
+    return (one or "").rstrip(".") == (other or "").rstrip(".") and bool(one or other)
+
+
 def merge_phone(entries: list[PhoneEntry], found: PhoneEntry) -> list[PhoneEntry]:
     """Add a phone, or update the one it turns out to be.
 
@@ -158,7 +170,7 @@ def merge_phone(entries: list[PhoneEntry], found: PhoneEntry) -> list[PhoneEntry
     updated: list[PhoneEntry] = []
     matched = False
     for entry in entries:
-        same = entry.serial == found.serial or (
+        same = same_serial(entry.serial, found.serial) or (
             bool(found.hardware) and entry.hardware == found.hardware
         )
         if same and not matched:
@@ -187,8 +199,13 @@ def phone_for(store: ConfigStore, phone_id: str = "") -> Phone:
             if entry.id == phone_id:
                 return Phone(serial=entry.serial)
     serial = str(store.load().get("phone_serial", "")).strip()
-    if serial:
-        return Phone(serial=serial)
+    # Only if it is still one of the configured phones. It is written when a
+    # handset is chosen and not cleared when that handset is reached a
+    # different way, so on its own it will happily name an address that
+    # stopped existing several reconnections ago.
+    for entry in entries:
+        if same_serial(entry.serial, serial):
+            return Phone(serial=entry.serial)
     return Phone(serial=entries[0].serial if entries else "")
 
 
