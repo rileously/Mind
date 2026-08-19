@@ -125,6 +125,9 @@ from .telegram_ui import (
     seat_confirm_text,
     seat_held_text,
     build_seat_confirm_keyboard,
+    build_held_keyboard,
+    ferry_payment_text,
+    FERRY_PAY,
     FERRY_HOLD,
     build_sailings_keyboard,
     build_seat_map_keyboard,
@@ -163,6 +166,10 @@ from .ferry_client import (
     sailings as ferry_sailings,
     reserve as ferry_reserve,
     reserve_body as ferry_reserve_body,
+    payment_body as ferry_payment_body,
+    initiate_payment as ferry_initiate_payment,
+    Passenger as ferry_passenger,
+    Contact as ferry_contact,
 )
 from .hotspot import Hotspot, HotspotError, band_label, current_wifi, dhcp_fault
 from .network_devices import from_dict as device_from_dict, local_ipv4
@@ -2177,6 +2184,12 @@ class TelegramBridge(QObject):
             self._handle_ferry_hold(client, chat_id, callback_id, message_id, value, stops)
             return
 
+        if kind == FERRY_PAY:
+            self._handle_ferry_pay(
+                client, chat_id, callback_id, message_id, value, stops, config
+            )
+            return
+
         if kind != FERRY_ISLAND:
             return
         chosen = ferry_stop_by_code(stops, value)
@@ -2329,9 +2342,68 @@ class TelegramBridge(QObject):
             self._handle_ferry_trip(client, chat_id, message_id, index, stops)
             return
         self.log.emit(f"Telegram: held ferry seat {seat}, booking {held.booking_id}")
+        state["booking"] = held.booking_id
+        self._ferry_pick[chat_id] = state
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
             seat_held_text(origin.name, destination.name, sail, int(seat), held.booking_id),
+            build_held_keyboard(int(index), int(seat)), html=True,
+        )
+
+    def _handle_ferry_pay(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        value: str,
+        stops: list,
+        config: dict,
+    ) -> None:
+        """Turn a held seat into a bank page to pay on.
+
+        Passenger details and payment are one call at RTL's end, so this sends
+        who is travelling and gets back a link. The card is entered on that
+        link, by the person, on the bank's own page.
+        """
+        state = self._ferry_pick.get(chat_id) or {}
+        sails = state.get("sailings") or []
+        booking = state.get("booking", "")
+        index, _, seat = value.partition(".")
+        if not booking or not index.isdigit() or not seat.isdigit():
+            return
+        if int(index) >= len(sails):
+            return
+        passenger = ferry_passenger(
+            name=str(config.get("ferry_passenger_name", "")).strip(),
+            id_number=self.store.get_ferry_passenger_id(config),
+            id_type=str(config.get("ferry_passenger_id_type", "101")),
+        )
+        if not passenger.name or not passenger.id_number:
+            client.answer_callback_query(
+                callback_id,
+                "Fill in who travels, in Mind's Preferences, on the Telegram tab.",
+                alert=True,
+            )
+            return
+        contact = ferry_contact(
+            name=passenger.name,
+            email=str(config.get("ferry_contact_email", "")).strip(),
+            phone=str(config.get("ferry_contact_phone", "")).strip(),
+        )
+        client.answer_callback_query(callback_id, "Asking RTL for a payment link…")
+        sail = sails[int(index)]
+        try:
+            link = ferry_initiate_payment(
+                ferry_payment_body(booking, sail, int(seat), passenger, contact)
+            )
+        except FerryError as exc:
+            client.answer_callback_query(callback_id, str(exc)[:190], alert=True)
+            return
+        self.log.emit(f"Telegram: ferry payment link for booking {booking}")
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            ferry_payment_text(passenger.name, sail, int(seat), booking, link),
             build_ferry_again_keyboard(), html=True,
         )
 

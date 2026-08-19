@@ -500,3 +500,128 @@ def reserve(body: dict, token: str = "", opener=None) -> Reservation:
     except ValueError as exc:
         raise FerryError("RTL answered with something that was not JSON.") from exc
     return parse_reservation(payload)
+
+
+PAYMENT_URL = "https://transactions.rtl.mv/maldives/api/payment/v6/transaction"
+NATIONAL_ID = "101"
+# From the site: a card payment, on a ferry, from a browser.
+PAYMENT_TYPE_CARD = 1
+VEHICLE_FERRY = 3
+
+
+@dataclass(frozen=True)
+class Passenger:
+    """Who is travelling, as RTL needs them described."""
+
+    name: str = ""
+    id_number: str = ""
+    id_type: str = NATIONAL_ID
+    date_of_birth: str = ""
+
+
+@dataclass(frozen=True)
+class Contact:
+    """Who to send the ticket to."""
+
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+
+
+def payment_body(
+    booking_id: str,
+    sail,
+    seat: int,
+    passenger: Passenger,
+    contact: Contact,
+    deck: str = DEFAULT_DECK,
+) -> dict:
+    """The request that turns a held seat into a ticket to pay for.
+
+    Passenger details and payment are one call on RTL's side, not two: the
+    person travelling is described here, and the reply is a link to a bank
+    page. Mind builds this and never sees a card - the card is entered on the
+    other end of that link.
+    """
+    if not booking_id:
+        raise FerryError("There is no booking to pay for.")
+    if not passenger.name or not passenger.id_number:
+        raise FerryError("The passenger needs a name and an ID number.")
+    return {
+        "bookingId": booking_id,
+        "rrn": "",
+        "qrType": ONE_WAY,
+        "totalPrice": float(sail.fare or 0),
+        "deviceType": WEB_DEVICE,
+        "vehicleType": VEHICLE_FERRY,
+        "paymentType": PAYMENT_TYPE_CARD,
+        "isConcessional": 0,
+        "isDnrVerified": 0,
+        "customerName": contact.name or passenger.name,
+        "customerEmail": contact.email,
+        "customerPhone": contact.phone,
+        "inbound": [
+            {
+                "scheduleId": sail.schedule_id,
+                "passengers": [
+                    {
+                        "customerCategoryId": passenger.id_type,
+                        "customerId": passenger.id_number,
+                        "customerName": passenger.name,
+                        "dob": passenger.date_of_birth,
+                        "productCode": REGULAR_PRODUCT,
+                        "isPrimary": 1,
+                        "seatNumber": int(seat),
+                        "deckCode": str(deck),
+                        "passengerCount": 0,
+                    }
+                ],
+            }
+        ],
+        "outbound": [],
+    }
+
+
+def parse_payment(payload: dict) -> str:
+    """The bank page to send somebody to, out of whatever RTL called it."""
+    if not isinstance(payload, dict):
+        raise FerryError("RTL answered with something unreadable.")
+    for key in ("paymentUrl", "redirectUrl", "url", "paymentURL", "link"):
+        found = payload.get(key)
+        if isinstance(found, str) and found.startswith("http"):
+            return found
+    nested = payload.get("data")
+    if isinstance(nested, dict):
+        return parse_payment(nested)
+    raise FerryError(str(payload.get("message") or "RTL did not give a payment link."))
+
+
+def initiate_payment(body: dict, token: str = "", opener=None) -> str:
+    """Ask for the bank page. Nothing here handles a card."""
+    request = urllib.request.Request(
+        PAYMENT_URL, data=json.dumps(body).encode("utf-8"), method="POST"
+    )
+    for name, value in {**HEADERS, "Content-Type": "application/json"}.items():
+        request.add_header(name, value)
+    if token:
+        request.add_header("Authorization", token)
+    send = opener or (
+        lambda r: urllib.request.urlopen(
+            r, timeout=TIMEOUT, context=ssl.create_default_context()
+        )
+    )
+    try:
+        with send(request) as answer:
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body_text = exc.read(300).decode("utf-8", "replace")
+        try:
+            said = json.loads(body_text).get("message")
+        except ValueError:
+            said = ""
+        raise FerryError(said or f"RTL answered HTTP {exc.code}.") from exc
+    except urllib.error.URLError as exc:
+        raise FerryError(f"Could not reach RTL: {getattr(exc, 'reason', exc)}") from exc
+    except ValueError as exc:
+        raise FerryError("RTL answered with something that was not JSON.") from exc
+    return parse_payment(payload)

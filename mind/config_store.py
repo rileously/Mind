@@ -129,6 +129,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # password below instead.
     "hotspot_match_home_wifi": True,
     "hotspot_ssid": "",
+    # Who travels, for the ferry booking. The name and the type are ordinary
+    # settings; the ID number is a government one and is kept the way the bot
+    # token and the router password are.
+    "ferry_passenger_name": "",
+    "ferry_passenger_id_type": "101",
+    "ferry_passenger_id_protected": "",
+    "ferry_contact_email": "",
+    "ferry_contact_phone": "",
     # "auto", "2.4" or "5". The low band reaches further through walls,
     # which is the whole reason a PC is being asked to be an access point.
     "hotspot_band": "auto",
@@ -246,6 +254,29 @@ class ConfigStore:
         clean = token.strip() if isinstance(token, str) else ""
         updated = deepcopy(config)
         updated["telegram_token_protected"] = protect_text(clean) if clean else ""
+        return updated
+
+    def get_ferry_passenger_id(self, config: dict[str, Any] | None = None) -> str:
+        """The passenger's ID number, stored encrypted.
+
+        A national ID is not a preference. It identifies a person to a
+        transport operator and to anybody who reads the settings file, so it
+        goes in the same place as the bot token and comes out only when a
+        booking is being made.
+        """
+        current = config if config is not None else self.load()
+        protected = current.get("ferry_passenger_id_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return ""
+        try:
+            return unprotect_text(protected).strip()
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def set_ferry_passenger_id(self, config: dict[str, Any], number: str) -> dict[str, Any]:
+        clean = number.strip() if isinstance(number, str) else ""
+        updated = deepcopy(config)
+        updated["ferry_passenger_id_protected"] = protect_text(clean) if clean else ""
         return updated
 
     def get_hotspot_password(self, config: dict[str, Any] | None = None) -> str:

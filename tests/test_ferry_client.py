@@ -428,3 +428,71 @@ class HoldingASeat(unittest.TestCase):
         with self.assertRaises(FerryError) as caught:
             parse_reservation({"message": "Ticket mode is not found in request"})
         self.assertIn("Ticket mode", str(caught.exception))
+
+
+class WhoTravels(unittest.TestCase):
+    """Passenger details and payment are one call at RTL's end, not two."""
+
+    def parts(self):
+        from mind.ferry_client import Contact, Passenger, Sailing
+
+        return (
+            Sailing(schedule_id="125034", fare=70, route="R1C5"),
+            Passenger(name="Mohamed Maazinu", id_number="A375667", id_type="101"),
+            Contact(name="Adam", email="a@example.com", phone="9194744"),
+        )
+
+    def test_the_passenger_is_described_with_their_seat(self):
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        body = payment_body("00000014B909", sail, 3, passenger, contact)
+        rider = body["inbound"][0]["passengers"][0]
+        self.assertEqual(rider["customerName"], "Mohamed Maazinu")
+        self.assertEqual(rider["customerId"], "A375667")
+        self.assertEqual(rider["seatNumber"], 3)
+        self.assertEqual(rider["isPrimary"], 1)
+
+    def test_the_booking_being_paid_for_is_named(self):
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        self.assertEqual(payment_body("00000014B909", sail, 3, passenger, contact)["bookingId"], "00000014B909")
+
+    def test_the_ticket_goes_to_the_contact_not_the_passenger(self):
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        body = payment_body("00000014B909", sail, 3, passenger, contact)
+        self.assertEqual(body["customerEmail"], "a@example.com")
+
+    def test_no_passenger_is_refused_before_rtl_is_asked(self):
+        from mind.ferry_client import Contact, FerryError, Passenger, payment_body
+
+        sail, _, contact = self.parts()
+        with self.assertRaises(FerryError):
+            payment_body("00000014B909", sail, 3, Passenger(name="X"), contact)
+        with self.assertRaises(FerryError):
+            payment_body("", sail, 3, Passenger(name="X", id_number="A1"), contact)
+
+    def test_nothing_in_the_request_is_a_card(self):
+        # Mind builds this and never handles a card; the bank page does.
+        from mind.ferry_client import payment_body
+
+        sail, passenger, contact = self.parts()
+        flat = json.dumps(payment_body("00000014B909", sail, 3, passenger, contact)).lower()
+        for word in ("card", "cvv", "expiry", "pan"):
+            self.assertNotIn(word, flat)
+
+    def test_the_bank_page_is_found_whatever_rtl_calls_it(self):
+        from mind.ferry_client import parse_payment
+
+        self.assertEqual(parse_payment({"paymentUrl": "https://bank/x"}), "https://bank/x")
+        self.assertEqual(parse_payment({"data": {"redirectUrl": "https://bank/y"}}), "https://bank/y")
+
+    def test_no_link_is_a_failure_with_rtls_words(self):
+        from mind.ferry_client import FerryError, parse_payment
+
+        with self.assertRaises(FerryError) as caught:
+            parse_payment({"message": "Booking already paid"})
+        self.assertIn("already paid", str(caught.exception))

@@ -1047,6 +1047,7 @@ class NotificationsPage(QWidget):
 
 ROUTER_PASSWORD_MASK = "•" * 10
 HOTSPOT_PASSWORD_MASK = "•" * 10
+FERRY_ID_MASK = "•" * 7
 HOTSPOT_BANDS = HOTSPOT_BAND_CHOICES
 MESSAGE_LIMIT = 300
 
@@ -2474,6 +2475,47 @@ class SettingsPage(QWidget):
             self.telegram_enabled.toggled.connect(widget.setEnabled)
         for widget in (self.telegram_files_root, self.telegram_inbox):
             self.telegram_files.toggled.connect(widget.setEnabled)
+        ferry_who = QWidget()
+        ferry_row = QHBoxLayout(ferry_who)
+        ferry_row.setContentsMargins(0, 0, 0, 0)
+        ferry_row.setSpacing(8)
+        self.ferry_name = QLineEdit()
+        self.ferry_name.setPlaceholderText("Passenger full name")
+        self.ferry_name.setMaximumWidth(190)
+        self.ferry_id = QLineEdit()
+        self.ferry_id.setPlaceholderText("ID number")
+        self.ferry_id.setEchoMode(QLineEdit.Password)
+        self.ferry_id.setMaximumWidth(130)
+        ferry_row.addWidget(self.ferry_name)
+        ferry_row.addWidget(self.ferry_id)
+        self._setting_row(
+            telegram_layout,
+            "Who travels on a ferry ticket",
+            "Filled in once and used when a ferry seat is booked from Telegram, so an "
+            "ID number is not typed into a chat. The number is a government one and is "
+            "stored encrypted, like the bot token. Mind never handles the card.",
+            ferry_who,
+            "🚤",
+        )
+        ferry_reach = QWidget()
+        reach_row = QHBoxLayout(ferry_reach)
+        reach_row.setContentsMargins(0, 0, 0, 0)
+        reach_row.setSpacing(8)
+        self.ferry_email = QLineEdit()
+        self.ferry_email.setPlaceholderText("Email for the ticket")
+        self.ferry_email.setMaximumWidth(190)
+        self.ferry_phone = QLineEdit()
+        self.ferry_phone.setPlaceholderText("Phone")
+        self.ferry_phone.setMaximumWidth(130)
+        reach_row.addWidget(self.ferry_email)
+        reach_row.addWidget(self.ferry_phone)
+        self._setting_row(
+            telegram_layout,
+            "Where the ferry ticket goes",
+            "RTL sends the ticket to this address once it is paid for.",
+            ferry_reach,
+            "🚤",
+        )
         self.telegram_send_menu = ToggleSwitch()
         self._setting_row(
             telegram_layout,
@@ -2809,6 +2851,12 @@ class SettingsPage(QWidget):
         band_index = self.hotspot_band.findData(str(config.get("hotspot_band", "auto")))
         self.hotspot_band.setCurrentIndex(max(band_index, 0))
         self.hotspot_band.setEnabled(telegram_on and hotspot_on)
+        self.ferry_name.setText(str(config.get("ferry_passenger_name", "")))
+        self.ferry_id.setText(
+            FERRY_ID_MASK if self.store.get_ferry_passenger_id(config) else ""
+        )
+        self.ferry_email.setText(str(config.get("ferry_contact_email", "")))
+        self.ferry_phone.setText(str(config.get("ferry_contact_phone", "")))
         self.hotspot_match.setEnabled(telegram_on and hotspot_on)
         self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
         self.telegram_send_menu.setEnabled(telegram_on)
@@ -2877,6 +2925,9 @@ class SettingsPage(QWidget):
                 "hotspot_match_home_wifi": self.hotspot_match.isChecked(),
                 "hotspot_ssid": self.hotspot_ssid.text().strip(),
                 "hotspot_band": self.hotspot_band.currentData(),
+                "ferry_passenger_name": self.ferry_name.text().strip(),
+                "ferry_contact_email": self.ferry_email.text().strip(),
+                "ferry_contact_phone": self.ferry_phone.text().strip(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
                 "url_peek_enabled": self.url_peek.isChecked(),
@@ -2894,6 +2945,10 @@ class SettingsPage(QWidget):
         typed_hotspot = self.hotspot_password.text()
         if typed_hotspot != HOTSPOT_PASSWORD_MASK:
             config = self.store.set_hotspot_password(config, typed_hotspot)
+        # The ID is masked the same way, and left alone unless retyped.
+        typed_ferry_id = self.ferry_id.text()
+        if typed_ferry_id != FERRY_ID_MASK:
+            config = self.store.set_ferry_passenger_id(config, typed_ferry_id)
         want_shell_menu = self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
         try:
             self.store.save(config)

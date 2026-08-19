@@ -1208,3 +1208,37 @@ def seat_held_text(origin: str, destination: str, sail, seat: int, booking: str)
         "<b>Not paid yet.</b> Open the RTL app or rtl.mv, find this booking and "
         "pay for it, or the seat goes back on sale when the hold runs out."
     )
+
+
+FERRY_PAY = "y"
+
+
+def build_held_keyboard(trip_index: int, seat: int) -> dict:
+    """Offered under a held seat: go and pay for it, or leave it."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "💳  Continue to payment",
+                    "callback_data": ferry_callback(FERRY_PAY, f"{trip_index}.{seat}"),
+                }
+            ],
+            [
+                {"text": "🚤  Another journey", "callback_data": ferry_callback(FERRY_RESTART)},
+                {"text": "‹  Menu", "callback_data": CB_MENU},
+            ],
+        ]
+    }
+
+
+def ferry_payment_text(who: str, sail, seat: int, booking: str, link: str) -> str:
+    """The link to pay on, and what it is for."""
+    return (
+        f"💳 <b>{who}</b> · seat <b>{seat}</b>\n"
+        f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
+        f"<b>MVR {sail.fare:.0f}</b>\n"
+        f"Booking <code>{booking}</code>\n\n"
+        f'<a href="{link}">Pay on RTL\'s bank page</a>\n\n'
+        "The card goes in on that page, which is the bank's, not Mind's. "
+        "The ticket is emailed once it goes through."
+    )
