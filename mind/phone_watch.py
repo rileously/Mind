@@ -19,11 +19,20 @@ either way, and that is what a phone is known by here.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
-from .adb_client import AdbError, CallState, Phone, attached, find_adb
+from .adb_client import (
+    AdbError,
+    CallState,
+    Phone,
+    attached,
+    find_adb,
+    mdns_services,
+    restart_server,
+)
 from .config_store import ConfigStore
 
 
@@ -92,6 +101,30 @@ def rediscovered(entry: PhoneEntry, devices: list) -> str:
         found = hardware_from_serial(device.serial)
         if found and entry.hardware and found == entry.hardware:
             return device.serial
+    return ""
+
+
+# adb is restarted at most this often, however many phones are missing and
+# however often the poll comes round.
+NUDGE_SECONDS = 120.0
+_last_nudge: float | None = None
+
+
+def advertised(entry: PhoneEntry, services: list) -> str:
+    """Where this phone says it is, whether or not adb has reached it.
+
+    The address is the part that keeps changing, and mDNS carries the current
+    one even when the device list is empty - which is the state a phone is in
+    after wireless debugging has come back on a different port and adb has not
+    noticed yet.
+
+    Matched on the hardware serial, which mDNS puts in the advertised name.
+    """
+    for name, address in services:
+        if entry.hardware and entry.hardware in name:
+            return address
+        if entry.serial and name and name in entry.serial:
+            return address
     return ""
 
 
@@ -283,11 +316,12 @@ class PhonePoll(QObject):
                 devices = attached()
             except AdbError:
                 devices = []
-            if devices:
-                statuses = [
-                    self._again(status, devices) if status.away else status
-                    for status in statuses
-                ]
+            # Not conditional on there being any: an empty device list is the
+            # state this exists for, and mDNS still knows where the phone is.
+            statuses = [
+                self._again(status, devices) if status.away else status
+                for status in statuses
+            ]
         self.finished.emit(statuses)
 
     def _again(self, status: PhoneStatus, devices: list) -> PhoneStatus:
@@ -296,12 +330,37 @@ class PhonePoll(QObject):
         # Compared exactly, not with same_serial: a trailing dot is the whole
         # difference in the case this exists to fix, and adb refuses the name
         # without it.
-        if not serial or serial == status.entry.serial:
+        if serial and serial != status.entry.serial:
+            fresh = self._visit(replace(status.entry, serial=serial))
+            if not fresh.away:
+                return replace(fresh, found_serial=serial)
+        return self._from_mdns(status)
+
+    def _from_mdns(self, status: PhoneStatus) -> PhoneStatus:
+        """Nudge adb when it has lost a phone that is still announcing itself.
+
+        The device list can be empty while the phone advertises perfectly well:
+        wireless debugging came back on a different port and adb has not looked
+        again. Connecting to the advertised address does not help - that port
+        wants a TLS handshake only adb's own auto-connect performs - so the
+        thing that works is making adb start over.
+
+        Only when mDNS says the phone is there, so a handset genuinely out of
+        the house never causes this, and not more often than the interval
+        below, because the poll comes round every few seconds and restarting
+        adb on each one would be worse than the problem.
+
+        The phone is still away when this returns. It arrives on a later visit.
+        """
+        global _last_nudge
+        if not advertised(status.entry, mdns_services()):
             return status
-        fresh = self._visit(replace(status.entry, serial=serial))
-        if fresh.away:
+        now = time.monotonic()
+        if _last_nudge is not None and now - _last_nudge < NUDGE_SECONDS:
             return status
-        return replace(fresh, found_serial=serial)
+        _last_nudge = now
+        restart_server()
+        return status
 
     def _visit(self, entry: PhoneEntry) -> PhoneStatus:
         phone = Phone(serial=entry.serial)

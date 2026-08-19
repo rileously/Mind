@@ -14,6 +14,7 @@ phone number and becomes a command.
 import unittest
 import unittest.mock
 
+from mind.adb_client import mdns_services, restart_server
 from mind.phone_watch import same_serial
 from mind.adb_client import (
     AdbError,
@@ -475,6 +476,93 @@ class FindingThePhoneAgain(unittest.TestCase):
         entry = self.entry("something-else._adb-tls-connect._tcp.", hardware="")
         other = self.device("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
         self.assertEqual(rediscovered(entry, [other]), "")
+
+
+MDNS = """List of discovered mdns services
+adb-2B031JEGR06967-pfp4P2   _adb-tls-connect._tcp.   192.168.18.14:35183
+adb-5C061VDCR0003N-dtKL0C   _adb-tls-connect._tcp.   192.168.18.5:40839
+adb-5C061VDCR0003N-dtKL0C   _adb-tls-pairing._tcp.   192.168.18.5:44001
+"""
+
+
+class WhereThePhoneSaysItIs(unittest.TestCase):
+    """mDNS knows the address when the device list has gone empty.
+
+    Which is the whole reason to read it: a phone announces itself whether or
+    not adb has managed to connect, and the port it announces is the one that
+    changed.
+    """
+
+    def test_the_advertised_addresses_are_read(self):
+        from mind.adb_client import parse_mdns
+
+        found = dict(parse_mdns(MDNS))
+        self.assertEqual(found["adb-5C061VDCR0003N-dtKL0C"], "192.168.18.5:40839")
+
+    def test_the_heading_is_not_a_phone(self):
+        from mind.adb_client import parse_mdns
+
+        self.assertNotIn("List", [name for name, _address in parse_mdns(MDNS)])
+
+    def test_the_pairing_port_is_not_offered_as_the_way_in(self):
+        # A phone advertises both. Connecting to the pairing one gets nowhere,
+        # and it is listed second, so whichever wins by accident is the wrong
+        # one.
+        from mind.adb_client import parse_mdns
+
+        for _name, address in parse_mdns(MDNS):
+            self.assertNotIn("44001", address)
+
+    def test_nothing_advertising_is_not_an_error(self):
+        from mind.adb_client import parse_mdns
+
+        self.assertEqual(parse_mdns("List of discovered mdns services"), [])
+
+    def test_a_phone_is_matched_by_its_hardware_serial(self):
+        from mind.adb_client import parse_mdns
+        from mind.phone_watch import PhoneEntry, advertised
+
+        entry = PhoneEntry(id="p1", serial="stale", hardware="5C061VDCR0003N")
+        self.assertEqual(advertised(entry, parse_mdns(MDNS)), "192.168.18.5:40839")
+
+    def test_a_phone_that_is_not_advertising_gets_no_address(self):
+        from mind.adb_client import parse_mdns
+        from mind.phone_watch import PhoneEntry, advertised
+
+        entry = PhoneEntry(id="p9", serial="stale", hardware="NOTHERE0001")
+        self.assertEqual(advertised(entry, parse_mdns(MDNS)), "")
+
+
+class NudgingAdb(unittest.TestCase):
+    """Restarting adb is the recovery, so it must not happen on every poll."""
+
+    def setUp(self):
+        import mind.phone_watch as watch
+
+        self.watch = watch
+        self.previous = watch._last_nudge
+        watch._last_nudge = None
+        self.addCleanup(setattr, watch, "_last_nudge", self.previous)
+
+    def test_the_interval_is_long_next_to_the_poll(self):
+        # The poll comes round every few seconds; restarting adb that often
+        # would be worse than the phone being away.
+        self.assertGreaterEqual(self.watch.NUDGE_SECONDS, 60)
+
+    def test_a_phone_that_is_not_advertising_is_left_alone(self):
+        from mind.config_store import ConfigStore
+        from mind.phone_watch import PhoneEntry, PhonePoll, PhoneStatus
+
+        calls = []
+        self.watch.mdns_services = lambda: []
+        self.watch.restart_server = lambda: calls.append(1)
+        self.addCleanup(setattr, self.watch, "mdns_services", mdns_services)
+        self.addCleanup(setattr, self.watch, "restart_server", restart_server)
+
+        poll = PhonePoll(ConfigStore())
+        status = PhoneStatus(PhoneEntry(id="p1", serial="x", hardware="H"), trouble="gone")
+        poll._from_mdns(status)
+        self.assertEqual(calls, [])
 
 
 class WhatThePhoneSays(unittest.TestCase):

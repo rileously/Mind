@@ -505,6 +505,68 @@ SCRCPY_LOCATIONS = (
 )
 
 
+def parse_mdns(payload: str) -> list[tuple[str, str]]:
+    """The phones adb can see advertising themselves, and where they are.
+
+    Worth having separately from "adb devices": a phone announces itself over
+    mDNS whether or not adb has managed to connect to it, so this still knows
+    where a phone is when the device list has gone empty. The port changes
+    every time wireless debugging comes back, which is exactly the situation
+    the list cannot help with.
+    """
+    found: list[tuple[str, str]] = []
+    for line in (payload or "").splitlines():
+        parts = line.split()
+        # name, service type, address. The heading line has no address on it.
+        # Only the connecting service: a phone also advertises a pairing port,
+        # which is a different port for a different purpose and would be
+        # offered here as though it were the one to talk to.
+        if len(parts) < 3 or not parts[1].startswith("_adb-tls-connect"):
+            continue
+        address = parts[2]
+        if ":" not in address:
+            continue
+        found.append((parts[0], address))
+    return found
+
+
+def mdns_services(adb: str = "", run=_default_runner) -> list[tuple[str, str]]:
+    """Ask adb what is advertising itself. Empty if it cannot say."""
+    binary = adb or find_adb()
+    if not binary:
+        return []
+    try:
+        code, out, _err = run([binary, "mdns", "services"], 15.0)
+    except OSError:
+        return []
+    if code != 0:
+        return []
+    return parse_mdns(out)
+
+
+def restart_server(adb: str = "", run=_default_runner) -> bool:
+    """Stop and start adb's own server.
+
+    Blunt, and the only thing that reliably works. A phone reached over
+    wireless debugging is connected through a TLS handshake that only adb's
+    mDNS auto-connect performs; "adb connect" to the advertised port is refused
+    because it is not that. When adb has lost a phone that is plainly still
+    advertising itself, restarting the server is what makes it look again.
+
+    Connecting takes a few seconds afterwards, so the caller should expect the
+    phone on a later visit rather than this one.
+    """
+    binary = adb or find_adb()
+    if not binary:
+        return False
+    try:
+        run([binary, "kill-server"], 15.0)
+        code, _out, _err = run([binary, "start-server"], 25.0)
+    except OSError:
+        return False
+    return code == 0
+
+
 def find_scrcpy() -> str:
     """Where scrcpy is, or "" if it is not on this machine.
 
