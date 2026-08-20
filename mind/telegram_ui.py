@@ -2194,7 +2194,7 @@ def build_booking_keyboard(at: int, booking, has_ticket: bool) -> dict:
 FERRY_CARD = "c"
 
 
-def card_text(card, needed: int = 1, chosen: int = 0) -> str:
+def card_text(card, needed: int = 1, chosen: int = 0, by_ai: bool = False) -> str:
     """What was read off the card, for somebody to check before it is used."""
     if not card.usable:
         missing = "name" if card.number else "ID number"
@@ -2211,7 +2211,8 @@ def card_text(card, needed: int = 1, chosen: int = 0) -> str:
             "<code>Mohamed Maazinu A375667</code>"
         )
     lines = [
-        "🪪 <b>Read from the card</b>",
+        "🪪 <b>Read from the card</b>"
+        + (" · <i>by AI</i>" if by_ai else ""),
         "",
         f"👤 <b>{escape_html(card.name)}</b>",
         f"🆔 <code>{escape_html(card.number)}</code>",

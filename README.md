@@ -76,6 +76,9 @@ launch; a folder still in use is never touched.
 - Ask from Telegram what sails between two islands today, pick a seat off a map of
   the boat, and hold it - times, fare and live seats from RTL's own API, with the
   hold behind a confirmation of its own because it takes a seat off the ferry
+- Optionally read identity cards with your configured AI model instead of Windows
+  OCR, which handles a worn or sideways card that local OCR cannot; off by default
+  because it is the one thing that uploads a photo
 - Photograph a Maldivian identity card and send it to the chat instead of typing
   a passenger: the name and ID number are read on this PC by Windows OCR, at four
   turns because a card on a table is rarely upright, and shown for checking before
@@ -103,16 +106,26 @@ launch; a folder still in use is never touched.
 Mind does not include telemetry and does not store a history of transformed text. Realtime
 spelling, image text extraction, and offline Palette text tools run locally. Cloud providers
 receive text only when you invoke an AI transformation, including an image action such as
-translate, fix, or summarize; the image itself is not uploaded. Local replacer commands run
+translate, fix, or summarize; the image itself is not uploaded. The one
+exception is "Read identity cards with AI", which is off unless you turn it on
+and is described below. Local replacer commands run
 on the computer. If Word definitions is enabled, only the selected word is sent to the
 [Datamuse API](https://www.datamuse.com/api/) (with Wiktionary as a fallback); phrases and
 sentences are not sent. Definitions may draw on WordNet and Wiktionary, and the popup links
 to its source. Shell replacers
 execute with the current user's permissions and should only be created from trusted commands.
 
-A photographed identity card is read by Windows OCR on this PC and is never
-uploaded anywhere. The photo itself is deleted as soon as it has been read, and
-only the name and number reach the booking, after you have confirmed them.
+A photographed identity card is read by Windows OCR on this PC by default, and
+is never uploaded. The photo is deleted as soon as it has been read, and only
+the name and number reach the booking, after you have confirmed them.
+
+"Read identity cards with AI" changes that one thing, which is why it is off
+until you turn it on: the photograph is sent to whichever AI provider you have
+configured, and their terms then apply to it rather than these. It buys real
+accuracy - a worn or sideways card that Windows OCR cannot read at all - and it
+is the only image Mind ever uploads. The photo is still deleted afterwards, the
+reading is still shown for confirmation, and the panel says when a card was
+read this way. If the provider cannot be reached, Windows OCR still catches it.
 
 Saved travellers and past bookings hold names, national ID numbers and where
 somebody went, so both are encrypted with Windows DPAPI for your account rather

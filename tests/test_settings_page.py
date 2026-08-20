@@ -240,3 +240,35 @@ class AutoSaveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CardReadingSettings(unittest.TestCase):
+    """The one setting in Mind that sends a photograph off this PC."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = ConfigStore(root=Path(self.temp.name) / "config")
+        self.page = SettingsPage(self.store)
+        self.addCleanup(self.page.deleteLater)
+
+    def test_it_is_off_until_it_is_turned_on(self):
+        self.assertFalse(self.store.load().get("card_ai_enabled", False))
+        self.assertFalse(self.page.card_ai.isChecked())
+
+    def test_turning_it_on_is_written_down(self):
+        self.page.telegram_enabled.setChecked(True)
+        self.page.card_ai.setChecked(True)
+        self.page._persist()
+        self.assertTrue(self.store.load().get("card_ai_enabled"))
+
+    def test_it_is_only_offered_with_the_bridge_on(self):
+        # Cards arrive over Telegram; there is nowhere else to send one from.
+        self.store.save({**self.store.load(), "telegram_enabled": False})
+        page = SettingsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        self.assertFalse(page.card_ai.isEnabled())

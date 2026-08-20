@@ -98,6 +98,7 @@ from .selection import (
     is_question_text,
 )
 from .hotspot import BANDS as HOTSPOT_BAND_CHOICES
+from .ai_ocr import AiOcrError, read_card as ai_read_card
 from .id_card import best_card
 from .ocr import OcrError, extract_text_at_turns, extract_text_from_image
 from .sms import SmsError, matching, read_messages, unread
@@ -2497,6 +2498,20 @@ class SettingsPage(QWidget):
             ferry_reach,
             "🚤",
         )
+        self.card_ai = ToggleSwitch()
+        self._setting_row(
+            telegram_layout,
+            "Read identity cards with AI",
+            "Windows OCR reads a flat, clean card well and a worn one badly - it "
+            "loses a name to the Thaana printed beside it, or reads a sideways "
+            "card as nothing. Your AI model reads the picture instead, angle, "
+            "glare and all. It is the one thing in Mind that sends a photo to a "
+            "cloud provider, and the photo is somebody's identity card, so it is "
+            "off until you turn it on. Windows OCR still catches it if the model "
+            "cannot be reached.",
+            self.card_ai,
+            "🪪",
+        )
         self.mail_watch = ToggleSwitch()
         self._setting_row(
             telegram_layout,
@@ -2681,6 +2696,7 @@ class SettingsPage(QWidget):
             self.telegram_power,
             self.telegram_hotspot,
             self.hotspot_match,
+            self.card_ai,
             self.mail_watch,
             self.telegram_send_menu,
             self.secret_shield,
@@ -2890,6 +2906,8 @@ class SettingsPage(QWidget):
         self.hotspot_band.setEnabled(telegram_on and hotspot_on)
         self.ferry_email.setText(str(config.get("ferry_contact_email", "")))
         self.ferry_phone.setText(str(config.get("ferry_contact_phone", "")))
+        self.card_ai.setChecked(bool(config.get("card_ai_enabled", False)))
+        self.card_ai.setEnabled(telegram_on)
         mail_on = bool(config.get("mail_watch_enabled", False))
         self.mail_watch.setChecked(mail_on)
         self.mail_watch.setEnabled(telegram_on)
@@ -2971,6 +2989,7 @@ class SettingsPage(QWidget):
                 "hotspot_ssid": self.hotspot_ssid.text().strip(),
                 "hotspot_band": self.hotspot_band.currentData(),
                 "ferry_contact_email": self.ferry_email.text().strip(),
+                "card_ai_enabled": self.card_ai.isChecked(),
                 "mail_watch_enabled": self.mail_watch.isChecked(),
                 "mail_user": self.mail_user.text().strip(),
                 "mail_senders": self.mail_senders.text().strip(),
@@ -3062,6 +3081,7 @@ class SettingsPage(QWidget):
             widget.setEnabled(telegram_on)
         for widget in (self.telegram_files_root, self.telegram_inbox):
             widget.setEnabled(telegram_on and files_on)
+        self.card_ai.setEnabled(telegram_on)
         self.mail_watch.setEnabled(telegram_on)
         mail_on = telegram_on and self.mail_watch.isChecked()
         for widget in (self.mail_user, self.mail_password, self.mail_senders):
@@ -3632,6 +3652,38 @@ class MindWindow(QMainWindow):
         if clipboard:
             clipboard.setText(text)
 
+    def _read_card_for_telegram(self, chat_id: int, source, image) -> None:
+        """Read a photographed card, by AI when that is switched on.
+
+        The model is tried first and Windows OCR catches it: a provider that
+        is rate limited, offline or without a key should cost the reading its
+        accuracy, not the booking its passenger. Which way it was read is said
+        on the panel, because one of them sent the photograph somewhere.
+        """
+        config = self.store.load()
+        if bool(config.get("card_ai_enabled", False)):
+            try:
+                card = ai_read_card(
+                    Path(source).read_bytes(), config, self.store.get_keys(config)
+                )
+                if card.name or card.number:
+                    self.telegram.ferry_card_read(chat_id, card, "", by_ai=True)
+                    return
+                self._log("Card: the model read nothing; falling back to Windows OCR.")
+            except (AiOcrError, OSError) as exc:
+                self._log(f"Card: AI reading failed ({exc}); using Windows OCR.")
+
+        try:
+            readings = list(extract_text_at_turns(image))
+        except OcrError as exc:
+            self.telegram.send_text(chat_id, f"Mind could not read that card: {exc}")
+            return
+        card = best_card(readings)
+        # The longest reading is the turn that saw most of the card, which is
+        # the one worth showing when the parse came up short.
+        fullest = max(readings, key=len) if readings else ""
+        self.telegram.ferry_card_read(chat_id, card, fullest)
+
     def _on_telegram_image_received(self, path: object, context: object) -> None:
         """Read an image sent to the bot and reply with the text found in it.
 
@@ -3651,18 +3703,7 @@ class MindWindow(QMainWindow):
                 # identity card, not something to run OCR over and hand back.
                 # Read at four turns: a card photographed on a table is
                 # sideways as often as not, and OCR reads sideways as nothing.
-                try:
-                    readings = list(extract_text_at_turns(image))
-                except OcrError as exc:
-                    self.telegram.send_text(
-                        chat_id, f"Mind could not read that card: {exc}"
-                    )
-                    return
-                card = best_card(readings)
-                # The longest reading is the turn that saw most of the card,
-                # which is the one worth showing when the parse came up short.
-                fullest = max(readings, key=len) if readings else ""
-                self.telegram.ferry_card_read(chat_id, card, fullest)
+                self._read_card_for_telegram(chat_id, source, image)
                 return
             try:
                 extracted = extract_text_from_image(image)

@@ -159,6 +159,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ferry_travellers_protected": "",
     "ferry_history_protected": "",
     "ferry_routes": "",
+    # Read a photographed identity card with the configured AI model instead
+    # of Windows OCR. Off by default and deliberately so: it is the only thing
+    # in Mind that sends a picture to a cloud provider, and the picture is
+    # somebody's identity card.
+    "card_ai_enabled": False,
     # "auto", "2.4" or "5". The low band reaches further through walls,
     # which is the whole reason a PC is being asked to be an access point.
     "hotspot_band": "auto",

@@ -455,3 +455,73 @@ class Correcting(unittest.TestCase):
         ]
         self.assertTrue(any("Name" in label for label in labels))
         self.assertTrue(any("ID number" in label for label in labels))
+
+
+class AiReadings(unittest.TestCase):
+    """A vision model reads the picture; Windows OCR reads the printing.
+
+    The rule with teeth is the same as everywhere else here: a plausible ID
+    number is worse than none, because it puts a real stranger on a ticket
+    rather than failing. So a model's answer is validated exactly as a typed
+    one is, with no letter-for-digit repairs.
+    """
+
+    def parse(self, reply):
+        from mind.ai_ocr import parse_reply
+
+        return parse_reply(reply)
+
+    def test_a_clean_answer_is_read(self):
+        card = self.parse(
+            '{"name": "Ali Shakir Hussain", "number": "A089744", "born": "01/01/1960"}'
+        )
+        self.assertEqual(card.name, "Ali Shakir Hussain")
+        self.assertEqual(card.number, "A089744")
+        self.assertEqual(card.born, "01/01/1960")
+        self.assertTrue(card.usable)
+
+    def test_json_fenced_in_markdown_is_still_read(self):
+        card = self.parse('```json\n{"name": "Ali Shakir Hussain", "number": "A089744"}\n```')
+        self.assertEqual(card.number, "A089744")
+
+    def test_a_field_the_model_would_not_guess_stays_empty(self):
+        card = self.parse('{"name": "", "number": "A089744", "born": ""}')
+        self.assertEqual(card.name, "")
+        self.assertFalse(card.usable)
+
+    def test_a_number_the_model_got_wrong_shaped_is_refused(self):
+        # Not repaired: "AO89744" from a model is as likely to be wrong as
+        # right, and a confident wrong number is the worst outcome here.
+        self.assertEqual(self.parse('{"number": "AO89744", "name": "Ali Shakir"}').number, "")
+
+    def test_a_one_word_name_is_refused(self):
+        self.assertEqual(self.parse('{"name": "Ali", "number": "A089744"}').name, "")
+
+    def test_a_nonsense_date_is_dropped_rather_than_shown(self):
+        self.assertEqual(self.parse('{"number": "A089744", "born": "sometime"}').born, "")
+
+    def test_a_refusal_in_prose_is_an_error_not_a_card(self):
+        from mind.ai_ocr import AiOcrError
+
+        for reply in ("", "I cannot read that image", "{broken"):
+            with self.assertRaises(AiOcrError):
+                self.parse(reply)
+
+    def test_the_panel_says_when_a_card_was_read_by_ai(self):
+        from mind.telegram_ui import card_text
+
+        card = Card(name="Ali Shakir Hussain", number="A089744")
+        self.assertIn("by AI", card_text(card, by_ai=True))
+        self.assertNotIn("by AI", card_text(card))
+
+    def test_reading_without_a_key_is_refused_before_any_request(self):
+        from mind.ai_ocr import AiOcrError, read_card
+
+        with self.assertRaises(AiOcrError):
+            read_card(b"x", {"provider": "gemini", "model": "m"}, [])
+
+    def test_reading_nothing_is_refused(self):
+        from mind.ai_ocr import AiOcrError, read_card
+
+        with self.assertRaises(AiOcrError):
+            read_card(b"", {"provider": "gemini", "model": "m"}, ["k"])

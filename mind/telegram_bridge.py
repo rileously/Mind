@@ -3019,7 +3019,9 @@ class TelegramBridge(QObject):
         state = self._ferry_pick.get(int(chat_id)) or {}
         return bool(state.get("awaiting_passenger") or state.get("card_only"))
 
-    def ferry_card_read(self, chat_id: int, card, reading: str = "") -> None:
+    def ferry_card_read(
+        self, chat_id: int, card, reading: str = "", by_ai: bool = False
+    ) -> None:
         """Show what was read off a card, for somebody to check."""
         client = self._client
         if client is None:
@@ -3045,7 +3047,7 @@ class TelegramBridge(QObject):
         self._ferry_pick[chat_id] = state
         self._send_panel(
             client, chat_id, PANEL_FERRY,
-            card_text(card, needed, len(already)),
+            card_text(card, needed, len(already), by_ai=by_ai),
             build_card_keyboard(card, more=len(already) + 1 < needed),
             html=True,
         )
