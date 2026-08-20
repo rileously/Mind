@@ -2223,6 +2223,16 @@ def card_text(card, needed: int = 1, chosen: int = 0) -> str:
         "<b>Check both against the card.</b> A misread letter or digit puts "
         "the wrong person on the ticket, and RTL checks it at the jetty.",
     ]
+    if getattr(card, "unsure", False):
+        # A name a surname short is worse than one that would not read at all:
+        # it looks right, and RTL refuses it at the payment with a message
+        # about verification that reads like a fault somewhere else.
+        lines += [
+            "",
+            "⚠️ <b>Part of the name may be missing.</b> Something unreadable "
+            "sat right after it. If the card shows more names than are above, "
+            "type it instead.",
+        ]
     if needed > 1:
         lines.append(f"\nPassenger {chosen + 1} of {needed}.")
     return "\n".join(lines)

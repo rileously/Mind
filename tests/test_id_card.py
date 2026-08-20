@@ -322,3 +322,60 @@ class Diagnosing(unittest.TestCase):
         from mind.telegram_ui import raw_reading
 
         self.assertEqual(raw_reading(""), "")
+
+
+class TruncatedNames(unittest.TestCase):
+    """A name a surname short is worse than one that would not read at all.
+
+    "Ali Shakir Hussain" went to RTL as "Ali Shakir" because a character of
+    Thaana was stuck to the surname, and RTL refused the booking on an identity
+    check that named nothing. The name sits between two lines of Thaana on
+    every card, so this is the normal case, not a freak one.
+    """
+
+    def test_thaana_stuck_to_the_surname_does_not_drop_it(self):
+        text = "A089744 Ali Shakir Hussain\u0787 01/01/1960"
+        self.assertEqual(parse_card(text).name, "Ali Shakir Hussain")
+
+    def test_a_stray_mark_does_not_drop_it(self):
+        self.assertEqual(
+            parse_card("A089744 Ali Shakir Hussain* 01/01/1960").name,
+            "Ali Shakir Hussain",
+        )
+
+    def test_noise_in_front_does_not_drop_it(self):
+        self.assertEqual(
+            parse_card("A089744 Ali Shakir |Hussain 01/01/1960").name,
+            "Ali Shakir Hussain",
+        )
+
+    def test_a_digit_inside_a_word_is_not_guessed_at(self):
+        # "Hussa1n" is a misread letter. Repairing it would turn a wrong name
+        # into a confident wrong name, so the reading is flagged instead.
+        card = parse_card("A089744 Ali Shakir Hussa1n 01/01/1960")
+        self.assertEqual(card.name, "Ali Shakir")
+        self.assertTrue(card.unsure)
+
+    def test_a_clean_card_is_not_flagged(self):
+        card = parse_card("A433093 Azaan Bin Ahmed Aslam 18/07/2015")
+        self.assertEqual(card.name, "Azaan Bin Ahmed Aslam")
+        self.assertFalse(card.unsure)
+
+    def test_the_panel_warns_when_a_name_may_be_short(self):
+        from mind.telegram_ui import card_text
+
+        text = card_text(Card(name="Ali Shakir", number="A089744", unsure=True))
+        self.assertIn("may be missing", text)
+
+    def test_the_panel_stays_quiet_when_it_is_sure(self):
+        from mind.telegram_ui import card_text
+
+        text = card_text(Card(name="Ali Shakir Hussain", number="A089744"))
+        self.assertNotIn("may be missing", text)
+
+    def test_salvage_refuses_a_word_that_is_mostly_rubbish(self):
+        from mind.id_card import salvage
+
+        self.assertEqual(salvage("|||"), "")
+        self.assertEqual(salvage("A1"), "")
+        self.assertEqual(salvage("Hussain"), "Hussain")

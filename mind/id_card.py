@@ -76,6 +76,9 @@ class Card:
     name: str = ""
     number: str = ""
     born: str = ""
+    # True when a word with letters in it was dropped right after the name.
+    # The reading may be a surname short, which is worse than unreadable.
+    unsure: bool = False
 
     @property
     def usable(self) -> bool:
@@ -193,44 +196,90 @@ def name_runs(text: str) -> list:
     with the layout, and on some cards "Date of Birth" lands between the number
     and the name. Stopping there found nothing at all.
     """
-    runs: list[str] = []
+    return [run for run, _cut in name_runs_cut(text)]
+
+
+def salvage(word: str) -> str:
+    """A word with the rubbish stuck to it taken off.
+
+    The name on a card sits between two lines of Thaana, and a recogniser that
+    cannot read Thaana still sometimes attaches a character of it to the word
+    next door - as do the holograms, the laminate creases and the edge of the
+    box the name is printed in. "Hussain" arriving as "Hussain<thaana>" was
+    dropping a surname silently, which is worse than failing to read it.
+
+    A word with a digit in it is not salvaged. "Hussa1n" is a misread letter
+    and guessing which one turns a wrong name into a confident wrong name.
+    """
+    if any(character.isdigit() for character in word):
+        return ""
+    cleaned = "".join(c for c in word if c.isascii() and (c.isalpha() or c in "'-"))
+    cleaned = cleaned.strip("'-")
+    return cleaned if sum(c.isalpha() for c in cleaned) >= 2 else ""
+
+
+def name_runs_cut(text: str):
+    """Every possible name, and whether something name-like was dropped after it.
+
+    The flag is the useful half. A run that ended because the next word had
+    letters in it may be a name with its last part missing, and a truncated
+    name is worse than none: it is confidently wrong, and it goes on a ticket.
+    """
+    found: list = []
     words: list[str] = []
 
-    def keep():
+    def keep(cut: bool):
         if len(words) >= 2:
-            runs.append(" ".join(words))
+            found.append((" ".join(words), cut))
 
     for raw in (text or "").replace("\n", " ").split():
         word = raw.strip(",;:.")
         if not word:
             continue
-        if any(character.isdigit() for character in word):
-            keep()
+        if word.lower().strip("'-") in FURNITURE_WORDS:
+            keep(False)
             words = []
             continue
-        if word.lower() in FURNITURE_WORDS:
-            keep()
-            words = []
+        if re.match(r"^[A-Za-z][A-Za-z'-]*$", word):
+            words.append(word)
+            if len(words) >= 5:
+                keep(False)
+                words = []
             continue
-        if not re.match(r"^[A-Za-z][A-Za-z'-]*$", word):
-            keep()
-            words = []
+        rescued = salvage(word)
+        if rescued and rescued.lower() not in FURNITURE_WORDS:
+            words.append(rescued)
+            if len(words) >= 5:
+                keep(False)
+                words = []
             continue
-        words.append(word)
-        if len(words) >= 5:
-            keep()
-            words = []
-    keep()
-    return runs
+        # Not a word and not rescuable. If it had letters in it, something that
+        # might have belonged to the name has just been thrown away.
+        keep(any(c.isalpha() for c in word))
+        words = []
+    keep(False)
+    return found
 
 
 def parse_card(text: str) -> Card:
     """Everything worth having off one reading of a card."""
+    name = find_name(text)
     return Card(
-        name=find_name(text),
+        name=name,
         number=find_number(text),
         born=find_born(text),
+        unsure=name_was_cut(text, name),
     )
+
+
+def name_was_cut(text: str, name: str) -> bool:
+    """Whether the name that was chosen had something dropped after it."""
+    if not name:
+        return False
+    for run, cut in name_runs_cut(text):
+        if run == name:
+            return bool(cut)
+    return False
 
 
 def best_card(readings) -> Card:
