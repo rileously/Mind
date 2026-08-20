@@ -1202,19 +1202,30 @@ def seat_confirm_text(origin: str, destination: str, sail, seat: int, when: str)
 
 
 def seat_held_text(
-    origin: str, destination: str, sail, seat, booking: str, who: str = ""
+    origin: str, destination: str, sail, seat, booking: str, who: str = "",
+    left: int | None = None,
 ) -> str:
-    """The booking to carry to RTL, and the plain fact that it is not paid."""
-    # One seat or several, written the way it was held.
+    """The booking to carry to RTL, the time left on it, and that it is unpaid."""
     plural = "s" if "," in str(seat) else ""
-    return (
-        f"✅ Seat{plural} <b>{seat}</b> held.\n\n"
-        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
-        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}\n\n"
-        f"Booking <code>{booking}</code>\n\n"
-        "<b>Not paid yet.</b> Continue to payment asks who is travelling, then "
-        "gives you a bank page. The seat goes back on sale when the hold runs out."
+    lines = [
+        f"✅ Seat{plural} <b>{seat}</b> held.",
+        "",
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>",
+        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}",
+        "",
+        f"Booking <code>{booking}</code>",
+        "",
+    ]
+    if left is not None:
+        lines += [
+            f"<b>{countdown(left)}</b> to pay before the seats go back on sale.",
+            "",
+        ]
+    lines.append(
+        "<b>Not paid yet.</b> Continue to payment asks who is travelling, "
+        "then gives you a bank page."
     )
+    return chr(10).join(lines)
 
 
 FERRY_PAY = "y"
@@ -1230,6 +1241,7 @@ def seat_list(seats) -> str:
     if many and isinstance(many[0], (list, tuple)):
         return ";".join(",".join(str(n) for n in group) for group in many)
     return ",".join(str(n) for n in many)
+
 
 def build_held_keyboard(trip_index: int, seats, can_pay: bool = True) -> dict:
     """Offered under a held seat: go and pay for it, or leave it.
@@ -1670,3 +1682,40 @@ def day_label(stamp: str, now=None) -> str:
     except ValueError:
         return stamp
     return time.strftime("%a %d %B", moment)
+
+
+# What RTL gives you to pay before the seats go back on sale. Kept a little
+# under whatever the server actually allows: telling somebody they have longer
+# than they do is the one direction this must not be wrong in.
+HOLD_SECONDS = 390
+
+
+def time_left(held_at: float, now: float, limit: int = HOLD_SECONDS) -> int:
+    """Seconds left on a hold, never below zero."""
+    if not held_at:
+        return 0
+    return max(0, int(limit - (now - held_at)))
+
+
+def countdown(seconds: int) -> str:
+    """Seconds as minutes and seconds, the way a payment page shows them."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def hold_expired_text(booking: str = "") -> str:
+    """When the seats have gone back on sale before anybody paid."""
+    named = f" (<code>{booking}</code>)" if booking else ""
+    return (
+        f"⌛ The hold{named} has run out and the seats are back on sale.\n\n"
+        "Nothing was paid for and nothing is owed. Start again and they may "
+        "well still be free."
+    )
+
+
+def session_stale_text() -> str:
+    """When a panel is older than the sailings it was drawn from."""
+    return (
+        "⌛ This journey was looked up a while ago, so its seats and times are "
+        "no longer trustworthy.\n\nStart again for the current ones."
+    )

@@ -797,3 +797,68 @@ class ADayWithNothingOnIt(BridgeHarness, unittest.TestCase):
         markup = str(self.client.edited or self.client.sent)
         self.assertIn("No RTL route goes that way", markup)
         self.assertNotIn("Tomorrow", markup)
+
+
+class TheHoldRunsOut(BridgeHarness, unittest.TestCase):
+    """Seats are held for a while, not for ever.
+
+    RTL puts them back on sale and then refuses the payment with a word like
+    "booking.expired". Saying so first, in the chat, is the difference between
+    a clear answer and a mysterious refusal at the bank's door.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from mind.ferry_client import Sailing
+
+        self.bridge._ferry_pick[7] = {
+            "origin": "105", "destination": "104",
+            "sailings": [Sailing.of(schedule_id="1", fare=35, free_seats=(3,))],
+            "booking": "00000014B999", "held_seats": [[3]], "paying_trip": 0,
+            "awaiting_passenger": True,
+        }
+
+    def expired(self):
+        import time as clock
+
+        self.bridge._ferry_pick[7]["held_at"] = clock.monotonic() - 10_000
+
+    def fresh(self):
+        import time as clock
+
+        self.bridge._ferry_pick[7]["held_at"] = clock.monotonic()
+
+    def test_a_hold_that_has_run_out_says_so_rather_than_paying(self):
+        self.expired()
+        self.bridge._handle_ferry_pay(self.client, 7, "cb", 500, "0.3", [], self.config)
+        shown = str(self.client.edited or self.client.sent)
+        self.assertIn("run out", shown)
+        self.assertIn("00000014B999", shown)
+
+    def test_it_says_nothing_was_paid_for(self):
+        self.expired()
+        self.bridge._handle_ferry_pay(self.client, 7, "cb", 500, "0.3", [], self.config)
+        self.assertIn("nothing is owed", str(self.client.edited or self.client.sent))
+
+    def test_the_expired_journey_is_forgotten(self):
+        self.expired()
+        self.bridge._handle_ferry_pay(self.client, 7, "cb", 500, "0.3", [], self.config)
+        self.assertNotIn(7, self.bridge._ferry_pick)
+
+    def test_a_passenger_sent_after_it_ran_out_is_not_paid_for(self):
+        self.expired()
+        paid = []
+        self.bridge._ferry_pay_now = lambda *a, **k: paid.append(1)
+        self.bridge._ferry_passenger_reply(self.client, 7, "Mohamed Maazinu A375667", self.config)
+        self.assertEqual(paid, [])
+        self.assertIn("run out", str(self.client.edited or self.client.sent))
+
+    def test_a_hold_still_running_is_left_alone(self):
+        self.fresh()
+        self.assertFalse(self.bridge._ferry_gone(7, self.client))
+        self.assertIn(7, self.bridge._ferry_pick)
+
+    def test_a_journey_with_nothing_held_never_expires(self):
+        # Browsing sailings has no clock on it; only held seats do.
+        self.bridge._ferry_pick[7].pop("held_at", None)
+        self.assertFalse(self.bridge._ferry_gone(7, self.client))

@@ -143,6 +143,11 @@ from .telegram_ui import (
     FERRY_COUNT,
     FERRY_WAY,
     FERRY_DATE,
+    HOLD_SECONDS,
+    time_left,
+    countdown,
+    hold_expired_text,
+    session_stale_text,
     build_date_keyboard,
     date_text,
     day_label,
@@ -2572,6 +2577,7 @@ class TelegramBridge(QObject):
         self.log.emit(f"Telegram: held ferry seats {shown}, booking {held.booking_id}")
         state["booking"] = held.booking_id
         state["held_seats"] = seats
+        state["held_at"] = time.monotonic()
         state["held_back_seats"] = back_seats
         state["back_sail"] = back_sail
         self._ferry_pick[chat_id] = state
@@ -2579,9 +2585,33 @@ class TelegramBridge(QObject):
         # when the button is pressed, rather than read from a saved setting.
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            seat_held_text(origin.name, destination.name, sail, shown, held.booking_id),
+            seat_held_text(
+                origin.name, destination.name, sail, shown, held.booking_id,
+                left=HOLD_SECONDS,
+            ),
             build_held_keyboard(int(index), seats), html=True,
         )
+
+    def _ferry_gone(self, chat_id: int, client: TelegramClient) -> bool:
+        """Whether the hold on this chat's seats has run out.
+
+        Checked before anything that depends on them still being there, so a
+        panel left open overnight says what happened rather than failing at
+        RTL with a word like "booking.expired".
+        """
+        state = self._ferry_pick.get(chat_id) or {}
+        held_at = state.get("held_at")
+        if not held_at:
+            return False
+        if time_left(held_at, time.monotonic()) > 0:
+            return False
+        booking = state.get("booking", "")
+        self._ferry_pick.pop(chat_id, None)
+        self._send_panel(
+            client, chat_id, PANEL_FERRY, hold_expired_text(booking),
+            build_ferry_again_keyboard(), html=True,
+        )
+        return True
 
     def _handle_ferry_pay(
         self,
@@ -2599,6 +2629,9 @@ class TelegramBridge(QObject):
         who is travelling and gets back a link. The card is entered on that
         link, by the person, on the bank's own page.
         """
+        if self._ferry_gone(chat_id, client):
+            client.answer_callback_query(callback_id)
+            return
         state = self._ferry_pick.get(chat_id) or {}
         sails = state.get("sailings") or []
         booking = state.get("booking", "")
@@ -2644,6 +2677,8 @@ class TelegramBridge(QObject):
         state = self._ferry_pick.get(chat_id) or {}
         if not state.get("awaiting_passenger"):
             return False
+        if self._ferry_gone(chat_id, client):
+            return True
         held = state.get("held_seats") or []
         people = ferry_parse_passengers(text)
         if not people:

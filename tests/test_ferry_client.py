@@ -947,3 +947,33 @@ class SeatsForTheWayBackArriveGrouped(unittest.TestCase):
         out, back = self.legs()
         with self.assertRaises(FerryError):
             reserve_body(out, [[1, 2]], "105", "104", back_sail=back, back_seats=[[4]])
+
+
+class HowLongIsLeft(unittest.TestCase):
+    """The clock a payment page shows, and the one Mind shows beside it."""
+
+    def test_it_counts_down_from_the_limit(self):
+        from mind.telegram_ui import HOLD_SECONDS, countdown, time_left
+
+        self.assertEqual(countdown(time_left(100.0, 100.0)), countdown(HOLD_SECONDS))
+
+    def test_a_minute_gone_is_a_minute_off(self):
+        from mind.telegram_ui import countdown, time_left
+
+        self.assertEqual(countdown(time_left(100.0, 160.0)), "5:30")
+
+    def test_it_never_goes_below_zero(self):
+        from mind.telegram_ui import time_left
+
+        self.assertEqual(time_left(100.0, 99_999.0), 0)
+
+    def test_seconds_keep_two_digits(self):
+        from mind.telegram_ui import countdown
+
+        self.assertEqual(countdown(65), "1:05")
+        self.assertEqual(countdown(5), "0:05")
+
+    def test_nothing_held_has_no_time_left(self):
+        from mind.telegram_ui import time_left
+
+        self.assertEqual(time_left(0, 500.0), 0)
