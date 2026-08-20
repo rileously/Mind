@@ -1970,3 +1970,204 @@ def session_stale_text() -> str:
         "⌛ This journey was looked up a while ago, so its seats and times are "
         "no longer trustworthy.\n\nStart again for the current ones."
     )
+
+
+# -- the book: people, routes, and what was booked before -----------------
+#
+# Typing a name and a national ID before a hold runs out is the worst part of
+# booking, and it is the same name every time. These panels exist so it is a
+# tap instead.
+
+FERRY_WHO = "w"
+FERRY_TYPE = "p"
+FERRY_ROUTE = "q"
+FERRY_HIST = "z"
+FERRY_TICKET = "k"
+FERRY_AGAIN = "a"
+
+
+def ferry_home_text(routes, history) -> str:
+    """The first panel: the journeys actually made, rather than an atoll list."""
+    if not routes and not history:
+        return (
+            "🚤 <b>Ferry</b>\n\n"
+            "Pick where the journey starts. Once a journey has been booked, it "
+            "comes back here as a button."
+        )
+    lines = ["🚤 <b>Ferry</b>", ""]
+    if routes:
+        lines.append("Your usual journeys are below - one tap goes straight to the day.")
+    if history:
+        lines.append("Past bookings keep their ticket, and can be booked again.")
+    return "\n".join(lines)
+
+
+def build_ferry_home_keyboard(routes, history=()) -> dict:
+    """Quick routes first, then the long way round.
+
+    A route somebody travels weekly should not cost four taps through an atoll
+    list they already know the answer to. The full picker stays, because the
+    first journey has to be found somehow and the fifth may be somewhere new.
+    """
+    rows: list[list[dict]] = []
+    for at, route in enumerate(routes or ()):
+        rows.append([button(f"🚤  {route.label}", ferry_callback(FERRY_ROUTE, str(at)))])
+    rows.append([button("🔍  Somewhere else", ferry_callback(FERRY_RESTART))])
+    if history:
+        rows.append([button("🎟  Past bookings", ferry_callback(FERRY_HIST, "all"))])
+    rows.append([button("‹  Menu", CB_MENU)])
+    return {"inline_keyboard": rows}
+
+
+def who_text(needed: int, people, chosen=(), query: str = "") -> str:
+    """Asking who travels, with the people who have travelled before."""
+    picked = list(chosen or ())
+    left = max(0, needed - len(picked))
+    if not people:
+        return ask_who_text(needed)
+    lines = ["🎫 <b>Who is travelling?</b>"]
+    if query:
+        found = len(people)
+        lines.append(
+            f"Matching “{escape_html(query)}”: {found} "
+            f"{'person' if found == 1 else 'people'}."
+        )
+    lines.append("")
+    if picked:
+        lines.append("✅ " + ", ".join(escape_html(who.name) for who in picked))
+    if left:
+        lines.append(
+            f"Tap {left} {'more ' if picked else ''}"
+            f"{'person' if left == 1 else 'people'}, "
+            "or type a name to search."
+        )
+    else:
+        lines.append("That is everybody.")
+    lines += [
+        "",
+        "<i>Somebody new: send their name and ID together, like</i>\n"
+        "<code>Mohamed Maazinu A375667</code>",
+    ]
+    return "\n".join(lines)
+
+
+def build_who_keyboard(people, needed: int, chosen=(), can_go: bool = False) -> dict:
+    """The book of travellers, as buttons, with the chosen ones ticked."""
+    taken = {who.number.upper() for who in chosen or ()}
+    rows: list[list[dict]] = []
+    for at, who in enumerate(people or ()):
+        picked = who.number.upper() in taken
+        rows.append(
+            [
+                button(
+                    f"{'✓ ' if picked else ''}{who.label}",
+                    ferry_callback(FERRY_WHO, str(at)),
+                    STYLE_SUCCESS if picked else "",
+                )
+            ]
+        )
+    if can_go:
+        rows.append(
+            [button("💳  Continue to payment", ferry_callback(FERRY_TYPE, "go"), STYLE_SUCCESS)]
+        )
+    rows.append(
+        [
+            button("✎  Someone new", ferry_callback(FERRY_TYPE, "new")),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def booked_on(stamp: float) -> str:
+    """When a booking was made, as a date rather than a number."""
+    if not stamp:
+        return ""
+    try:
+        return datetime.fromtimestamp(float(stamp)).strftime("%d %b %Y")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def history_text(bookings) -> str:
+    """Past bookings, newest first."""
+    if not bookings:
+        return (
+            "🎟 <b>Past bookings</b>\n\n"
+            "Nothing yet. A booking appears here once it has been paid for."
+        )
+    lines = ["🎟 <b>Past bookings</b>", ""]
+    for booking in bookings:
+        when = booked_on(booking.made)
+        lines.append(
+            f"<b>{escape_html(booking.label)}</b>\n"
+            f"    {when} · MVR {booking.fare:.0f} · <code>{booking.reference}</code>"
+        )
+    lines += ["", "Tap one to see it, send its ticket, or book it again."]
+    return "\n".join(lines)
+
+
+def build_history_keyboard(bookings) -> dict:
+    rows = [
+        [
+            button(
+                f"🎟  {booking.label} · {booked_on(booking.made)}",
+                ferry_callback(FERRY_HIST, str(at)),
+            )
+        ]
+        for at, booking in enumerate(bookings or ())
+    ]
+    rows.append(
+        [
+            button("🚤  New journey", ferry_callback(FERRY_RESTART)),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def booking_text(booking, has_ticket: bool) -> str:
+    """One past booking, and what can still be done with it."""
+    lines = [
+        f"🎟 <b>{escape_html(booking.label)}</b>",
+        "",
+        f"Booked {booked_on(booking.made)}",
+    ]
+    if booking.departs:
+        lines.append(f"Sailed {escape_html(booking.departs)}")
+    if booking.who:
+        lines.append(f"👤 {escape_html(booking.who)}")
+    if booking.seats:
+        lines.append(f"🪑 Seat{'s' if ',' in booking.seats else ''} {escape_html(booking.seats)}")
+    lines += [
+        f"💰 MVR {booking.fare:.0f}",
+        f"<code>{booking.reference}</code>",
+        "",
+    ]
+    lines.append(
+        "The ticket is saved on the PC and can be sent here again."
+        if has_ticket
+        else "No ticket PDF was saved for this one - it may not have arrived by "
+        "email, or the mailbox was not being watched yet."
+    )
+    return "\n".join(lines)
+
+
+def build_booking_keyboard(at: int, booking, has_ticket: bool) -> dict:
+    """Under one past booking: its ticket, or the same journey again."""
+    rows: list[list[dict]] = []
+    if has_ticket:
+        rows.append(
+            [button("📄  Send the ticket", ferry_callback(FERRY_TICKET, str(at)), STYLE_SUCCESS)]
+        )
+    if booking.from_code and booking.to_code:
+        rows.append(
+            [button("🔁  Book this again", ferry_callback(FERRY_AGAIN, str(at)), STYLE_PRIMARY)]
+        )
+    rows.append(
+        [
+            button("‹  Bookings", ferry_callback(FERRY_HIST, "all")),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}

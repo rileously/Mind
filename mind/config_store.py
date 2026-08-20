@@ -153,6 +153,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # ticket is not sent twice and the backlog before setup is not sent at all.
     "mail_last_uid": 0,
     "mail_poll_seconds": 120,
+    # The book of people who travel, the journeys they make, and what has been
+    # booked. Two of the three carry personal data and are encrypted; island
+    # names are not personal and stay readable.
+    "ferry_travellers_protected": "",
+    "ferry_history_protected": "",
+    "ferry_routes": "",
     # "auto", "2.4" or "5". The low band reaches further through walls,
     # which is the whole reason a PC is being asked to be an access point.
     "hotspot_band": "auto",
@@ -293,6 +299,74 @@ class ConfigStore:
         clean = number.strip() if isinstance(number, str) else ""
         updated = deepcopy(config)
         updated["ferry_passenger_id_protected"] = protect_text(clean) if clean else ""
+        return updated
+
+    def get_ferry_travellers(self, config: dict[str, Any] | None = None) -> list:
+        """The book of people who travel, stored encrypted.
+
+        A list of names against national ID numbers is exactly the file nobody
+        should be able to read out of a settings folder, so it is kept the way
+        the bot token is rather than as readable JSON.
+        """
+        from .ferry_book import decode, traveller_from
+
+        current = config if config is not None else self.load()
+        protected = current.get("ferry_travellers_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return []
+        try:
+            return decode(unprotect_text(protected), traveller_from)
+        except (OSError, ValueError, RuntimeError):
+            return []
+
+    def set_ferry_travellers(self, config: dict[str, Any], people: list) -> dict[str, Any]:
+        from .ferry_book import encode, traveller_to
+
+        updated = deepcopy(config)
+        payload = encode(people, traveller_to) if people else ""
+        updated["ferry_travellers_protected"] = protect_text(payload) if payload else ""
+        return updated
+
+    def get_ferry_history(self, config: dict[str, Any] | None = None) -> list:
+        """Bookings already made, stored encrypted.
+
+        Where somebody went and when is a movement record, which deserves the
+        same treatment as the ID that travelled on it.
+        """
+        from .ferry_book import booking_from, decode
+
+        current = config if config is not None else self.load()
+        protected = current.get("ferry_history_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return []
+        try:
+            return decode(unprotect_text(protected), booking_from)
+        except (OSError, ValueError, RuntimeError):
+            return []
+
+    def set_ferry_history(self, config: dict[str, Any], history: list) -> dict[str, Any]:
+        from .ferry_book import booking_to, encode
+
+        updated = deepcopy(config)
+        payload = encode(history, booking_to) if history else ""
+        updated["ferry_history_protected"] = protect_text(payload) if payload else ""
+        return updated
+
+    def get_ferry_routes(self, config: dict[str, Any] | None = None) -> list:
+        """Journeys actually travelled. Island names, so kept in the clear."""
+        from .ferry_book import decode, route_from
+
+        current = config if config is not None else self.load()
+        raw = current.get("ferry_routes", "")
+        if not isinstance(raw, str) or not raw:
+            return []
+        return decode(raw, route_from)
+
+    def set_ferry_routes(self, config: dict[str, Any], routes: list) -> dict[str, Any]:
+        from .ferry_book import encode, route_to
+
+        updated = deepcopy(config)
+        updated["ferry_routes"] = encode(routes, route_to) if routes else ""
         return updated
 
     def get_mail_password(self, config: dict[str, Any] | None = None) -> str:

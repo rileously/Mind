@@ -58,6 +58,20 @@ from .telegram_print import (
     colour_is_advisory,
     refusal_for,
 )
+from .ferry_book import (
+    Booking,
+    HISTORY_OFFERED,
+    ROUTES_OFFERED,
+    find_travellers,
+    order_travellers,
+    recent_bookings,
+    remember_booking,
+    remember_route,
+    remember_traveller,
+    ticket_file,
+    top_routes,
+)
+from .mail_watch import tickets_dir
 from .telegram_ui import (
     CB_ABORT,
     CB_MEDIA,
@@ -143,6 +157,20 @@ from .telegram_ui import (
     FERRY_COUNT,
     FERRY_WAY,
     FERRY_DATE,
+    FERRY_WHO,
+    FERRY_TYPE,
+    FERRY_ROUTE,
+    FERRY_HIST,
+    FERRY_TICKET,
+    FERRY_AGAIN,
+    ferry_home_text,
+    build_ferry_home_keyboard,
+    who_text,
+    build_who_keyboard,
+    history_text,
+    build_history_keyboard,
+    booking_text,
+    build_booking_keyboard,
     HOLD_SECONDS,
     time_left,
     countdown,
@@ -2157,7 +2185,32 @@ class TelegramBridge(QObject):
         config: dict,
         message_id: object = None,
     ) -> None:
-        """Start the picker: the atolls, to choose where the journey begins."""
+        """Start where the journeys already made are, not at the atoll list.
+
+        Somebody who crosses to Kulhudhuffushi every week should not answer
+        four questions they know the answer to. The full picker is one tap
+        away and is still where a first journey, or a new one, is found.
+        """
+        routes = top_routes(self.store.get_ferry_routes(config), ROUTES_OFFERED)
+        history = recent_bookings(self.store.get_ferry_history(config), HISTORY_OFFERED)
+        if not routes and not history:
+            self._ferry_start_picker(client, chat_id, config, message_id)
+            return
+        self._ferry_pick[chat_id] = {"stage": "home"}
+        text = ferry_home_text(routes, history)
+        keyboard = build_ferry_home_keyboard(routes, history)
+        if self._replace_panel(client, chat_id, message_id, PANEL_FERRY, text, keyboard, html=True):
+            return
+        self._send_panel(client, chat_id, PANEL_FERRY, text, keyboard, html=True)
+
+    def _ferry_start_picker(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        config: dict,
+        message_id: object = None,
+    ) -> None:
+        """The long way round: the atolls, to choose where the journey begins."""
         try:
             stops, _ = self._ferry_stops()
         except FerryError as exc:
@@ -2190,7 +2243,7 @@ class TelegramBridge(QObject):
 
         state = self._ferry_pick.get(chat_id) or {"stage": "from-atoll"}
         if kind == FERRY_RESTART:
-            self._send_ferry_panel(client, chat_id, config, message_id)
+            self._ferry_start_picker(client, chat_id, config, message_id)
             return
 
         if kind == FERRY_ATOLL:
@@ -2208,6 +2261,44 @@ class TelegramBridge(QObject):
 
         if kind == FERRY_TRIP:
             self._handle_ferry_trip(client, chat_id, message_id, value, stops)
+            return
+
+        if kind == FERRY_ROUTE:
+            routes = top_routes(self.store.get_ferry_routes(config), ROUTES_OFFERED)
+            if not value.isdigit() or int(value) >= len(routes):
+                self._ferry_start_picker(client, chat_id, config, message_id)
+                return
+            route = routes[int(value)]
+            self._ferry_begin(
+                client, chat_id, message_id, route.from_code, route.to_code, stops, config
+            )
+            return
+
+        if kind == FERRY_AGAIN:
+            history = recent_bookings(
+                self.store.get_ferry_history(config), HISTORY_OFFERED
+            )
+            if not value.isdigit() or int(value) >= len(history):
+                return
+            booking = history[int(value)]
+            self._ferry_begin(
+                client, chat_id, message_id,
+                booking.from_code, booking.to_code, stops, config,
+            )
+            return
+
+        if kind == FERRY_HIST:
+            self._handle_ferry_history(client, chat_id, message_id, value, config)
+            return
+
+        if kind == FERRY_TICKET:
+            self._handle_ferry_ticket(client, chat_id, callback_id, value, config)
+            return
+
+        if kind in (FERRY_WHO, FERRY_TYPE):
+            self._handle_ferry_who(
+                client, chat_id, callback_id, message_id, kind, value, config
+            )
             return
 
         if kind == FERRY_WAY:
@@ -2655,19 +2746,251 @@ class TelegramBridge(QObject):
         state["paying_trip"] = int(index)
         self._ferry_pick[chat_id] = state
         client.answer_callback_query(callback_id)
-        self._ferry_ask_passenger(client, chat_id, message_id)
+        self._ferry_ask_passenger(client, chat_id, message_id, config)
 
-    def _ferry_ask_passenger(
-        self, client: TelegramClient, chat_id: int, message_id: object
+    def _ferry_begin(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        from_code: str,
+        to_code: str,
+        stops,
+        config: dict,
     ) -> None:
-        """Ask who is travelling, for this booking only."""
+        """Start a journey whose two ends are already known.
+
+        Which is every journey somebody makes twice. It lands on the one-way
+        or return question, the first thing the picker could not have guessed.
+        """
+        origin = ferry_stop_by_code(stops, from_code)
+        destination = ferry_stop_by_code(stops, to_code)
+        if origin is None or destination is None:
+            # An island RTL has stopped serving, or a code that has changed.
+            self._ferry_start_picker(client, chat_id, config, message_id)
+            return
+        self._ferry_pick[chat_id] = {
+            "stage": "way",
+            "origin": origin.code,
+            "destination": destination.code,
+            "leg": "out",
+        }
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            way_text(origin.name, destination.name), build_way_keyboard(), html=True,
+        )
+
+    def _handle_ferry_history(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        message_id: object,
+        value: str,
+        config: dict,
+    ) -> None:
+        """The list of past bookings, or one of them."""
+        history = recent_bookings(self.store.get_ferry_history(config), HISTORY_OFFERED)
+        if value == "all" or not value.isdigit():
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                history_text(history), build_history_keyboard(history), html=True,
+            )
+            return
+        at = int(value)
+        if at >= len(history):
+            return
+        booking = history[at]
+        ticket = ticket_file(tickets_dir(), booking.reference)
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            booking_text(booking, ticket is not None),
+            build_booking_keyboard(at, booking, ticket is not None), html=True,
+        )
+
+    def _handle_ferry_ticket(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        value: str,
+        config: dict,
+    ) -> None:
+        """Send back the ticket the mail watcher saved for this booking."""
+        history = recent_bookings(self.store.get_ferry_history(config), HISTORY_OFFERED)
+        if not value.isdigit() or int(value) >= len(history):
+            return
+        booking = history[int(value)]
+        ticket = ticket_file(tickets_dir(), booking.reference)
+        if ticket is None:
+            client.answer_callback_query(
+                callback_id, "No ticket was saved for that booking.", alert=True
+            )
+            return
+        client.answer_callback_query(callback_id, "Sending it.")
+        try:
+            client.send_document(
+                chat_id, str(ticket), caption=f"🎫 {booking.label} · {booking.reference}"
+            )
+        except TelegramError as exc:
+            self.log.emit(f"Telegram: could not send a ticket ({exc})")
+
+    def _handle_ferry_who(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        kind: str,
+        value: str,
+        config: dict,
+    ) -> None:
+        """Choosing travellers out of the book, rather than typing them."""
         state = self._ferry_pick.get(chat_id) or {}
-        state["awaiting_passenger"] = True
+        if not state.get("awaiting_passenger"):
+            return
+        if self._ferry_gone(chat_id, client):
+            return
+        needed = self._ferry_needed(state)
+        people = state.get("who_shown") or order_travellers(
+            self.store.get_ferry_travellers(config)
+        )
+        chosen = list(state.get("who_chosen") or [])
+
+        if kind == FERRY_TYPE and value == "new":
+            # Out of the book and back to typing, for somebody not in it.
+            state["who_shown"] = []
+            state["who_chosen"] = []
+            self._ferry_pick[chat_id] = state
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ask_who_text(needed), build_ferry_again_keyboard(), html=True,
+            )
+            return
+
+        if kind == FERRY_TYPE and value == "go":
+            if len(chosen) != needed:
+                client.answer_callback_query(
+                    callback_id,
+                    f"{needed} passenger{'s' if needed != 1 else ''} needed.",
+                    alert=True,
+                )
+                return
+            state["awaiting_passenger"] = False
+            self._ferry_pick[chat_id] = state
+            people_out = [
+                ferry_passenger(name=who.name, id_number=who.number, id_type=who.id_type)
+                for who in chosen
+            ]
+            self._ferry_pay_now(client, chat_id, message_id, people_out, config)
+            return
+
+        if not value.isdigit() or int(value) >= len(people):
+            return
+        who = people[int(value)]
+        # Tapping somebody already chosen takes them off again.
+        if any(other.number.upper() == who.number.upper() for other in chosen):
+            chosen = [c for c in chosen if c.number.upper() != who.number.upper()]
+        elif len(chosen) < needed:
+            chosen.append(who)
+        state["who_chosen"] = chosen
+        state["who_shown"] = people
         self._ferry_pick[chat_id] = state
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            ask_who_text(len(state.get("held_seats") or []) or 1),
-            build_ferry_again_keyboard(), html=True,
+            who_text(needed, people, chosen, state.get("who_query", "")),
+            build_who_keyboard(people, needed, chosen, len(chosen) == needed),
+            html=True,
+        )
+
+    @staticmethod
+    def _ferry_needed(state: dict) -> int:
+        """How many people, which is the seats on one boat rather than all of them."""
+        held = state.get("held_seats") or []
+        if held and isinstance(held[0], (list, tuple)):
+            return len(held[0]) or 1
+        return len(held) or 1
+
+    def _ferry_remember(self, state: dict, booking: str, sail, people, config: dict) -> None:
+        """Write down who travelled, where, and under what reference.
+
+        Done when the payment link is handed over rather than when the money
+        lands, because that is the last moment Mind hears anything: the card
+        goes in on the bank's page and nothing comes back here. A booking that
+        was started and abandoned is worth remembering anyway - it is still
+        the journey somebody wanted, and the route is the useful part.
+        """
+        try:
+            stops, _ = self._ferry_stops()
+        except FerryError:
+            stops = []
+        origin = ferry_stop_by_code(stops, state.get("origin", ""))
+        destination = ferry_stop_by_code(stops, state.get("destination", ""))
+
+        travellers = self.store.get_ferry_travellers(config)
+        for who in people or ():
+            travellers = remember_traveller(
+                travellers, who.name, who.id_number, who.id_type
+            )
+        config = self.store.set_ferry_travellers(config, travellers)
+
+        if origin is not None and destination is not None:
+            config = self.store.set_ferry_routes(
+                config,
+                remember_route(self.store.get_ferry_routes(config), origin, destination),
+            )
+
+        held = state.get("held_seats") or []
+        first = held[0] if held and isinstance(held[0], (list, tuple)) else held
+        entry = Booking(
+            reference=booking,
+            from_name=origin.name if origin is not None else "",
+            to_name=destination.name if destination is not None else "",
+            departs=f"{sail.departs_at} - {sail.arrives_at}",
+            seats=", ".join(str(n) for n in first),
+            fare=float(sail.fare or 0),
+            who=", ".join(w.name for w in people or ()),
+            returning=bool(state.get("returning")),
+            made=time.time(),
+            from_code=origin.code if origin is not None else "",
+            to_code=destination.code if destination is not None else "",
+        )
+        config = self.store.set_ferry_history(
+            config, remember_booking(self.store.get_ferry_history(config), entry)
+        )
+        try:
+            self.store.save(config)
+        except OSError as exc:
+            # A booking that cannot be written down is not a booking that
+            # failed, so this is a log line rather than anything the user sees.
+            self.log.emit(f"Telegram: could not save the booking ({exc})")
+
+    def _ferry_ask_passenger(
+        self, client: TelegramClient, chat_id: int, message_id: object,
+        config: dict | None = None,
+    ) -> None:
+        """Ask who is travelling: from the book if there is one, or by typing.
+
+        The book is offered rather than imposed. A ticket is often bought for
+        somebody who has never travelled on this account, and typing must stay
+        one tap away rather than being what happens when the book fails.
+        """
+        state = self._ferry_pick.get(chat_id) or {}
+        state["awaiting_passenger"] = True
+        state.setdefault("who_chosen", [])
+        needed = self._ferry_needed(state)
+        people = order_travellers(self.store.get_ferry_travellers(config or {}))
+        state["who_shown"] = people
+        self._ferry_pick[chat_id] = state
+        if not people:
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ask_who_text(needed), build_ferry_again_keyboard(), html=True,
+            )
+            return
+        self._replace_panel(
+            client, chat_id, message_id, PANEL_FERRY,
+            who_text(needed, people, [], ""),
+            build_who_keyboard(people, needed, [], False), html=True,
         )
 
     def _ferry_passenger_reply(
@@ -2681,6 +3004,24 @@ class TelegramBridge(QObject):
             return True
         held = state.get("held_seats") or []
         people = ferry_parse_passengers(text)
+        if not people:
+            # Not a name and an ID, so read it as a search. Typing "maaz"
+            # while looking at the book means find Maazinu, not "that was
+            # invalid" - and the book is where the answer nearly always is.
+            book = order_travellers(self.store.get_ferry_travellers(config))
+            found = find_travellers(book, text) if book else []
+            if found:
+                needed = self._ferry_needed(state)
+                chosen = list(state.get("who_chosen") or [])
+                state.update({"who_shown": found, "who_query": text.strip()})
+                self._ferry_pick[chat_id] = state
+                self._send_panel(
+                    client, chat_id, PANEL_FERRY,
+                    who_text(needed, found, chosen, text.strip()),
+                    build_who_keyboard(found, needed, chosen, len(chosen) == needed),
+                    html=True,
+                )
+                return True
         if not people:
             client.send_message(
                 chat_id,
@@ -2747,6 +3088,7 @@ class TelegramBridge(QObject):
             )
             return
         self.log.emit(f"Telegram: ferry payment link for booking {booking}")
+        self._ferry_remember(state, booking, sail, people, config)
         self._send_panel(
             client, chat_id, PANEL_FERRY,
             ferry_payment_text(

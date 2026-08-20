@@ -76,6 +76,10 @@ launch; a folder still in use is never touched.
 - Ask from Telegram what sails between two islands today, pick a seat off a map of
   the boat, and hold it - times, fare and live seats from RTL's own API, with the
   hold behind a confirmation of its own because it takes a seat off the ferry
+- A book of the people who travel and the journeys actually made, so a repeat
+  booking is a tap rather than a national ID typed into a phone: pick or search a
+  saved traveller, start from a usual route, and see past bookings with their
+  ticket and a "book this again"
 - Forward the ticket that arrives by email into the chat, since the operator makes the
   QR code on its own servers and only ever mails it: the mailbox is opened read-only,
   only listed senders are downloaded at all, and nothing is marked read or moved
@@ -101,6 +105,11 @@ on the computer. If Word definitions is enabled, only the selected word is sent 
 sentences are not sent. Definitions may draw on WordNet and Wiktionary, and the popup links
 to its source. Shell replacers
 execute with the current user's permissions and should only be created from trusted commands.
+
+Saved travellers and past bookings hold names, national ID numbers and where
+somebody went, so both are encrypted with Windows DPAPI for your account rather
+than kept as readable JSON. Island names are not personal and stay readable. A
+traveller is only ever saved as the result of a booking you made.
 
 Watching a mailbox for a ticket is off unless it is turned on, and is deliberately narrow
 when it is. The folder is opened read-only, so nothing is marked as read, moved or deleted.
