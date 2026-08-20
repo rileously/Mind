@@ -2231,7 +2231,7 @@ def card_text(card, needed: int = 1, chosen: int = 0) -> str:
             "",
             "⚠️ <b>Part of the name may be missing.</b> Something unreadable "
             "sat right after it. If the card shows more names than are above, "
-            "type it instead.",
+            "tap ✎ Name and send the whole name.",
         ]
     if needed > 1:
         lines.append(f"\nPassenger {chosen + 1} of {needed}.")
@@ -2239,18 +2239,55 @@ def card_text(card, needed: int = 1, chosen: int = 0) -> str:
 
 
 def build_card_keyboard(card, more: bool = False) -> dict:
-    """Accept the reading, or fall back to typing it."""
+    """Accept the reading, correct one half of it, or type the lot.
+
+    Correcting one field matters more than it looks. A reading is usually
+    wrong in one word - a surname with Thaana stuck to it, a digit that was
+    a letter - and making somebody retype a name and a number because one of
+    them lost its last word is how a shortcut stops being one.
+    """
     rows: list[list[dict]] = []
     if card.usable:
         label = "✅  Use this" if not more else "✅  Use, then the next one"
         rows.append([button(label, ferry_callback(FERRY_CARD, "yes"), STYLE_SUCCESS)])
     rows.append(
         [
-            button("✎  Type it instead", ferry_callback(FERRY_CARD, "no")),
+            button(
+                "✎  Name" if card.name else "✎  Add the name",
+                ferry_callback(FERRY_CARD, "name"),
+                "" if card.name else STYLE_PRIMARY,
+            ),
+            button(
+                "✎  ID number" if card.number else "✎  Add the ID",
+                ferry_callback(FERRY_CARD, "id"),
+                "" if card.number else STYLE_PRIMARY,
+            ),
+        ]
+    )
+    rows.append(
+        [
+            button("✎  Type it all", ferry_callback(FERRY_CARD, "no")),
             button("‹  Menu", CB_MENU),
         ]
     )
     return {"inline_keyboard": rows}
+
+
+def card_edit_text(card, field: str) -> str:
+    """Asking for the one part of the reading that came out wrong."""
+    if field == "id":
+        showing = f"\n\nRead as <code>{escape_html(card.number)}</code>." if card.number else ""
+        return (
+            f"🆔 <b>Send the ID number.</b>{showing}\n\n"
+            "A letter and six digits, like <code>A375667</code>. The name "
+            "already read is kept."
+        )
+    showing = f"\n\nRead as <b>{escape_html(card.name)}</b>." if card.name else ""
+    return (
+        f"👤 <b>Send the full name.</b>{showing}\n\n"
+        "Exactly as it is printed on the card - RTL checks it against the ID "
+        "number. The number already read is kept."
+    )
 
 
 def card_hint_text() -> str:

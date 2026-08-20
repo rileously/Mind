@@ -77,6 +77,7 @@ from .ferry_book import (
     ticket_file,
     top_routes,
 )
+from .id_card import card_name, card_number
 from .mail_watch import tickets_dir
 from .telegram_ui import (
     CB_ABORT,
@@ -172,6 +173,7 @@ from .telegram_ui import (
     FERRY_CARD,
     card_text,
     card_reading_text,
+    card_edit_text,
     build_card_keyboard,
     card_hint_text,
     ferry_home_text,
@@ -217,7 +219,7 @@ from .telegram_ui import (
     HOTSPOT_STOP,
     HOTSPOT_MATCH,
 )
-from dataclasses import replace as replace_device
+from dataclasses import replace, replace as replace_device
 
 from .ferry_client import (
     FerryError,
@@ -3048,6 +3050,61 @@ class TelegramBridge(QObject):
             html=True,
         )
 
+    def _ferry_card_edit(
+        self, client: TelegramClient, chat_id: int, text: str, state: dict
+    ) -> bool:
+        """A typed correction to one half of a card reading.
+
+        Returns True when the message was one, so the ordinary "name and ID
+        together" parsing never sees it: somebody fixing a surname types a
+        surname, not a surname and a number.
+        """
+        field = state.get("card_editing")
+        if not field:
+            return False
+        card = state.get("card_pending")
+        if card is None:
+            state.pop("card_editing", None)
+            self._ferry_pick[chat_id] = state
+            return False
+
+        typed = (text or "").strip()
+        if field == "id":
+            number = card_number(typed)
+            if not number:
+                client.send_message(
+                    chat_id,
+                    "That is not an ID number. It is a letter and six digits, "
+                    "like A375667.",
+                )
+                return True
+            card = replace(card, number=number)
+        else:
+            name = card_name(typed)
+            if not name:
+                client.send_message(
+                    chat_id,
+                    "That does not look like a full name. Send it as it is "
+                    "printed on the card.",
+                )
+                return True
+            # Typed by a person who is looking at the card, so whatever the
+            # recogniser was unsure about no longer applies.
+            card = replace(card, name=name, unsure=False)
+
+        state["card_pending"] = card
+        state.pop("card_editing", None)
+        self._ferry_pick[chat_id] = state
+        needed = self._ferry_needed(state)
+        already = list(state.get("card_people") or [])
+        self._send_panel(
+            client, chat_id, PANEL_FERRY,
+            card_text(card, needed, len(already)),
+            build_card_keyboard(card, more=len(already) + 1 < needed),
+            html=True,
+        )
+        return True
+
     def _handle_ferry_card(
         self,
         client: TelegramClient,
@@ -3065,8 +3122,23 @@ class TelegramBridge(QObject):
             return
         needed = self._ferry_needed(state)
 
+        card = state.get("card_pending")
+
+        if value in ("name", "id") and card is not None:
+            # Correcting one half rather than starting over. The other half is
+            # kept, which is the whole point: a reading is usually wrong in one
+            # word and right in everything else.
+            state["card_editing"] = value
+            self._ferry_pick[chat_id] = state
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                card_edit_text(card, value), build_ferry_again_keyboard(), html=True,
+            )
+            return
+
         if value != "yes":
             state.pop("card_pending", None)
+            state.pop("card_editing", None)
             self._ferry_pick[chat_id] = state
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
@@ -3074,7 +3146,6 @@ class TelegramBridge(QObject):
             )
             return
 
-        card = state.get("card_pending")
         if card is None or not card.usable:
             return
         people = list(state.get("card_people") or [])
@@ -3139,6 +3210,8 @@ class TelegramBridge(QObject):
         if not state.get("awaiting_passenger"):
             return False
         if self._ferry_gone(chat_id, client):
+            return True
+        if self._ferry_card_edit(client, chat_id, text, state):
             return True
         held = state.get("held_seats") or []
         people = ferry_parse_passengers(text)

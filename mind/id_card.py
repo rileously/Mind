@@ -304,3 +304,41 @@ def best_card(readings) -> Card:
             if not (best.name or best.number):
                 best = card
     return best
+
+
+def card_number(typed: str) -> str:
+    """An ID number as a person types it, or "" if that was not one.
+
+    Typed by somebody looking at the card, so it is taken more literally than
+    a reading is: no letter-for-digit repairs, because a person who types O
+    meant O. Spaces and a stray "Number:" in front are forgiven.
+    """
+    text = (typed or "").strip()
+    for word in ("number", "id", "no"):
+        if text.lower().startswith(word):
+            text = text[len(word):].lstrip(" :.")
+    text = text.replace(" ", "").replace("-", "").upper()
+    if re.fullmatch(r"[A-Z][0-9]{6}", text):
+        return text
+    return ""
+
+
+def card_name(typed: str) -> str:
+    """A full name as a person types it, or "" if that was not one.
+
+    Anything with two words of letters counts. A card carries names this code
+    has never seen and should not be the judge of, so the test is shape alone:
+    it must not be a number, a date, or one word.
+    """
+    text = " ".join((typed or "").split())
+    for word in ("name", "full name"):
+        if text.lower().startswith(word):
+            text = text[len(word):].lstrip(" :.")
+    text = " ".join(text.split())
+    if not text or any(character.isdigit() for character in text):
+        return ""
+    if len(text.split()) < 2 or len(text) > 60:
+        return ""
+    if not NAME_OK.match(text):
+        return ""
+    return text

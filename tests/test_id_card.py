@@ -227,7 +227,9 @@ class ThePanel(unittest.TestCase):
             for item in row
         ]
         self.assertFalse(any("Use this" in label for label in labels))
-        self.assertTrue(any("Type it instead" in label for label in labels))
+        # The missing half is the thing to offer, not the whole card again.
+        self.assertTrue(any("Add the name" in label for label in labels))
+        self.assertTrue(any("Type it all" in label for label in labels))
 
     def test_a_reading_on_its_own_says_it_would_have_worked(self):
         from mind.telegram_ui import card_reading_text
@@ -379,3 +381,77 @@ class TruncatedNames(unittest.TestCase):
         self.assertEqual(salvage("|||"), "")
         self.assertEqual(salvage("A1"), "")
         self.assertEqual(salvage("Hussain"), "Hussain")
+
+
+class Correcting(unittest.TestCase):
+    """Fixing one wrong word without retyping the rest.
+
+    A reading is usually wrong in one place - a surname with Thaana stuck to
+    it, a digit that was a letter - so making somebody retype a name and a
+    number because one of them lost its last word is how a shortcut stops
+    being one.
+    """
+
+    def numbers(self):
+        from mind.id_card import card_number
+
+        return card_number
+
+    def names(self):
+        from mind.id_card import card_name
+
+        return card_name
+
+    def test_a_typed_number_is_taken_as_typed(self):
+        self.assertEqual(self.numbers()("A375667"), "A375667")
+        self.assertEqual(self.numbers()("a375667"), "A375667")
+        self.assertEqual(self.numbers()(" A 375667 "), "A375667")
+
+    def test_a_label_typed_in_front_is_forgiven(self):
+        self.assertEqual(self.numbers()("Number: A375667"), "A375667")
+
+    def test_a_typed_number_is_not_repaired(self):
+        # A person looking at the card who types O meant O. Guessing here
+        # would silently change a number somebody had just checked.
+        self.assertEqual(self.numbers()("AO75667"), "")
+
+    def test_things_that_are_not_numbers(self):
+        for text in ("", "nope", "A37566", "A3756678", "Ali Shakir"):
+            self.assertEqual(self.numbers()(text), "", text)
+
+    def test_a_typed_name_is_kept_as_written(self):
+        self.assertEqual(self.names()("Ali Shakir Hussain"), "Ali Shakir Hussain")
+        self.assertEqual(self.names()("  Ali   Shakir  "), "Ali Shakir")
+
+    def test_a_name_label_typed_in_front_is_forgiven(self):
+        self.assertEqual(self.names()("Name: Ali Shakir Hussain"), "Ali Shakir Hussain")
+
+    def test_things_that_are_not_names(self):
+        for text in ("", "Ali", "A375667", "Ali 2", "x" * 70):
+            self.assertEqual(self.names()(text), "", text)
+
+    def test_the_edit_panel_says_which_half_is_kept(self):
+        from mind.telegram_ui import card_edit_text
+
+        card = Card(name="Ali Shakir", number="A089744")
+        self.assertIn("number already read is kept", card_edit_text(card, "name"))
+        self.assertIn("name already read is kept", card_edit_text(card, "id"))
+
+    def test_the_edit_panel_shows_what_was_read(self):
+        from mind.telegram_ui import card_edit_text
+
+        card = Card(name="Ali Shakir", number="A089744")
+        self.assertIn("Ali Shakir", card_edit_text(card, "name"))
+        self.assertIn("A089744", card_edit_text(card, "id"))
+
+    def test_a_complete_reading_still_offers_both_edits(self):
+        from mind.telegram_ui import build_card_keyboard
+
+        card = Card(name="Ali Shakir Hussain", number="A089744")
+        labels = [
+            item["text"]
+            for row in build_card_keyboard(card)["inline_keyboard"]
+            for item in row
+        ]
+        self.assertTrue(any("Name" in label for label in labels))
+        self.assertTrue(any("ID number" in label for label in labels))
