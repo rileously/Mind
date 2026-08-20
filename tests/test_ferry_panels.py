@@ -286,3 +286,48 @@ class WhyPaymentFailed(unittest.TestCase):
 
         text = ferry_payment_failed_text("00000014BA9E", "booking.expired", "Ali")
         self.assertNotIn("letter for letter", text)
+
+
+class WhichBoatAndWhereItCalls(unittest.TestCase):
+    """The two things somebody standing on a jetty is actually looking for."""
+
+    def booking(self, **fields):
+        from mind.ferry_book import Booking
+
+        return Booking(
+            reference="00000014B8A0",
+            from_name="Naivaadhoo",
+            to_name="Baarah",
+            fare=170.0,
+            **fields,
+        )
+
+    def text(self, **fields):
+        from mind.telegram_ui import booking_text
+
+        return booking_text(self.booking(**fields), has_ticket=False)
+
+    def test_the_boat_is_named(self):
+        self.assertIn("Sea Coach 12", self.text(boat="Sea Coach 12", stops=2))
+
+    def test_the_stops_are_counted(self):
+        self.assertIn("2 stops on the way", self.text(boat="Sea Coach 12", stops=2))
+
+    def test_one_stop_is_not_plural(self):
+        said = self.text(boat="Sea Coach 12", stops=1)
+        self.assertIn("1 stop on the way", said)
+        self.assertNotIn("1 stops", said)
+
+    def test_calling_nowhere_is_called_direct(self):
+        self.assertIn("direct", self.text(boat="Sea Coach 12", stops=0))
+
+    def test_an_older_booking_says_nothing_about_a_boat(self):
+        # No boat recorded, so no line - rather than an empty one, or a
+        # sailing described as direct on no evidence.
+        said = self.text()
+        self.assertNotIn("direct", said)
+        self.assertNotIn("on the way", said)
+
+    def test_a_boat_name_cannot_smuggle_markup_in(self):
+        said = self.text(boat="<b>Sea</b> Coach", stops=1)
+        self.assertNotIn("<b>Sea</b>", said)

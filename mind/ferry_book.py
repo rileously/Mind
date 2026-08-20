@@ -98,6 +98,11 @@ class Booking:
     # The ID numbers that travelled, so a booking can be repeated for the same
     # people rather than for whoever happens to share their name.
     numbers: str = ""
+    # The boat to look for at the jetty, and how many islands it calls at on
+    # the way. RTL says both when the sailing is chosen and neither survives
+    # into the ticket, which is where somebody standing on a jetty looks.
+    boat: str = ""
+    stops: int = 0
 
     @property
     def label(self) -> str:
@@ -310,6 +315,10 @@ def booking_from(raw: object) -> Booking | None:
         made = float(raw.get("made", 0) or 0)
     except (TypeError, ValueError):
         made = 0.0
+    try:
+        stops = int(raw.get("stops", 0) or 0)
+    except (TypeError, ValueError):
+        stops = 0
     return Booking(
         reference=reference,
         from_name=str(raw.get("from_name", "")),
@@ -323,6 +332,8 @@ def booking_from(raw: object) -> Booking | None:
         from_code=str(raw.get("from_code", "")),
         to_code=str(raw.get("to_code", "")),
         numbers=str(raw.get("numbers", "")),
+        boat=str(raw.get("boat", "")),
+        stops=max(0, stops),
     )
 
 
@@ -340,6 +351,8 @@ def booking_to(booking: Booking) -> dict:
         "from_code": booking.from_code,
         "to_code": booking.to_code,
         "numbers": booking.numbers,
+        "boat": booking.boat,
+        "stops": booking.stops,
     }
 
 

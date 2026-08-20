@@ -3057,6 +3057,11 @@ class TelegramBridge(QObject):
             made=time.time(),
             from_code=origin.code if origin is not None else "",
             to_code=destination.code if destination is not None else "",
+            # The boat boarded and the islands called at on the way. Taken from
+            # the sailing rather than the leg, so a journey that changes boats
+            # names the one departed on and counts every stop across all of it.
+            boat=sail.boat,
+            stops=sail.stops,
         )
         config = self.store.set_ferry_history(
             config, remember_booking(self.store.get_ferry_history(config), entry)

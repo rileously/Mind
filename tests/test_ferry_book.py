@@ -415,3 +415,33 @@ class WhoWasOnIt(unittest.TestCase):
         booking = Booking(reference="A", from_name="X", to_name="Y", numbers="A375667")
         back = decode(encode([booking], booking_to), booking_from)
         self.assertEqual(back[0].numbers, "A375667")
+
+    def test_the_boat_and_its_stops_survive_a_round_trip(self):
+        booking = Booking(
+            reference="A", from_name="X", to_name="Y", boat="Sea Coach 12", stops=3
+        )
+        back = decode(encode([booking], booking_to), booking_from)
+        self.assertEqual(back[0].boat, "Sea Coach 12")
+        self.assertEqual(back[0].stops, 3)
+
+    def test_a_booking_saved_before_the_boat_was_recorded_still_reads(self):
+        # Every booking already in somebody's history was written without
+        # these two, and a history that will not decode is a history lost.
+        booking = booking_from(
+            {"reference": "A", "from_name": "X", "to_name": "Y", "fare": 170}
+        )
+        self.assertIsNotNone(booking)
+        self.assertEqual(booking.boat, "")
+        self.assertEqual(booking.stops, 0)
+
+    def test_a_stop_count_that_is_not_a_number_is_not_fatal(self):
+        booking = booking_from(
+            {"reference": "A", "from_name": "X", "to_name": "Y", "stops": "lots"}
+        )
+        self.assertEqual(booking.stops, 0)
+
+    def test_a_negative_stop_count_is_refused(self):
+        booking = booking_from(
+            {"reference": "A", "from_name": "X", "to_name": "Y", "stops": -4}
+        )
+        self.assertEqual(booking.stops, 0)

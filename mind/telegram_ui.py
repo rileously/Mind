@@ -2155,6 +2155,15 @@ def booking_text(booking, has_ticket: bool) -> str:
     ]
     if booking.departs:
         lines.append(f"Sailed {escape_html(booking.departs)}")
+    if booking.boat:
+        # Bookings made before the boat was recorded have none, and a line
+        # saying so would be worse than the line not being there.
+        calling = (
+            f" · {booking.stops} stop{'s' if booking.stops != 1 else ''} on the way"
+            if booking.stops
+            else " · direct"
+        )
+        lines.append(f"⛴ {escape_html(booking.boat)}{calling}")
     if booking.who:
         lines.append(f"👤 {escape_html(booking.who)}")
     if booking.seats:
