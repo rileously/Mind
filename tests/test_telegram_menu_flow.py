@@ -718,3 +718,82 @@ class HoldingIsNeverOneTap(BridgeHarness, unittest.TestCase):
         shown = str(self.client.edited or self.client.sent)
         self.assertIn("00000014B909", shown)
         self.assertIn("Not paid yet", shown)
+
+
+class ADayWithNothingOnIt(BridgeHarness, unittest.TestCase):
+    """A day with no service ends that day, not the journey.
+
+    Offering only "Another journey" sends somebody back through the atolls to
+    change one thing, and the islands they picked were never the problem.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bridge._ferry_pick[7] = {
+            "origin": "105", "destination": "104", "returning": False,
+            "when": "Sat 22 August",
+        }
+        # A route between the two islands, so "no sailings" means the day and
+        # not the pair.
+        self.described = {
+            "ferryZones": [
+                {
+                    "name": "Zone 1",
+                    "ferryRoutes": [
+                        {
+                            "name": "R1C5", "code": "1", "zone": "Zone 1",
+                            "description": "",
+                            "stops": [
+                                {"order": 1, "stop": {"name": "Hdh.Naivaadhoo", "code": "105"}},
+                                {"order": 2, "stop": {"name": "Hdh.Kulhudhuffushi", "code": "104"}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+    def test_the_other_days_are_offered_where_the_sailings_would_be(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import Stop
+
+        stops = [Stop(name="Hdh.Naivaadhoo", code="105"),
+                 Stop(name="Hdh.Kulhudhuffushi", code="104")]
+        original = bridge.ferry_sailings
+        bridge.ferry_sailings = lambda *a, **k: []
+        self.addCleanup(setattr, bridge, "ferry_sailings", original)
+        self.bridge._ferry_result(self.client, 7, 500, stops[0], stops[1], self.described)
+        markup = str(self.client.edited or self.client.sent)
+        self.assertIn("Today", markup)
+        self.assertIn("Tomorrow", markup)
+        self.assertNotIn("Another journey", markup)
+
+    def test_it_says_the_islands_are_not_the_problem(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import Stop
+
+        original = bridge.ferry_sailings
+        bridge.ferry_sailings = lambda *a, **k: []
+        self.addCleanup(setattr, bridge, "ferry_sailings", original)
+        self.bridge._ferry_result(
+            self.client, 7, 500,
+            Stop(name="Hdh.Naivaadhoo", code="105"),
+            Stop(name="Hdh.Kulhudhuffushi", code="104"), self.described,
+        )
+        self.assertIn("Pick another day", str(self.client.edited or self.client.sent))
+
+    def test_islands_with_no_route_are_not_offered_a_week_of_dead_ends(self):
+        import mind.telegram_bridge as bridge
+        from mind.ferry_client import Stop
+
+        original = bridge.ferry_sailings
+        bridge.ferry_sailings = lambda *a, **k: []
+        self.addCleanup(setattr, bridge, "ferry_sailings", original)
+        self.bridge._ferry_result(
+            self.client, 7, 500,
+            Stop(name="Hdh.Naivaadhoo", code="105"),
+            Stop(name="Hdh.Kulhudhuffushi", code="104"), {},
+        )
+        markup = str(self.client.edited or self.client.sent)
+        self.assertIn("No RTL route goes that way", markup)
+        self.assertNotIn("Tomorrow", markup)

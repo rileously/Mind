@@ -2325,7 +2325,17 @@ class TelegramBridge(QObject):
             "sailings": sails, "when": when, "leg": "out", "picked": [],
         })
         text = sailings_text(origin.name, chosen.name, when, sails, routes)
-        keyboard = build_sailings_keyboard(sails) if sails else build_ferry_again_keyboard()
+        # A day with no service is not the end of the journey, only of that
+        # day, so the other days are offered here rather than making somebody
+        # walk back through the atolls to reach them. Two islands with no route
+        # between them are a different matter: no day will help, and offering
+        # days would be a week of dead ends.
+        if sails:
+            keyboard = build_sailings_keyboard(sails)
+        elif routes:
+            keyboard = build_date_keyboard()
+        else:
+            keyboard = build_ferry_again_keyboard()
         self._replace_panel(client, chat_id, message_id, PANEL_FERRY, text, keyboard, html=True)
 
     def _handle_ferry_trip(
@@ -2478,7 +2488,8 @@ class TelegramBridge(QObject):
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
                 back_sailings_text(origin.name, destination.name, state.get("when", ""), back),
-                build_back_sailings_keyboard(back), html=True,
+                build_back_sailings_keyboard(back) if back else build_date_keyboard(),
+                html=True,
             )
             return
         self._replace_panel(

@@ -1010,7 +1010,8 @@ def sailings_text(origin: str, destination: str, when: str, sailings: list, rout
             names = ", ".join(r.name for r in routes[:4])
             return (
                 f"{head}\n\nNothing sails that day.\n\n"
-                f"The route exists ({names}) - it may not run on that day of the week."
+                f"The route exists ({names}) - it may not run on that day of "
+                "the week. Pick another day below; the islands stay as they are."
             )
         return f"{head}\n\nNo RTL route goes that way."
     lines = [head, ""]
@@ -1497,7 +1498,8 @@ def back_sailings_text(origin: str, destination: str, when: str, sailings: list)
     if not sailings:
         return (
             f"{head}\n\nNothing sails back that day.\n\n"
-            "The way there is still unheld, so nothing has been taken."
+            "The way there is still unheld, so nothing has been taken. "
+            "Pick another day below to look again."
         )
     lines = [head, ""]
     for sail in sailings[:8]:
