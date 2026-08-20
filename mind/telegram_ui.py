@@ -1400,8 +1400,8 @@ def ferry_ask_who_text() -> str:
         "🎫 <b>Who is travelling?</b>\n\n"
         "Send the name and the ID number together, like:\n"
         "<code>Mohamed Maazinu A375667</code>\n\n"
-        "This is used for this ticket only and is not saved. It does stay in "
-        "this chat's history, which is Telegram's, not Mind's."
+        "Kept on this PC, encrypted, so the next booking is a tap. It also "
+        "stays in this chat's history, which is Telegram's, not Mind's."
     )
 
 
@@ -1543,14 +1543,19 @@ def build_seats_confirm_keyboard(trip_index: int, picked) -> dict:
 
 
 def ask_who_text(count: int) -> str:
-    """Asking for however many people are on the booking."""
+    """Asking for however many people are on the booking.
+
+    The card is mentioned every time rather than once, because this panel is
+    reached in a hurry and a shortcut nobody is told about is not a shortcut.
+    """
+    gap = chr(10) * 2
     if count == 1:
-        return ferry_ask_who_text()
-    return (
+        return ferry_ask_who_text() + gap + card_hint_text()
+    return card_hint_text() + gap + (
         f"🎫 <b>Who is travelling?</b>\n\n"
         f"{count} passengers, one per line, name and ID together:\n"
         "<code>Mohamed Maazinu A375667\nAdam Rilwan A227559</code>\n\n"
-        "Used for this ticket only and not saved. It does stay in this chat's "
+        "Kept on this PC, encrypted, so the next booking is a tap. It also stays in this chat's "
         "history, which is Telegram's, not Mind's."
     )
 
@@ -2171,3 +2176,66 @@ def build_booking_keyboard(at: int, booking, has_ticket: bool) -> dict:
         ]
     )
     return {"inline_keyboard": rows}
+
+
+# Reading a passenger off a photographed identity card. Confirmed rather than
+# used: a misread digit puts the wrong person on a ticket, and the person
+# holding the card is the only one who can say the reading is right.
+FERRY_CARD = "c"
+
+
+def card_text(card, needed: int = 1, chosen: int = 0) -> str:
+    """What was read off the card, for somebody to check before it is used."""
+    if not card.usable:
+        missing = "name" if card.number else "ID number"
+        got = []
+        if card.name:
+            got.append(f"Name: <b>{escape_html(card.name)}</b>")
+        if card.number:
+            got.append(f"ID: <b>{escape_html(card.number)}</b>")
+        found = ("\n".join(got) + "\n\n") if got else ""
+        return (
+            f"🪪 <b>Only part of that card could be read.</b>\n\n{found}"
+            f"The {missing} did not come out. Try a straighter photo in better "
+            "light, or send the name and ID as text:\n"
+            "<code>Mohamed Maazinu A375667</code>"
+        )
+    lines = [
+        "🪪 <b>Read from the card</b>",
+        "",
+        f"👤 <b>{escape_html(card.name)}</b>",
+        f"🆔 <code>{escape_html(card.number)}</code>",
+    ]
+    if card.born:
+        lines.append(f"🎂 {escape_html(card.born)}")
+    lines += [
+        "",
+        "<b>Check both against the card.</b> A misread letter or digit puts "
+        "the wrong person on the ticket, and RTL checks it at the jetty.",
+    ]
+    if needed > 1:
+        lines.append(f"\nPassenger {chosen + 1} of {needed}.")
+    return "\n".join(lines)
+
+
+def build_card_keyboard(card, more: bool = False) -> dict:
+    """Accept the reading, or fall back to typing it."""
+    rows: list[list[dict]] = []
+    if card.usable:
+        label = "✅  Use this" if not more else "✅  Use, then the next one"
+        rows.append([button(label, ferry_callback(FERRY_CARD, "yes"), STYLE_SUCCESS)])
+    rows.append(
+        [
+            button("✎  Type it instead", ferry_callback(FERRY_CARD, "no")),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def card_hint_text() -> str:
+    """Said alongside the typing prompt, so the shortcut is discoverable."""
+    return (
+        "📷 <i>Or photograph the identity card and send it here - Mind reads "
+        "the name and number off it.</i>"
+    )

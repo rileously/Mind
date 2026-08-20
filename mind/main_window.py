@@ -98,7 +98,8 @@ from .selection import (
     is_question_text,
 )
 from .hotspot import BANDS as HOTSPOT_BAND_CHOICES
-from .ocr import OcrError, extract_text_from_image
+from .id_card import best_card
+from .ocr import OcrError, extract_text_at_turns, extract_text_from_image
 from .sms import SmsError, matching, read_messages, unread
 from .selection_monitor import SelectionMonitor
 from .single_instance import action_message_id, show_message_id
@@ -3644,6 +3645,20 @@ class MindWindow(QMainWindow):
             image = QImage(str(source))
             if image.isNull():
                 self.telegram.send_text(chat_id, "Mind could not read that image.")
+                return
+            if self.telegram.ferry_wants_card(chat_id):
+                # A photo sent while a booking is asking who travels is an
+                # identity card, not something to run OCR over and hand back.
+                # Read at four turns: a card photographed on a table is
+                # sideways as often as not, and OCR reads sideways as nothing.
+                try:
+                    card = best_card(extract_text_at_turns(image))
+                except OcrError as exc:
+                    self.telegram.send_text(
+                        chat_id, f"Mind could not read that card: {exc}"
+                    )
+                    return
+                self.telegram.ferry_card_read(chat_id, card)
                 return
             try:
                 extracted = extract_text_from_image(image)

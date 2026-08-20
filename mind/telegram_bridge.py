@@ -16,7 +16,13 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal
 
 from .config_store import ConfigStore
-from .telegram_client import TelegramClient, TelegramError, guess_extension, scratch_name
+from .telegram_client import (
+    TelegramClient,
+    TelegramError,
+    escape_html,
+    guess_extension,
+    scratch_name,
+)
 from .telegram_files import (
     CB_FIND_OPEN,
     CB_GET,
@@ -163,6 +169,10 @@ from .telegram_ui import (
     FERRY_HIST,
     FERRY_TICKET,
     FERRY_AGAIN,
+    FERRY_CARD,
+    card_text,
+    build_card_keyboard,
+    card_hint_text,
     ferry_home_text,
     build_ferry_home_keyboard,
     who_text,
@@ -2295,6 +2305,12 @@ class TelegramBridge(QObject):
             self._handle_ferry_ticket(client, chat_id, callback_id, value, config)
             return
 
+        if kind == FERRY_CARD:
+            self._handle_ferry_card(
+                client, chat_id, callback_id, message_id, value, config
+            )
+            return
+
         if kind in (FERRY_WHO, FERRY_TYPE):
             self._handle_ferry_who(
                 client, chat_id, callback_id, message_id, kind, value, config
@@ -2963,6 +2979,91 @@ class TelegramBridge(QObject):
             # A booking that cannot be written down is not a booking that
             # failed, so this is a log line rather than anything the user sees.
             self.log.emit(f"Telegram: could not save the booking ({exc})")
+
+    # -- reading a passenger off a photographed card ----------------------
+
+    def ferry_wants_card(self, chat_id: int) -> bool:
+        """Whether a photo arriving now is an identity card rather than an image.
+
+        Asked by the window, which does the reading: a photo sent at any other
+        moment is still just a photo to run OCR over and hand back.
+        """
+        state = self._ferry_pick.get(int(chat_id)) or {}
+        return bool(state.get("awaiting_passenger"))
+
+    def ferry_card_read(self, chat_id: int, card) -> None:
+        """Show what was read off a card, for somebody to check."""
+        client = self._client
+        if client is None:
+            return
+        chat_id = int(chat_id)
+        state = self._ferry_pick.get(chat_id) or {}
+        if not state.get("awaiting_passenger"):
+            return
+        needed = self._ferry_needed(state)
+        already = list(state.get("card_people") or [])
+        state["card_pending"] = card
+        self._ferry_pick[chat_id] = state
+        self._send_panel(
+            client, chat_id, PANEL_FERRY,
+            card_text(card, needed, len(already)),
+            build_card_keyboard(card, more=len(already) + 1 < needed),
+            html=True,
+        )
+
+    def _handle_ferry_card(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        callback_id: str,
+        message_id: object,
+        value: str,
+        config: dict,
+    ) -> None:
+        """Accepting or rejecting what was read off a card."""
+        state = self._ferry_pick.get(chat_id) or {}
+        if not state.get("awaiting_passenger"):
+            return
+        if self._ferry_gone(chat_id, client):
+            return
+        needed = self._ferry_needed(state)
+
+        if value != "yes":
+            state.pop("card_pending", None)
+            self._ferry_pick[chat_id] = state
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                ask_who_text(needed), build_ferry_again_keyboard(), html=True,
+            )
+            return
+
+        card = state.get("card_pending")
+        if card is None or not card.usable:
+            return
+        people = list(state.get("card_people") or [])
+        people.append(
+            ferry_passenger(name=card.name, id_number=card.number)
+        )
+        state["card_people"] = people
+        state.pop("card_pending", None)
+
+        if len(people) < needed:
+            # More seats than cards so far: ask for the next one, naming who
+            # has been read already so it is obvious where this has got to.
+            self._ferry_pick[chat_id] = state
+            named = ", ".join(who.name for who in people)
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                f"✅ {escape_html(named)}\n\n"
+                f"Now passenger {len(people) + 1} of {needed} - send the next "
+                "card, or their name and ID as text.",
+                build_ferry_again_keyboard(), html=True,
+            )
+            return
+
+        state["awaiting_passenger"] = False
+        self._ferry_pick[chat_id] = state
+        self._ferry_pay_now(client, chat_id, message_id, people, config)
 
     def _ferry_ask_passenger(
         self, client: TelegramClient, chat_id: int, message_id: object,

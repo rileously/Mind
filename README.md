@@ -76,6 +76,10 @@ launch; a folder still in use is never touched.
 - Ask from Telegram what sails between two islands today, pick a seat off a map of
   the boat, and hold it - times, fare and live seats from RTL's own API, with the
   hold behind a confirmation of its own because it takes a seat off the ferry
+- Photograph a Maldivian identity card and send it to the chat instead of typing
+  a passenger: the name and ID number are read on this PC by Windows OCR, at four
+  turns because a card on a table is rarely upright, and shown for checking before
+  they go anywhere near a ticket
 - A book of the people who travel and the journeys actually made, so a repeat
   booking is a tap rather than a national ID typed into a phone: pick or search a
   saved traveller, start from a usual route, and see past bookings with their
@@ -105,6 +109,10 @@ on the computer. If Word definitions is enabled, only the selected word is sent 
 sentences are not sent. Definitions may draw on WordNet and Wiktionary, and the popup links
 to its source. Shell replacers
 execute with the current user's permissions and should only be created from trusted commands.
+
+A photographed identity card is read by Windows OCR on this PC and is never
+uploaded anywhere. The photo itself is deleted as soon as it has been read, and
+only the name and number reach the booking, after you have confirmed them.
 
 Saved travellers and past bookings hold names, national ID numbers and where
 somebody went, so both are encrypted with Windows DPAPI for your account rather

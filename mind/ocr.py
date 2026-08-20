@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QTransform
 
 
 MAX_OCR_DIMENSION = 2400
@@ -15,6 +15,28 @@ OCR_SCRIPT = Path(__file__).with_name("windows_ocr.ps1")
 
 class OcrError(RuntimeError):
     pass
+
+
+def extract_text_at_turns(image: QImage, timeout: float = 30.0):
+    """Read the same image at each quarter turn, upright first.
+
+    Windows OCR reads sideways text as nothing at all, and a card photographed
+    on a table is sideways about as often as not - so rather than telling
+    somebody to rotate their photograph, it is turned here. Yielded rather
+    than returned as a list, so a caller that finds what it wants at the first
+    turn never pays for the other three.
+    """
+    for turn in (0, 90, 270, 180):
+        if turn:
+            turned = image.transformed(QTransform().rotate(turn))
+        else:
+            turned = image
+        try:
+            found = extract_text_from_image(turned, timeout=timeout)
+        except OcrError:
+            continue
+        if found.strip():
+            yield found
 
 
 def extract_text_from_image(image: QImage, timeout: float = 30.0) -> str:
