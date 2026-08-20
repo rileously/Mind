@@ -70,6 +70,39 @@ class SettingsPageTests(unittest.TestCase):
         self.addCleanup(page.deleteLater)
         self.assertTrue(page.telegram_print.isChecked())
 
+    def test_the_mailbox_settings_are_written_down(self):
+        # Three fields that decide whose mail is opened. One of them silently
+        # not saving is the failure this class exists for.
+        self.page.telegram_enabled.setChecked(True)
+        self.page.mail_watch.setChecked(True)
+        self.page.mail_user.setText("someone@gmail.com")
+        self.page.mail_senders.setText("rtl.mv")
+        self.page._persist()
+        saved = self.store.load()
+        self.assertTrue(saved.get("mail_watch_enabled"))
+        self.assertEqual(saved.get("mail_user"), "someone@gmail.com")
+        self.assertEqual(saved.get("mail_senders"), "rtl.mv")
+
+    def test_pointing_at_another_mailbox_starts_it_over(self):
+        # UIDs belong to one mailbox. Carrying the old high mark into a new one
+        # would skip every message already in it.
+        self.store.save({**self.store.load(), "mail_user": "old@gmail.com", "mail_last_uid": 900})
+        page = SettingsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        page.mail_user.setText("new@gmail.com")
+        page._persist()
+        self.assertEqual(self.store.load().get("mail_last_uid"), 0)
+
+    def test_the_mailbox_is_only_offered_with_the_bridge_on(self):
+        # There is nowhere to send a ticket without Telegram, so watching a
+        # mailbox then would only be reading somebody's mail.
+        self.store.save({**self.store.load(), "telegram_enabled": False})
+        page = SettingsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        self.assertFalse(page.mail_watch.isEnabled())
+        self.assertFalse(page.mail_user.isEnabled())
+        self.assertFalse(page.mail_password.isEnabled())
+
     def test_printing_is_only_offered_alongside_file_access(self):
         # It prints what was saved, so it cannot work without saving.
         self.store.save(

@@ -76,6 +76,9 @@ launch; a folder still in use is never touched.
 - Ask from Telegram what sails between two islands today, pick a seat off a map of
   the boat, and hold it - times, fare and live seats from RTL's own API, with the
   hold behind a confirmation of its own because it takes a seat off the ferry
+- Forward the ticket that arrives by email into the chat, since the operator makes the
+  QR code on its own servers and only ever mails it: the mailbox is opened read-only,
+  only listed senders are downloaded at all, and nothing is marked read or moved
 - Pair a phone by showing it a QR code, instead of typing an address and a code
 - Read the phone's messages on the desktop, searchable, with unread marked - no app
   on the phone and nothing stored on the PC
@@ -98,6 +101,15 @@ on the computer. If Word definitions is enabled, only the selected word is sent 
 sentences are not sent. Definitions may draw on WordNet and Wiktionary, and the popup links
 to its source. Shell replacers
 execute with the current user's permissions and should only be created from trusted commands.
+
+Watching a mailbox for a ticket is off unless it is turned on, and is deliberately narrow
+when it is. The folder is opened read-only, so nothing is marked as read, moved or deleted.
+Only the sender and subject of a new message are read; a message is downloaded in full only
+when its sender is one you listed, and an empty list watches nobody rather than everybody.
+Attachments are saved on this PC and sent to your own allowed chats, never anywhere else.
+The password is an app password stored with Windows DPAPI for your account, which is why an
+app password rather than the account's own is asked for: it opens mail and can be revoked
+on its own.
 
 ## Testing
 

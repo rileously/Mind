@@ -138,6 +138,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "ferry_passenger_id_protected": "",
     "ferry_contact_email": "",
     "ferry_contact_phone": "",
+    # Watching a mailbox for the ticket PDF, which RTL mints on its own servers
+    # and mails out. The password is an app password rather than the account's
+    # own, and is kept the way every other credential here is.
+    "mail_watch_enabled": False,
+    "mail_host": "imap.gmail.com",
+    "mail_port": 993,
+    "mail_user": "",
+    "mail_password_protected": "",
+    # Whose mail is worth opening. Nothing outside this list is ever downloaded,
+    # so an empty list watches nobody rather than watching everybody.
+    "mail_senders": "rtl.mv, mtcc.com.mv",
+    # How far the mailbox had got when it was last looked at, so the same
+    # ticket is not sent twice and the backlog before setup is not sent at all.
+    "mail_last_uid": 0,
+    "mail_poll_seconds": 120,
     # "auto", "2.4" or "5". The low band reaches further through walls,
     # which is the whole reason a PC is being asked to be an access point.
     "hotspot_band": "auto",
@@ -278,6 +293,31 @@ class ConfigStore:
         clean = number.strip() if isinstance(number, str) else ""
         updated = deepcopy(config)
         updated["ferry_passenger_id_protected"] = protect_text(clean) if clean else ""
+        return updated
+
+    def get_mail_password(self, config: dict[str, Any] | None = None) -> str:
+        """The mailbox app password, stored encrypted.
+
+        This one opens a whole inbox rather than one service, so it is the most
+        valuable thing Mind keeps. It goes in beside the bot token, and it is
+        an app password: the account's real password would also unlock the
+        account itself, and nothing here needs that.
+        """
+        current = config if config is not None else self.load()
+        protected = current.get("mail_password_protected", "")
+        if not isinstance(protected, str) or not protected:
+            return ""
+        try:
+            return unprotect_text(protected)
+        except (OSError, ValueError, RuntimeError):
+            return ""
+
+    def set_mail_password(self, config: dict[str, Any], password: str) -> dict[str, Any]:
+        # Gmail shows an app password in spaced groups of four and accepts it
+        # either way, so the spaces go rather than becoming a wrong password.
+        clean = password.replace(" ", "").strip() if isinstance(password, str) else ""
+        updated = deepcopy(config)
+        updated["mail_password_protected"] = protect_text(clean) if clean else ""
         return updated
 
     def get_hotspot_password(self, config: dict[str, Any] | None = None) -> str:

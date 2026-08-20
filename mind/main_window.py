@@ -113,6 +113,7 @@ from .network_scanner import (
     RouterFilterProbe,
     RouterTest,
 )
+from .mail_watch import MailWatcher
 from .phone_watch import (
     ContactLookup,
     PhoneEntry,
@@ -1047,6 +1048,7 @@ class NotificationsPage(QWidget):
 
 ROUTER_PASSWORD_MASK = "•" * 10
 HOTSPOT_PASSWORD_MASK = "•" * 10
+MAIL_PASSWORD_MASK = "•" * 11
 FERRY_ID_MASK = "•" * 7
 HOTSPOT_BANDS = HOTSPOT_BAND_CHOICES
 MESSAGE_LIMIT = 300
@@ -2494,6 +2496,51 @@ class SettingsPage(QWidget):
             ferry_reach,
             "🚤",
         )
+        self.mail_watch = ToggleSwitch()
+        self._setting_row(
+            telegram_layout,
+            "Forward the ticket email to Telegram",
+            "RTL makes the ticket's QR code on its own servers and only ever mails it "
+            "out, so this watches the mailbox and puts the PDF in the chat when it "
+            "lands. Only mail from the senders below is opened; nothing is marked as "
+            "read, moved or deleted.",
+            self.mail_watch,
+            "📬",
+        )
+        mail_login = QWidget()
+        mail_row = QHBoxLayout(mail_login)
+        mail_row.setContentsMargins(0, 0, 0, 0)
+        mail_row.setSpacing(8)
+        self.mail_user = QLineEdit()
+        self.mail_user.setPlaceholderText("you@gmail.com")
+        self.mail_user.setMaximumWidth(190)
+        self.mail_password = QLineEdit()
+        self.mail_password.setPlaceholderText("App password")
+        self.mail_password.setEchoMode(QLineEdit.Password)
+        self.mail_password.setMaximumWidth(130)
+        mail_row.addWidget(self.mail_user)
+        mail_row.addWidget(self.mail_password)
+        self._setting_row(
+            telegram_layout,
+            "The mailbox to watch",
+            "Gmail needs an app password made at myaccount.google.com/apppasswords, not "
+            "the password you log in with - it opens mail and nothing else, and can be "
+            "revoked on its own. It is kept encrypted for this Windows account.",
+            mail_login,
+            "📬",
+        )
+        self.mail_senders = QLineEdit()
+        self.mail_senders.setPlaceholderText("rtl.mv, mtcc.com.mv")
+        self.mail_senders.setMaximumWidth(230)
+        self._setting_row(
+            telegram_layout,
+            "Whose mail is opened",
+            "Any address containing one of these is downloaded and its PDFs sent on. "
+            "Everything else is passed over unread. Leave it empty and nothing is "
+            "watched at all.",
+            self.mail_senders,
+            "📬",
+        )
         self.telegram_send_menu = ToggleSwitch()
         self._setting_row(
             telegram_layout,
@@ -2633,6 +2680,7 @@ class SettingsPage(QWidget):
             self.telegram_power,
             self.telegram_hotspot,
             self.hotspot_match,
+            self.mail_watch,
             self.telegram_send_menu,
             self.secret_shield,
             self.url_peek,
@@ -2668,6 +2716,9 @@ class SettingsPage(QWidget):
             self.hotspot_password,
             self.ferry_email,
             self.ferry_phone,
+            self.mail_user,
+            self.mail_password,
+            self.mail_senders,
         ):
             field.textEdited.connect(self._changed_soon)
             # Leaving the field commits it at once, so a half-typed value is not
@@ -2838,6 +2889,16 @@ class SettingsPage(QWidget):
         self.hotspot_band.setEnabled(telegram_on and hotspot_on)
         self.ferry_email.setText(str(config.get("ferry_contact_email", "")))
         self.ferry_phone.setText(str(config.get("ferry_contact_phone", "")))
+        mail_on = bool(config.get("mail_watch_enabled", False))
+        self.mail_watch.setChecked(mail_on)
+        self.mail_watch.setEnabled(telegram_on)
+        self.mail_user.setText(str(config.get("mail_user", "")))
+        self.mail_password.setText(
+            MAIL_PASSWORD_MASK if self.store.get_mail_password(config) else ""
+        )
+        self.mail_senders.setText(str(config.get("mail_senders", "")))
+        for widget in (self.mail_user, self.mail_password, self.mail_senders):
+            widget.setEnabled(telegram_on and mail_on)
         self.hotspot_match.setEnabled(telegram_on and hotspot_on)
         self.telegram_send_menu.setChecked(bool(config.get("telegram_send_menu_enabled", False)))
         self.telegram_send_menu.setEnabled(telegram_on)
@@ -2869,6 +2930,8 @@ class SettingsPage(QWidget):
             self._report("Not saved: the command prefix cannot be empty or contain spaces.")
             return
         config = self.store.load()
+        # Read before the new values go in, so it is still the old mailbox.
+        previous_mail_user = str(config.get("mail_user", ""))
         config.update(
             {
                 "prefix": prefix,
@@ -2907,6 +2970,9 @@ class SettingsPage(QWidget):
                 "hotspot_ssid": self.hotspot_ssid.text().strip(),
                 "hotspot_band": self.hotspot_band.currentData(),
                 "ferry_contact_email": self.ferry_email.text().strip(),
+                "mail_watch_enabled": self.mail_watch.isChecked(),
+                "mail_user": self.mail_user.text().strip(),
+                "mail_senders": self.mail_senders.text().strip(),
                 "ferry_contact_phone": self.ferry_phone.text().strip(),
                 "telegram_send_menu_enabled": self.telegram_send_menu.isChecked(),
                 "secret_shield_enabled": self.secret_shield.isChecked(),
@@ -2925,6 +2991,13 @@ class SettingsPage(QWidget):
         typed_hotspot = self.hotspot_password.text()
         if typed_hotspot != HOTSPOT_PASSWORD_MASK:
             config = self.store.set_hotspot_password(config, typed_hotspot)
+        typed_mail = self.mail_password.text()
+        if typed_mail != MAIL_PASSWORD_MASK:
+            config = self.store.set_mail_password(config, typed_mail)
+        # A different mailbox is a different set of UIDs, and the old high mark
+        # would silently skip everything already in the new one.
+        if previous_mail_user != self.mail_user.text().strip():
+            config["mail_last_uid"] = 0
         want_shell_menu = self.telegram_enabled.isChecked() and self.telegram_send_menu.isChecked()
         try:
             self.store.save(config)
@@ -2945,6 +3018,15 @@ class SettingsPage(QWidget):
             # an allowlist. Said here because switching the bridge on is exactly
             # when the missing piece matters.
             notes.append("Telegram needs at least one allowed chat ID before it will connect.")
+        if config.get("mail_watch_enabled"):
+            # Said now rather than letting a mailbox that cannot be opened fail
+            # quietly every couple of minutes in the log.
+            if not config.get("mail_user") or not self.store.get_mail_password(config):
+                notes.append(
+                    "The mailbox needs an address and an app password before it can be watched."
+                )
+            elif not config.get("mail_senders"):
+                notes.append("No sender is listed, so no mail will be opened.")
         if want_shell_menu and not shell_menu_added:
             notes.append(f"'Send to Telegram' was not added. {shell_menu_describe()}")
         self._refresh_dependent_controls()
@@ -2979,6 +3061,10 @@ class SettingsPage(QWidget):
             widget.setEnabled(telegram_on)
         for widget in (self.telegram_files_root, self.telegram_inbox):
             widget.setEnabled(telegram_on and files_on)
+        self.mail_watch.setEnabled(telegram_on)
+        mail_on = telegram_on and self.mail_watch.isChecked()
+        for widget in (self.mail_user, self.mail_password, self.mail_senders):
+            widget.setEnabled(mail_on)
         self.telegram_print.setEnabled(telegram_on and files_on)
         self.watchers_enabled.setEnabled(telegram_on)
         self.telegram_power.setEnabled(telegram_on and self.telegram_control.isChecked())
@@ -3163,6 +3249,11 @@ class MindWindow(QMainWindow):
         self.phone_watcher = PhoneWatcher(self.store, self)
         self.phone_watcher.log.connect(self._log)
         self.phone_watcher.call_changed.connect(self._on_call_changed)
+        # Same reasoning: the ticket usually lands minutes after the payment,
+        # by which time the window has been shut.
+        self.mail_watcher = MailWatcher(self.store, self)
+        self.mail_watcher.log.connect(self._log)
+        self.mail_watcher.tickets_arrived.connect(self._on_tickets_arrived)
         self.ask_ai_popup.call_requested.connect(self._call_from_tooltip)
         self._last_copied_text = ""
         self._last_copied_time = 0.0
@@ -3215,6 +3306,7 @@ class MindWindow(QMainWindow):
         QTimer.singleShot(0, self.configure_telegram)
         QTimer.singleShot(0, self.configure_network_scan)
         QTimer.singleShot(0, self.configure_phone_watch)
+        QTimer.singleShot(0, self.configure_mail_watch)
         QTimer.singleShot(0, self._register_notifications)
         QTimer.singleShot(300, self._do_pending_action)
         QTimer.singleShot(0, self.sync_shell_menu)
@@ -3466,6 +3558,7 @@ class MindWindow(QMainWindow):
         self.url_peek_card.close()
         self.ghost_text_overlay.dismiss()
         self.ghost_text_overlay.close()
+        self.mail_watcher.stop()
         self.telegram.stop()
         self.engine.shutdown()
         self.tray.hide()
@@ -3510,6 +3603,7 @@ class MindWindow(QMainWindow):
         # The watchers switch appears on two pages; neither may show a stale one.
         self.notifications.refresh()
         self.configure_telegram()
+        self.configure_mail_watch()
         if self.engine.is_running:
             self._log("Configuration changed. The engine will hot-reload it.")
 
@@ -3814,6 +3908,38 @@ class MindWindow(QMainWindow):
                 f"📶  New on the network: {device.display_name}{where}\n{device.mac}",
                 self.telegram.device_alert_keyboard(device.mac, device.display_name),
             )
+
+    def configure_mail_watch(self) -> None:
+        """Start or stop watching the mailbox to match the saved setting."""
+        if self._quitting:
+            self.mail_watcher.stop()
+            return
+        config = self.store.load()
+        # There is nowhere to send a ticket without the bridge, so watching the
+        # mailbox with Telegram off would only be reading somebody's mail.
+        wanted = bool(config.get("mail_watch_enabled", False)) and bool(
+            config.get("telegram_enabled", False)
+        )
+        if wanted and not self.mail_watcher.is_running:
+            self.mail_watcher.start()
+        elif not wanted and self.mail_watcher.is_running:
+            self.mail_watcher.stop()
+
+    def _on_tickets_arrived(self, tickets: list) -> None:
+        """Put a ticket that arrived by email into the chat.
+
+        Not held behind the general notifications switch: this one was asked
+        for by its own setting, and a ticket arriving is the entire feature
+        rather than an alert about the machine.
+        """
+        if not self.telegram.is_running:
+            return
+        chats = parse_allowed_chat_ids(
+            self.store.load().get("telegram_allowed_chat_ids")
+        )
+        for path, caption in tickets[:5]:
+            for chat_id in chats:
+                self.telegram.send_file(chat_id, path, caption)
 
     def notify_telegram(self, message: str, reply_markup: dict | None = None) -> None:
         """Push an alert to every allowed chat, when the user asked for that."""
