@@ -2447,7 +2447,7 @@ class TelegramBridge(QObject):
         if len(picked) < wanted:
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
-                leg_seats_text(boat, at, len(legs), wanted, picked),
+                leg_seats_text(boat, at, len(legs), wanted, picked, sail, chosen),
                 build_seat_map_keyboard(boat, int(index), picked), html=True,
             )
             return
@@ -2460,7 +2460,7 @@ class TelegramBridge(QObject):
             following = legs[at + 1]
             self._replace_panel(
                 client, chat_id, message_id, PANEL_FERRY,
-                leg_seats_text(following, at + 1, len(legs), wanted, []),
+                leg_seats_text(following, at + 1, len(legs), wanted, [], sail, chosen),
                 build_seat_map_keyboard(following, int(index)), html=True,
             )
             return
@@ -2788,7 +2788,7 @@ class TelegramBridge(QObject):
         first = legs[0]
         self._replace_panel(
             client, chat_id, message_id, PANEL_FERRY,
-            leg_seats_text(first, 0, len(legs), wanted, []),
+            leg_seats_text(first, 0, len(legs), wanted, [], sail, []),
             build_seat_map_keyboard(first, index), html=True,
         )
 

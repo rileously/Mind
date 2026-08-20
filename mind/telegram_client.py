@@ -28,6 +28,40 @@ MAX_MESSAGE_CHARS = 4096
 MAX_COPY_TEXT_CHARS = 256
 
 
+def _uncoloured(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The same payload with every button colour removed, or None if there were none.
+
+    None rather than an unchanged copy, so the caller can tell "nothing to
+    strip" from "stripped", and does not retry a request that would fail the
+    same way twice.
+    """
+    if not isinstance(payload, dict):
+        return None
+    markup = payload.get("reply_markup")
+    if not isinstance(markup, dict):
+        return None
+    rows = markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return None
+    found = False
+    clean: list[Any] = []
+    for row in rows:
+        if not isinstance(row, list):
+            clean.append(row)
+            continue
+        buttons = []
+        for item in row:
+            if isinstance(item, dict) and "style" in item:
+                found = True
+                buttons.append({k: v for k, v in item.items() if k != "style"})
+            else:
+                buttons.append(item)
+        clean.append(buttons)
+    if not found:
+        return None
+    return {**payload, "reply_markup": {**markup, "inline_keyboard": clean}}
+
+
 class TelegramError(RuntimeError):
     pass
 
@@ -80,6 +114,25 @@ class TelegramClient:
         self._timeout = timeout
 
     def _call(self, method: str, payload: dict[str, Any] | None = None) -> Any:
+        """Make one API call, retrying once without button colours if needed.
+
+        Button styles arrived in Bot API 9.4. An older Telegram refuses the
+        whole message rather than ignoring the field it does not know, which
+        would turn every coloured panel into no panel at all. Colour is worth
+        having and not worth losing a panel over, so a refusal on that one
+        ground is answered by sending the same keyboard uncoloured.
+        """
+        try:
+            return self._request(method, payload)
+        except TelegramError as exc:
+            if "button style" not in str(exc).lower():
+                raise
+            plain = _uncoloured(payload)
+            if plain is None:
+                raise
+            return self._request(method, plain)
+
+    def _request(self, method: str, payload: dict[str, Any] | None = None) -> Any:
         url = f"{API_ROOT}/bot{self._token}/{method}"
         data = json.dumps(payload or {}).encode("utf-8")
         request = urllib.request.Request(

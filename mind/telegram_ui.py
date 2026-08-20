@@ -1315,12 +1315,13 @@ def build_held_keyboard(trip_index: int, seats, can_pay: bool = True) -> dict:
     if can_pay:
         rows.append(
             [
-                {
-                    "text": "💳  Continue to payment",
-                    "callback_data": ferry_callback(
-                        FERRY_PAY, f"{trip_index}." + seat_list(seats)
-                    ),
-                }
+                # Green rather than blue: this is the step that ends in a
+                # ticket, and it is the one thing on the panel worth pressing.
+                button(
+                    "💳  Continue to payment",
+                    ferry_callback(FERRY_PAY, f"{trip_index}." + seat_list(seats)),
+                    STYLE_SUCCESS,
+                )
             ]
         )
     rows.append(
@@ -1451,23 +1452,25 @@ def build_seat_map_keyboard(sail, trip_index: int, picked=()) -> dict:
         buttons = []
         for seat in row:
             if seat is None:
-                buttons.append({"text": " ", "callback_data": CB_NOOP})
+                buttons.append(button(" ", CB_NOOP))
             elif seat in chosen:
+                # Green for the seats this booking has taken, so a glance at
+                # the map answers "which are mine" without reading numbers.
                 buttons.append(
-                    {
-                        "text": f"✓{seat}",
-                        "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
-                    }
+                    button(
+                        f"✓{seat}",
+                        ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
+                        STYLE_SUCCESS,
+                    )
                 )
             elif seat in free:
                 buttons.append(
-                    {
-                        "text": str(seat),
-                        "callback_data": ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"),
-                    }
+                    button(str(seat), ferry_callback(FERRY_SEAT, f"{trip_index}.{seat}"))
                 )
             else:
-                buttons.append({"text": "✕", "callback_data": CB_NOOP})
+                # Red, and still not tappable. The tick mark said this already;
+                # the colour says it from across the room.
+                buttons.append(button("✕", CB_NOOP, STYLE_DANGER))
         rows.append(buttons)
     rows.append(
         [
@@ -1501,10 +1504,11 @@ def seats_pick_text(origin: str, destination: str, sail, wanted: int, picked) ->
                 "needs your card.",
             ]
         )
+    riding = spell_minutes(minutes_between(sail.first.departs, sail.last.arrives))
     return (
         f"🚤 <b>{origin}</b> → <b>{destination}</b>\n"
-        f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
-        f"MVR {sail.fare:.0f} each{so_far}\n\n"
+        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {riding} · {sail.route}\n"
+        f"{seats_free_of(sail.first)} · MVR {sail.fare:.0f} each{so_far}\n\n"
         f"{asking}\n"
         "Three each side of the aisle, as they are on the boat. ✕ is taken."
     )
@@ -1522,14 +1526,17 @@ def build_seats_confirm_keyboard(trip_index: int, picked) -> dict:
     return {
         "inline_keyboard": [
             [
-                {
-                    "text": f"✅  Hold {listed}",
-                    "callback_data": ferry_callback(FERRY_HOLD, f"{trip_index}.{chosen}"),
-                }
+                # The one step that takes seats off a boat other people are
+                # booking, so it is the one button that carries a colour here.
+                button(
+                    f"✅  Hold {listed}",
+                    ferry_callback(FERRY_HOLD, f"{trip_index}.{chosen}"),
+                    STYLE_PRIMARY,
+                )
             ],
             [
-                {"text": "↺  Pick again", "callback_data": ferry_callback(FERRY_TRIP, str(trip_index))},
-                {"text": "‹  Menu", "callback_data": CB_MENU},
+                button("↺  Pick again", ferry_callback(FERRY_TRIP, str(trip_index))),
+                button("‹  Menu", CB_MENU),
             ],
         ]
     }
@@ -1660,24 +1667,105 @@ def seat_groups(groups) -> str:
     return ";".join(",".join(str(n) for n in group) for group in groups)
 
 
-def leg_seats_text(leg, at: int, total: int, wanted: int, picked) -> str:
-    """Which boat is being chosen for, when a journey has more than one."""
+# Button colours, added to the Bot API in 9.4. Telegram accepts exactly these
+# three and refuses anything else with "invalid button style", so they are
+# named once here rather than spelled out at every button.
+#
+# Used for what the colour means rather than for decoration: a keyboard where
+# everything is coloured says nothing. Green is a seat taken by this booking,
+# red is one somebody else has, blue is the way forward.
+STYLE_PRIMARY = "primary"
+STYLE_SUCCESS = "success"
+STYLE_DANGER = "danger"
+
+
+def button(text: str, data: str, style: str = "") -> dict:
+    """One inline button, coloured only when the colour carries meaning."""
+    made = {"text": text, "callback_data": data}
+    if style:
+        made["style"] = style
+    return made
+
+
+def strip_styles(markup):
+    """The same keyboard with every colour removed.
+
+    Kept for the retry in the client: a Telegram that predates Bot API 9.4
+    refuses the whole message rather than ignoring the field, and a panel that
+    cannot be sent is worse than one that is not coloured.
+    """
+    if not isinstance(markup, dict):
+        return markup
+    rows = markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return markup
+    return {
+        **markup,
+        "inline_keyboard": [
+            [
+                {key: value for key, value in item.items() if key != "style"}
+                if isinstance(item, dict)
+                else item
+                for item in row
+            ]
+            for row in rows
+            if isinstance(row, list)
+        ],
+    }
+
+
+def seats_free_of(leg) -> str:
+    """"39 of 44 free", when the boat's size is known, or "39 free"."""
+    free = len(leg.free_seats or ())
+    aboard = free + len(getattr(leg, "taken_seats", ()) or ())
+    return f"{free} of {aboard} free" if aboard > free else f"{free} free"
+
+
+def leg_seats_text(
+    leg, at: int, total: int, wanted: int, picked, sail=None, done=()
+) -> str:
+    """Which boat is being chosen for, when a journey has more than one.
+
+    The boat in hand is not the whole story on a journey that changes: what
+    was picked on the boat before is worth seeing while picking the next, and
+    so is the wait, because a seat chosen for an 11:00 departure means little
+    without knowing it is reached at 09:25.
+    """
     chosen = list(picked or [])
     left = wanted - len(chosen)
-    which = f"Boat {at + 1} of {total}\n" if total > 1 else ""
-    so_far = f"\nPicked: <b>{', '.join(str(n) for n in chosen)}</b>" if chosen else ""
-    asking = (
-        f"Pick {left} more seat{'s' if left != 1 else ''}."
-        if left > 0
-        else "That is all of them."
+    lines: list[str] = []
+    if total > 1:
+        lines.append(f"🪑 <b>Boat {at + 1} of {total}</b>")
+    lines.append(
+        f"🚤 <b>{leg.from_name}</b> {leg.departs_at} → "
+        f"<b>{leg.to_name}</b> {leg.arrives_at}"
     )
-    return (
-        f"{which}🚤 <b>{leg.from_name}</b> {leg.departs_at} → "
-        f"<b>{leg.to_name}</b> {leg.arrives_at}\n"
-        f"{leg.route} · {len(leg.free_seats)} free{so_far}\n\n"
-        f"{asking}\n"
-        "Three each side of the aisle, as they are on the boat. ✕ is taken."
-    )
+    riding = spell_minutes(minutes_between(leg.departs, leg.arrives))
+    lines.append(f"{leg.route} · {riding} · {seats_free_of(leg)}")
+
+    if sail is not None and at > 0 and at <= len(sail.legs) - 1:
+        before = sail.legs[at - 1]
+        waiting = minutes_between(before.arrives, leg.departs)
+        if waiting:
+            lines.append(f"⏳ {spell_minutes(waiting)} in {leg.from_name} before it leaves")
+
+    earlier = [
+        f"boat {number + 1} · {', '.join(str(n) for n in group)}"
+        for number, group in enumerate(list(done or ())[:at])
+        if group
+    ]
+    if earlier:
+        lines += ["", "✅ " + "   ".join(earlier)]
+    if chosen:
+        lines.append(f"Picked here: <b>{', '.join(str(n) for n in chosen)}</b>")
+
+    lines.append("")
+    if left > 0:
+        lines.append(f"Pick <b>{left}</b> more seat{'s' if left != 1 else ''}.")
+    else:
+        lines.append("That is all of them.")
+    lines.append("Three each side of the aisle, as they are on the boat. ✕ is taken.")
+    return "\n".join(lines)
 
 
 def minutes_between(start: str, end: str) -> int:
