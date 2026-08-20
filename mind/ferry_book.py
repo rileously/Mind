@@ -95,6 +95,9 @@ class Booking:
     made: float = 0.0
     from_code: str = ""
     to_code: str = ""
+    # The ID numbers that travelled, so a booking can be repeated for the same
+    # people rather than for whoever happens to share their name.
+    numbers: str = ""
 
     @property
     def label(self) -> str:
@@ -319,6 +322,7 @@ def booking_from(raw: object) -> Booking | None:
         made=made,
         from_code=str(raw.get("from_code", "")),
         to_code=str(raw.get("to_code", "")),
+        numbers=str(raw.get("numbers", "")),
     )
 
 
@@ -335,6 +339,7 @@ def booking_to(booking: Booking) -> dict:
         "made": booking.made,
         "from_code": booking.from_code,
         "to_code": booking.to_code,
+        "numbers": booking.numbers,
     }
 
 
@@ -399,3 +404,48 @@ def decode(raw: str, from_dict):
         if made is not None:
             out.append(made)
     return out
+
+
+def ids_in(booking) -> list:
+    """The ID numbers on a booking, if it was made since they were kept."""
+    return [part.strip().upper() for part in (booking.numbers or "").split(",") if part.strip()]
+
+
+def bookings_for(history, traveller, limit: int = HISTORY_OFFERED):
+    """Everywhere one person has been.
+
+    Matched on their ID number where the booking recorded one, and on their
+    name where it did not - bookings made before the number was kept are still
+    the ones somebody is looking for, and refusing to show them would make the
+    feature look broken on exactly the history that prompted it.
+    """
+    if traveller is None:
+        return []
+    number = traveller.number.upper()
+    name = traveller.name.strip().lower()
+    found = []
+    for booking in history or []:
+        numbers = ids_in(booking)
+        if numbers:
+            if number in numbers:
+                found.append(booking)
+            continue
+        if name and name in (booking.who or "").lower():
+            found.append(booking)
+    return sorted(found, key=lambda b: -b.made)[: max(1, int(limit))]
+
+
+def travellers_in(booking, book):
+    """The people on a booking, as entries from the book.
+
+    By number when the booking kept them, by name otherwise. Anybody who
+    cannot be resolved is left out rather than guessed at: a booking repeated
+    for the wrong person is the one failure worth being careful about here.
+    """
+    numbers = ids_in(booking)
+    if numbers:
+        by_number = {who.number.upper(): who for who in book or []}
+        return [by_number[n] for n in numbers if n in by_number]
+    wanted = [part.strip().lower() for part in (booking.who or "").split(",") if part.strip()]
+    by_name = {who.name.strip().lower(): who for who in book or []}
+    return [by_name[n] for n in wanted if n in by_name]

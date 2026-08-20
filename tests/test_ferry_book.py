@@ -304,3 +304,114 @@ class EncryptedStorage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OnePersonsJourneys(unittest.TestCase):
+    """Finding where somebody has been, to book it again for them."""
+
+    def trip(self, reference, who, numbers="", made=100.0, to="Baarah"):
+        return Booking(
+            reference=reference,
+            from_name="Naivaadhoo",
+            to_name=to,
+            who=who,
+            numbers=numbers,
+            made=made,
+            from_code="105",
+            to_code="115",
+        )
+
+    def maazinu(self):
+        return Traveller(name="Mohamed Maazinu", number="A375667")
+
+    def test_their_own_journeys_come_back(self):
+        from mind.ferry_book import bookings_for
+
+        history = [
+            self.trip("AAA", "Mohamed Maazinu", "A375667"),
+            self.trip("BBB", "Aishath Ali", "A111222"),
+        ]
+        found = bookings_for(history, self.maazinu())
+        self.assertEqual([b.reference for b in found], ["AAA"])
+
+    def test_matched_on_the_number_rather_than_the_name(self):
+        from mind.ferry_book import bookings_for
+
+        # Somebody else with the same name is not the same person.
+        history = [self.trip("AAA", "Mohamed Maazinu", "A999999")]
+        self.assertEqual(bookings_for(history, self.maazinu()), [])
+
+    def test_older_bookings_without_numbers_fall_back_to_the_name(self):
+        # Bookings made before the number was kept are still the ones somebody
+        # is looking for; refusing to show them looks like the feature is broken.
+        from mind.ferry_book import bookings_for
+
+        history = [self.trip("AAA", "Mohamed Maazinu")]
+        self.assertEqual([b.reference for b in bookings_for(history, self.maazinu())], ["AAA"])
+
+    def test_one_of_two_passengers_still_counts_as_theirs(self):
+        from mind.ferry_book import bookings_for
+
+        history = [self.trip("AAA", "Aishath Ali, Mohamed Maazinu", "A111222, A375667")]
+        self.assertEqual(len(bookings_for(history, self.maazinu())), 1)
+
+    def test_newest_first(self):
+        from mind.ferry_book import bookings_for
+
+        history = [
+            self.trip("OLD", "Mohamed Maazinu", "A375667", made=100),
+            self.trip("NEW", "Mohamed Maazinu", "A375667", made=200),
+        ]
+        self.assertEqual([b.reference for b in bookings_for(history, self.maazinu())][0], "NEW")
+
+    def test_nobody_is_not_an_error(self):
+        from mind.ferry_book import bookings_for
+
+        self.assertEqual(bookings_for([], self.maazinu()), [])
+        self.assertEqual(bookings_for(None, None), [])
+
+
+class WhoWasOnIt(unittest.TestCase):
+    """Repeating a booking for the people who were actually on it."""
+
+    def book(self):
+        return [
+            Traveller(name="Mohamed Maazinu", number="A375667"),
+            Traveller(name="Aishath Ali", number="A111222"),
+        ]
+
+    def test_resolved_by_number(self):
+        from mind.ferry_book import travellers_in
+
+        booking = Booking(reference="A", from_name="X", to_name="Y",
+                          who="Mohamed Maazinu", numbers="A375667")
+        self.assertEqual([w.name for w in travellers_in(booking, self.book())],
+                         ["Mohamed Maazinu"])
+
+    def test_resolved_by_name_when_no_number_was_kept(self):
+        from mind.ferry_book import travellers_in
+
+        booking = Booking(reference="A", from_name="X", to_name="Y", who="Aishath Ali")
+        self.assertEqual([w.name for w in travellers_in(booking, self.book())], ["Aishath Ali"])
+
+    def test_both_passengers_come_back(self):
+        from mind.ferry_book import travellers_in
+
+        booking = Booking(reference="A", from_name="X", to_name="Y",
+                          who="Mohamed Maazinu, Aishath Ali",
+                          numbers="A375667, A111222")
+        self.assertEqual(len(travellers_in(booking, self.book())), 2)
+
+    def test_somebody_no_longer_in_the_book_is_left_out(self):
+        # Left out rather than guessed at: a booking repeated for the wrong
+        # person is the one failure worth being careful about.
+        from mind.ferry_book import travellers_in
+
+        booking = Booking(reference="A", from_name="X", to_name="Y",
+                          who="Gone Away", numbers="A000000")
+        self.assertEqual(travellers_in(booking, self.book()), [])
+
+    def test_the_numbers_survive_a_round_trip(self):
+        booking = Booking(reference="A", from_name="X", to_name="Y", numbers="A375667")
+        back = decode(encode([booking], booking_to), booking_from)
+        self.assertEqual(back[0].numbers, "A375667")

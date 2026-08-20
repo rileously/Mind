@@ -2029,7 +2029,12 @@ def build_ferry_home_keyboard(routes, history=()) -> dict:
         rows.append([button(f"🚤  {route.label}", ferry_callback(FERRY_ROUTE, str(at)))])
     rows.append([button("🔍  Somewhere else", ferry_callback(FERRY_RESTART))])
     if history:
-        rows.append([button("🎟  Past bookings", ferry_callback(FERRY_HIST, "all"))])
+        rows.append(
+            [
+                button("👤  By passenger", ferry_callback(FERRY_WHOSE, "all")),
+                button("🎟  Past bookings", ferry_callback(FERRY_HIST, "all")),
+            ]
+        )
     rows.append([button("‹  Menu", CB_MENU)])
     return {"inline_keyboard": rows}
 
@@ -2351,3 +2356,88 @@ def raw_reading(reading: str, limit: int = 600) -> str:
     if len(text) > limit:
         text = text[:limit] + " ..."
     return f"{chr(10)}{chr(10)}<i>What it saw:</i>{chr(10)}<code>{escape_html(text)}</code>"
+
+
+# Choosing the person first and the journey second, which is the order people
+# actually think in: this is a trip for Aishath, and Aishath goes to
+# Kulhudhuffushi. Everything else about the booking then follows from the two.
+FERRY_WHOSE = "v"
+
+
+def whose_text(people) -> str:
+    if not people:
+        return (
+            "👤 <b>Nobody has travelled yet.</b>\n\n"
+            "After a booking, whoever went appears here with the journeys they "
+            "have made."
+        )
+    return (
+        "👤 <b>Who is it for?</b>\n\n"
+        "Their journeys come next, and picking one keeps the route and the "
+        "passenger - leaving the day and the seat."
+    )
+
+
+def build_whose_keyboard(people) -> dict:
+    rows = [
+        [button(f"👤  {who.label}", ferry_callback(FERRY_WHOSE, str(at)))]
+        for at, who in enumerate(people or ())
+    ]
+    rows.append(
+        [
+            button("🚤  New journey", ferry_callback(FERRY_RESTART)),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def their_trips_text(traveller, bookings) -> str:
+    """One person's journeys, to pick a route out of."""
+    who = escape_html(traveller.name)
+    if not bookings:
+        return (
+            f"👤 <b>{who}</b>\n\n"
+            "No journeys recorded for them yet. Book one and it appears here."
+        )
+    lines = [f"👤 <b>{who}</b>", ""]
+    for booking in bookings:
+        when = booked_on(booking.made)
+        lines.append(
+            f"<b>{escape_html(booking.label)}</b>\n"
+            f"    {when} · MVR {booking.fare:.0f}"
+        )
+    lines += [
+        "",
+        "Tap a journey to book it again for them. The route and the passenger "
+        "are kept; you pick the day and the seat.",
+    ]
+    return "\n".join(lines)
+
+
+def build_their_trips_keyboard(bookings) -> dict:
+    rows = [
+        [
+            button(
+                f"🔁  {booking.label}",
+                ferry_callback(FERRY_AGAIN, str(at)),
+                STYLE_PRIMARY,
+            )
+        ]
+        for at, booking in enumerate(bookings or ())
+    ]
+    rows.append(
+        [
+            button("‹  Someone else", ferry_callback(FERRY_WHOSE, "all")),
+            button("‹  Menu", CB_MENU),
+        ]
+    )
+    return {"inline_keyboard": rows}
+
+
+def preset_note(people) -> str:
+    """Said on the panels that no longer have to ask who is travelling."""
+    if not people:
+        return ""
+    named = ", ".join(escape_html(who.name) for who in people)
+    return f"\n👤 For <b>{named}</b>"
