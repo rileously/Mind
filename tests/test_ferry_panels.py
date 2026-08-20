@@ -214,3 +214,75 @@ class Panels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhyPaymentFailed(unittest.TestCase):
+    """RTL keeps its reason in whichever of three fields it feels like.
+
+    A refusal arrives as {"message": ..., "url": null, "dnrStatus": ...,
+    "dnrResponseList": ...}. Reading only "message" turned a refused identity
+    check into "RTL did not give a payment link", which told nobody anything.
+    """
+
+    def refusal(self, payload):
+        from mind.ferry_client import payment_refusal
+
+        return payment_refusal(payload)
+
+    def test_rtls_own_message_is_used_when_there_is_one(self):
+        self.assertEqual(
+            self.refusal({"message": "inbound.data.not.found", "url": None}),
+            "inbound.data.not.found",
+        )
+
+    def test_a_null_message_does_not_swallow_the_reason(self):
+        # The bug: None or "default" is the default, so a refusal with the
+        # reason in dnrStatus came back as the generic line.
+        said = self.refusal({"message": None, "url": None, "dnrStatus": 3})
+        self.assertNotEqual(said, "RTL did not give a payment link.")
+        self.assertIn("name", said.lower())
+
+    def test_a_verification_list_is_read_out(self):
+        said = self.refusal(
+            {
+                "message": None,
+                "url": None,
+                "dnrResponseList": [{"message": "name does not match"}],
+            }
+        )
+        self.assertIn("name does not match", said)
+
+    def test_a_list_of_plain_strings_works_too(self):
+        said = self.refusal({"url": None, "dnrResponseList": ["not verified"]})
+        self.assertIn("not verified", said)
+
+    def test_a_clean_refusal_with_nothing_in_it_still_says_something(self):
+        self.assertEqual(
+            self.refusal({"message": None, "url": None, "dnrStatus": 0}),
+            "RTL did not give a payment link.",
+        )
+
+    def test_a_link_is_still_a_link(self):
+        from mind.ferry_client import parse_payment
+
+        self.assertEqual(
+            parse_payment({"url": "https://bank.example/pay", "message": None}),
+            "https://bank.example/pay",
+        )
+
+    def test_the_passenger_is_named_when_the_check_failed(self):
+        from mind.telegram_ui import ferry_payment_failed_text
+
+        text = ferry_payment_failed_text(
+            "00000014BA9E",
+            "RTL could not verify the passenger's name against their ID number",
+            "Ali Shakir Hussain",
+        )
+        self.assertIn("Ali Shakir Hussain", text)
+        self.assertIn("letter for letter", text)
+
+    def test_an_unrelated_failure_does_not_blame_the_name(self):
+        from mind.telegram_ui import ferry_payment_failed_text
+
+        text = ferry_payment_failed_text("00000014BA9E", "booking.expired", "Ali")
+        self.assertNotIn("letter for letter", text)

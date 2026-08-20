@@ -850,7 +850,47 @@ def parse_payment(payload: dict) -> str:
     nested = payload.get("data")
     if isinstance(nested, dict):
         return parse_payment(nested)
-    raise FerryError(str(payload.get("message") or "RTL did not give a payment link."))
+    raise FerryError(payment_refusal(payload))
+
+
+def payment_refusal(payload: dict) -> str:
+    """Why there was no link, in RTL's own words wherever it kept them.
+
+    A refusal arrives as {"message": ..., "url": null, "dnrStatus": ...,
+    "dnrResponseList": ...}, and any of the three may carry the reason. The
+    identity check is the one that matters here: a name that does not match the
+    ID number it was sent with is refused there, with nothing in "message" at
+    all, which is how a perfectly good booking came back as "RTL did not give a
+    payment link" and left nobody any the wiser.
+    """
+    said = payload.get("message")
+    if isinstance(said, str) and said.strip():
+        return said.strip()
+
+    listed = payload.get("dnrResponseList")
+    if isinstance(listed, list) and listed:
+        reasons = []
+        for item in listed[:4]:
+            if isinstance(item, dict):
+                for key in ("message", "reason", "description", "status"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        reasons.append(value.strip())
+                        break
+            elif isinstance(item, str) and item.strip():
+                reasons.append(item.strip())
+        if reasons:
+            return "RTL could not verify the passenger: " + "; ".join(reasons)
+
+    status = payload.get("dnrStatus")
+    if isinstance(status, int) and status:
+        # Its own field, so it is its own kind of refusal: the name and the ID
+        # did not agree with the national register.
+        return (
+            f"RTL could not verify the passenger's name against their ID "
+            f"number (check {status}). The name has to match the ID exactly."
+        )
+    return "RTL did not give a payment link."
 
 
 def initiate_payment(body: dict, token: str = "", opener=None) -> str:

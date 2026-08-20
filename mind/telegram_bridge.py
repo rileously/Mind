@@ -3221,7 +3221,9 @@ class TelegramBridge(QObject):
         except FerryError as exc:
             self._send_panel(
                 client, chat_id, PANEL_FERRY,
-                ferry_payment_failed_text(booking, str(exc)),
+                ferry_payment_failed_text(
+                    booking, str(exc), ", ".join(w.name for w in people or ())
+                ),
                 build_ferry_again_keyboard(), html=True,
             )
             return

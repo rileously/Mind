@@ -1373,7 +1373,7 @@ def ferry_payment_text(
     return "\n".join(lines)
 
 
-def ferry_payment_failed_text(booking: str, reason: str) -> str:
+def ferry_payment_failed_text(booking: str, reason: str, who: str = "") -> str:
     """Why the payment link did not come, in a place it can be read.
 
     A refused payment is not a refused seat: the hold is still there, and
@@ -1386,6 +1386,15 @@ def ferry_payment_failed_text(booking: str, reason: str) -> str:
             "That is a refusal to serve the request rather than a problem with "
             "the booking. Paying needs a signed-in RTL session, and signing in "
             "needs the captcha on their login page - which Mind cannot do.",
+            "",
+        ]
+    if who and ("verify" in reason.lower() or "id" in reason.lower()):
+        # Named because this is where a misread letter shows up: RTL checks the
+        # name against the number, and one wrong character fails the check.
+        lines += [
+            f"Sent as: <b>{escape_html(who)}</b>",
+            "Check that against the card, letter for letter. If it is wrong, "
+            "start again and type it.",
             "",
         ]
     lines += [
