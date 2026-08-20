@@ -477,6 +477,127 @@ class FindingThePhoneAgain(unittest.TestCase):
         other = self.device("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
         self.assertEqual(rediscovered(entry, [other]), "")
 
+    def test_a_phone_listed_as_a_bare_address_is_recognised(self):
+        from mind.phone_watch import rediscovered
+
+        # Reconnected by address: the device list says "192.168.18.5:40839",
+        # which names no handset at all. mDNS is what ties that address back to
+        # a hardware serial, and without it this phone is watched for ever
+        # without ever being found.
+        entry = self.entry("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
+        services = [("adb-5C061VDCR0003N-dtKL0C", "192.168.18.5:40839")]
+        found = rediscovered(entry, [self.device("192.168.18.5:40839")], services)
+        self.assertEqual(found, "192.168.18.5:40839")
+
+    def test_another_phones_address_is_not_adopted(self):
+        from mind.phone_watch import rediscovered
+
+        entry = self.entry("adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp.")
+        services = [("adb-2B031JEGR06967-pfp4P2", "192.168.18.14:35183")]
+        self.assertEqual(
+            rediscovered(entry, [self.device("192.168.18.14:35183")], services), ""
+        )
+
+
+class TheSerialAnActionUses(unittest.TestCase):
+    """Which spelling of the serial the phone buttons actually hand to adb.
+
+    The saved one is a record of how the phone was reached once. Platform-tools
+    35 listed an mDNS device with the trailing dot of a fully qualified name and
+    37 lists it without, and neither accepts the other's spelling, so a serial
+    saved before an adb upgrade is refused afterwards - "device not found" for a
+    phone answering pings on the same network. The polling loop repairs it a
+    visit late, which is no help to a button pressed now.
+    """
+
+    def entry(self, serial="adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp."):
+        from mind.phone_watch import PhoneEntry
+
+        return PhoneEntry(
+            id="p1", serial=serial, label="Pixel 10", hardware="5C061VDCR0003N"
+        )
+
+    def test_adbs_own_spelling_wins_over_the_saved_one(self):
+        from mind.adb_client import AndroidDevice
+        from mind import phone_watch
+
+        undotted = "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp"
+        with unittest.mock.patch.object(
+            phone_watch, "attached", return_value=[AndroidDevice(undotted, "device")]
+        ):
+            self.assertEqual(phone_watch.reachable_serial(self.entry()), undotted)
+
+    def test_the_saved_serial_is_kept_when_adb_cannot_be_asked(self):
+        from mind.adb_client import AdbError
+        from mind import phone_watch
+
+        with unittest.mock.patch.object(
+            phone_watch, "attached", side_effect=AdbError("no adb")
+        ):
+            self.assertEqual(
+                phone_watch.reachable_serial(self.entry()), self.entry().serial
+            )
+
+    def test_a_silent_phone_on_a_bare_address_is_asked_who_it_is(self):
+        from mind.adb_client import AndroidDevice
+        from mind import phone_watch
+
+        # Connected, answering, advertising nothing: adb has it, so mDNS has
+        # gone quiet, and the address names no handset. Asking is all that is
+        # left.
+        devices = [AndroidDevice("192.168.18.8:44087", "device")]
+        with (
+            unittest.mock.patch.object(phone_watch, "attached", return_value=devices),
+            unittest.mock.patch.object(phone_watch, "mdns_services", return_value=[]),
+            unittest.mock.patch.object(
+                phone_watch.Phone, "hardware_serial", return_value="5C061VDCR0003N"
+            ),
+        ):
+            found = phone_watch.reachable_serial(self.entry())
+        self.assertEqual(found, "192.168.18.8:44087")
+
+    def test_a_phone_that_answers_with_another_serial_is_not_taken(self):
+        from mind.adb_client import AndroidDevice
+        from mind import phone_watch
+
+        devices = [AndroidDevice("192.168.18.9:41111", "device")]
+        with (
+            unittest.mock.patch.object(phone_watch, "attached", return_value=devices),
+            unittest.mock.patch.object(phone_watch, "mdns_services", return_value=[]),
+            unittest.mock.patch.object(
+                phone_watch.Phone, "hardware_serial", return_value="2B031JEGR06967"
+            ),
+        ):
+            found = phone_watch.reachable_serial(self.entry())
+        self.assertEqual(found, self.entry().serial)
+
+    def test_an_emulator_is_never_mistaken_for_the_phone(self):
+        from mind.adb_client import AndroidDevice
+        from mind.phone_watch import identified
+
+        asked = unittest.mock.Mock(return_value="5C061VDCR0003N")
+        with unittest.mock.patch("mind.phone_watch.Phone.hardware_serial", asked):
+            self.assertEqual(
+                identified(self.entry(), [AndroidDevice("emulator-5554", "device")]), ""
+            )
+        asked.assert_not_called()
+
+    def test_mdns_is_only_asked_when_the_device_list_falls_short(self):
+        from mind.adb_client import AndroidDevice
+        from mind import phone_watch
+
+        undotted = "adb-5C061VDCR0003N-dtKL0C._adb-tls-connect._tcp"
+        with (
+            unittest.mock.patch.object(
+                phone_watch,
+                "attached",
+                return_value=[AndroidDevice(undotted, "device")],
+            ),
+            unittest.mock.patch.object(phone_watch, "mdns_services") as services,
+        ):
+            phone_watch.reachable_serial(self.entry())
+            services.assert_not_called()
+
 
 MDNS = """List of discovered mdns services
 adb-2B031JEGR06967-pfp4P2   _adb-tls-connect._tcp.   192.168.18.14:35183

@@ -80,7 +80,7 @@ class PhoneStatus:
         return bool(self.trouble)
 
 
-def rediscovered(entry: PhoneEntry, devices: list) -> str:
+def rediscovered(entry: PhoneEntry, devices: list, services: list | None = None) -> str:
     """The serial adb is using for this phone now, if it differs from ours.
 
     Wireless debugging hands out a new port whenever it comes back, and adb
@@ -92,6 +92,12 @@ def rediscovered(entry: PhoneEntry, devices: list) -> str:
     The hardware serial is what makes this safe: it is stamped into the mDNS
     name and does not change, so the phone is matched by what it is rather than
     by how it is currently addressed.
+
+    A phone that was reconnected by address is the one case the serial cannot
+    answer for: adb lists it as "192.168.1.8:44087", which says nothing about
+    which handset it is. mDNS advertises the hardware serial alongside the
+    address it is currently reachable on, so the two are put together and the
+    phone is recognised anyway.
     """
     for device in devices:
         if not getattr(device, "ready", True):
@@ -101,6 +107,42 @@ def rediscovered(entry: PhoneEntry, devices: list) -> str:
         found = hardware_from_serial(device.serial)
         if found and entry.hardware and found == entry.hardware:
             return device.serial
+    address = advertised(entry, services or [])
+    if address:
+        for device in devices:
+            if not getattr(device, "ready", True):
+                continue
+            if device.serial == address:
+                return device.serial
+    return ""
+
+
+def identified(entry: PhoneEntry, devices: list) -> str:
+    """The phone found by asking each unnamed device what handset it is.
+
+    A phone reconnected by address is listed as that address and nothing else,
+    and mDNS ties the two together only while it is still advertising - which
+    it stops doing once adb has it. That leaves a phone that is connected,
+    answering, and unrecognisable, which is the state it stays in for ever
+    because nothing else in here can name it.
+
+    So the handset is asked. One shell call per device that carries no serial
+    of its own, and only after everything cheaper has come up empty.
+    """
+    if not entry.hardware:
+        return ""
+    for device in devices:
+        if not getattr(device, "ready", True):
+            continue
+        # Anything already carrying a serial has been ruled out by the caller,
+        # and an emulator is never the phone somebody paired.
+        if hardware_from_serial(device.serial) or device.serial.startswith("emulator-"):
+            continue
+        try:
+            if Phone(serial=device.serial).hardware_serial() == entry.hardware:
+                return device.serial
+        except AdbError:
+            continue
     return ""
 
 
@@ -222,11 +264,16 @@ def next_id(entries: list[PhoneEntry]) -> str:
 def same_serial(one: str, other: str) -> bool:
     """Whether two serials name the same phone.
 
-    adb lists an mDNS device with a trailing dot - the root label every fully
-    qualified name ends in - and will not accept the name without it. A serial
-    saved without that dot therefore looks different from the one adb reports
-    and is refused when it is used, which reads as "device not found" for a
-    phone sitting on the same network answering pings.
+    An mDNS name may or may not carry the trailing dot that every fully
+    qualified name ends in, and which of the two adb prints is a matter of
+    which adb is installed: platform-tools 35 listed the dot, 37 does not.
+    Neither accepts the spelling it does not use, so a serial saved by one and
+    handed to the other is refused - "device not found" for a phone sitting on
+    the same network answering pings.
+
+    Compared without the dot so the two spellings recognise each other. Which
+    one is actually handed to adb is decided by asking it, in ``rediscovered``,
+    rather than by trusting whatever happened to be written down.
     """
     return (one or "").rstrip(".") == (other or "").rstrip(".") and bool(one or other)
 
@@ -264,13 +311,46 @@ def merge_phone(entries: list[PhoneEntry], found: PhoneEntry) -> list[PhoneEntry
     return updated
 
 
+def reachable_serial(entry: PhoneEntry) -> str:
+    """The serial adb will accept for this phone now, not the one on file.
+
+    The saved serial is a record of how the phone was reached once. It goes
+    stale on its own - a new port after every reconnection, a different
+    spelling after an adb upgrade - and the polling loop only repairs it on the
+    visit after a phone has already been reported away. Every button on the
+    phone page acts through here, so a phone answering perfectly well would
+    still refuse to be dialled until the watcher happened to catch up.
+
+    Asked of adb instead, and the saved serial kept only for when adb cannot be
+    reached at all - a wrong answer then is no worse than the certain failure
+    of not having one.
+    """
+    try:
+        devices = attached()
+    except AdbError:
+        return entry.serial
+    found = rediscovered(entry, devices)
+    if found:
+        return found
+    # Only when the device list could not place it: a phone reconnected by
+    # address needs mDNS to say which handset that address is, and that is a
+    # second call to adb worth making only when the first came up short.
+    try:
+        found = rediscovered(entry, devices, mdns_services())
+    except AdbError:
+        found = ""
+    if not found:
+        found = identified(entry, devices)
+    return found or entry.serial
+
+
 def phone_for(store: ConfigStore, phone_id: str = "") -> Phone:
     """The phone to act on: the one named, or the one calls are placed from."""
     entries = configured_phones(store)
     if phone_id:
         for entry in entries:
             if entry.id == phone_id:
-                return Phone(serial=entry.serial)
+                return Phone(serial=reachable_serial(entry))
     serial = str(store.load().get("phone_serial", "")).strip()
     # Only if it is still one of the configured phones. It is written when a
     # handset is chosen and not cleared when that handset is reached a
@@ -278,8 +358,8 @@ def phone_for(store: ConfigStore, phone_id: str = "") -> Phone:
     # stopped existing several reconnections ago.
     for entry in entries:
         if same_serial(entry.serial, serial):
-            return Phone(serial=entry.serial)
-    return Phone(serial=entries[0].serial if entries else "")
+            return Phone(serial=reachable_serial(entry))
+    return Phone(serial=reachable_serial(entries[0]) if entries else "")
 
 
 class ContactLookup(QObject):
@@ -338,10 +418,16 @@ class PhonePoll(QObject):
 
     def _again(self, status: PhoneStatus, devices: list) -> PhoneStatus:
         """Try the phone once more, under the serial adb is using for it."""
-        serial = rediscovered(status.entry, devices)
-        # Compared exactly, not with same_serial: a trailing dot is the whole
-        # difference in the case this exists to fix, and adb refuses the name
-        # without it.
+        try:
+            services = mdns_services()
+        except AdbError:
+            services = []
+        serial = rediscovered(status.entry, devices, services) or identified(
+            status.entry, devices
+        )
+        # Compared exactly, not with same_serial: the difference between the
+        # saved spelling and adb's own is the whole of what this repairs, and
+        # same_serial is deliberately blind to it.
         if serial and serial != status.entry.serial:
             fresh = self._visit(replace(status.entry, serial=serial))
             if not fresh.away:
