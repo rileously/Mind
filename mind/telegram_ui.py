@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from .telegram_client import MAX_COPY_TEXT_CHARS, escape_html
 from .telegram_routing import remote_safe_commands
@@ -1020,10 +1021,19 @@ def sailings_text(origin: str, destination: str, when: str, sailings: list, rout
             seats = "full"
         else:
             seats = f"{sail.seats_free} of {sail.seats_total} seats"
-        stops = "direct" if not sail.stops else f"{sail.stops} stop{'s' if sail.stops > 1 else ''}"
+        if sail.changes:
+            # A journey that changes boats is a different proposition from a
+            # direct one at the same hour, and the list is where that is
+            # decided rather than three panels later.
+            shape = f"{sail.changes} change{'s' if sail.changes != 1 else ''}"
+        elif sail.stops:
+            shape = f"{sail.stops} stop{'s' if sail.stops > 1 else ''}"
+        else:
+            shape = "direct"
         lines.append(
-            f"<b>{sail.departs_at} → {sail.arrives_at}</b>  ·  {seats}\n"
-            f"    {sail.route} · {stops} · MVR {sail.fare:.0f}"
+            f"<b>{sail.departs_at} → {sail.arrives_at}</b>  ·  "
+            f"{journey_length(sail)}\n"
+            f"    {sail.route} · {shape} · {seats} · MVR {sail.fare:.0f}"
         )
     if len(sailings) > 8:
         lines.append(f"…and {len(sailings) - 8} more.")
@@ -1206,19 +1216,31 @@ def seat_held_text(
     left: int | None = None,
 ) -> str:
     """The booking to carry to RTL, the time left on it, and that it is unpaid."""
-    plural = "s" if "," in str(seat) else ""
+    held = seat_groups_of(seat)
+    plural = "s" if sum(len(group) for group in held) != 1 else ""
+    changes = (
+        f" · {sail.changes} boat change{'s' if sail.changes != 1 else ''}"
+        if getattr(sail, "changes", 0)
+        else " · direct"
+    )
     lines = [
-        f"✅ Seat{plural} <b>{seat}</b> held.",
+        f"✅ Seat{plural} <b>{spell_seats(seat)}</b> held.",
         "",
         f"🚤 <b>{origin}</b> → <b>{destination}</b>",
-        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · {sail.route} · MVR {sail.fare:.0f}",
+        f"<b>{sail.departs_at} → {sail.arrives_at}</b> · "
+        f"{journey_length(sail)}{changes}",
         "",
-        f"Booking <code>{booking}</code>",
+    ]
+    lines += itinerary_lines(sail, seat_groups_of(seat))
+    lines += [
+        "",
+        fare_line(sail, passengers_in(seat)),
+        f"🎟 Booking <code>{booking}</code>",
         "",
     ]
     if left is not None:
         lines += [
-            f"<b>{countdown(left)}</b> to pay before the seats go back on sale.",
+            f"⏱ <b>{countdown(left)}</b> to pay before the seats go back on sale.",
             "",
         ]
     lines.append(
@@ -1226,6 +1248,45 @@ def seat_held_text(
         "then gives you a bank page."
     )
     return chr(10).join(lines)
+
+
+def seat_groups_of(seat) -> list:
+    """The seats as they were picked, from however they were passed in.
+
+    They arrive as a string on the way back off a button ("3,4;7,8"), as a
+    list of lists from the picker, and as a bare number from the one-seat
+    path. All three mean the same thing to a panel.
+    """
+    if isinstance(seat, (list, tuple)):
+        if seat and isinstance(seat[0], (list, tuple)):
+            return [list(group) for group in seat]
+        return [list(seat)]
+    text = str(seat).strip()
+    if not text:
+        return []
+    return [[part.strip() for part in boat.split(",") if part.strip()]
+            for boat in text.split(";") if boat.strip()]
+
+
+def spell_seats(seat) -> str:
+    """Seat numbers for a person to read rather than for a button to carry.
+
+    The wire form separates boats with a semicolon, which is not something to
+    show anybody: a journey changing boats reads as its seats in order, and
+    which seat is on which boat is said again beside each boat below.
+    """
+    groups = seat_groups_of(seat)
+    if not groups:
+        return ""
+    if len(groups) == 1:
+        return ", ".join(str(n) for n in groups[0])
+    return " · ".join(", ".join(str(n) for n in group) for group in groups)
+
+
+def passengers_in(seat) -> int:
+    """How many people, which is the seats on one boat rather than every seat."""
+    groups = seat_groups_of(seat)
+    return max(1, len(groups[0])) if groups else 1
 
 
 FERRY_PAY = "y"
@@ -1281,20 +1342,26 @@ def ferry_payment_text(
     there looks like the wrong ticket at exactly the moment somebody is about
     to pay for it.
     """
+    riders = passengers_in(seat)
     lines = [
-        f"💳 <b>{who}</b> · seat <b>{seat}</b>",
-        f"{sail.departs_at} → {sail.arrives_at} · {sail.route} · "
-        f"<b>MVR {(sail.fare if total is None else total):.0f}</b>",
+        f"💳 <b>{who}</b>",
+        "",
+        f"<b>➤ Going</b> · {sail.departs_at} → {sail.arrives_at} · "
+        f"{journey_length(sail)}",
     ]
+    lines += itinerary_lines(sail, seat_groups_of(seat))
     if back_sail is not None:
-        many = back_seats or []
-        if many and isinstance(many[0], (list, tuple)):
-            coming = " / ".join(", ".join(str(n) for n in g) for g in many)
-        else:
-            coming = ", ".join(str(n) for n in many)
-        lines.append(f"Back {back_sail.departs_at} → {back_sail.arrives_at} · seats {coming}")
+        lines += [
+            "",
+            f"<b>➤ Coming back</b> · {back_sail.departs_at} → "
+            f"{back_sail.arrives_at} · {journey_length(back_sail)}",
+        ]
+        lines += itinerary_lines(back_sail, seat_groups_of(back_seats))
+    due = float(sail.fare) * riders if total is None else float(total)
     lines += [
-        f"Booking <code>{booking}</code>",
+        "",
+        fare_line(sail, riders, total=due),
+        f"🎟 Booking <code>{booking}</code>",
         "",
         f'<a href="{link}">Pay on RTL\'s bank page</a>',
         "",
@@ -1546,19 +1613,30 @@ def build_back_sailings_keyboard(sailings: list) -> dict:
 
 def return_summary(out_sail, out_seats, back_sail, back_seats) -> str:
     """Both directions, before anything is held."""
-    def listed(groups):
-        many = groups if groups and isinstance(groups[0], (list, tuple)) else [groups]
-        return " / ".join(", ".join(str(n) for n in group) for group in many)
-
-    there, home = listed(out_seats), listed(back_seats)
-    return (
-        f"⇄ <b>Return</b>\n\n"
-        f"There  <b>{out_sail.departs_at} → {out_sail.arrives_at}</b> · seats {there}\n"
-        f"Back  <b>{back_sail.departs_at} → {back_sail.arrives_at}</b> · seats {home}\n\n"
-        f"<b>MVR {back_sail.fare:.0f}</b> for the return.\n\n"
+    riders = passengers_in(out_seats)
+    lines = [
+        "⇄ <b>Return</b>",
+        "",
+        f"<b>➤ Going</b> · {out_sail.departs_at} → {out_sail.arrives_at} · "
+        f"{journey_length(out_sail)}",
+    ]
+    lines += itinerary_lines(out_sail, seat_groups_of(out_seats))
+    lines += [
+        "",
+        f"<b>➤ Coming back</b> · {back_sail.departs_at} → "
+        f"{back_sail.arrives_at} · {journey_length(back_sail)}",
+    ]
+    lines += itinerary_lines(back_sail, seat_groups_of(back_seats))
+    # RTL prices a return as a pair rather than two fares, so the second
+    # search's figure is the whole thing and is never added to the first.
+    lines += [
+        "",
+        fare_line(back_sail, riders, total=float(back_sail.fare) * riders),
+        "",
         "Holding takes these seats off both boats until paid for or the hold "
-        "runs out. Mind cannot pay: that needs your card."
-    )
+        "runs out. Mind cannot pay: that needs your card.",
+    ]
+    return "\n".join(lines)
 
 
 def build_return_hold_keyboard(out_seats, back_seats) -> dict:
@@ -1602,20 +1680,105 @@ def leg_seats_text(leg, at: int, total: int, wanted: int, picked) -> str:
     )
 
 
+def minutes_between(start: str, end: str) -> int:
+    """Minutes from one yyyymmddHHMMSS stamp to another.
+
+    Zero when either is unreadable, so a missing time costs a duration rather
+    than the whole panel it was going into.
+    """
+    fmt = "%Y%m%d%H%M%S"
+    try:
+        began = datetime.strptime(str(start)[:14], fmt)
+        ended = datetime.strptime(str(end)[:14], fmt)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int((ended - began).total_seconds() // 60))
+
+
+def spell_minutes(total: int) -> str:
+    """A length of time the way a timetable says it: "50m", "4h 55m"."""
+    total = max(0, int(total))
+    hours, minutes = divmod(total, 60)
+    if not hours:
+        return f"{minutes}m"
+    if not minutes:
+        return f"{hours}h"
+    return f"{hours}h {minutes}m"
+
+
+def journey_length(sail) -> str:
+    """Door to door, waits included, which is what a day out actually costs."""
+    return spell_minutes(minutes_between(sail.first.departs, sail.last.arrives))
+
+
+def fare_line(sail, passengers: int = 1, total: float | None = None) -> str:
+    """What it costs, and how that number was arrived at.
+
+    A fare multiplied by three is the one figure people check, so the working
+    is shown rather than only the answer.
+    """
+    count = max(1, int(passengers))
+    due = float(sail.fare) * count if total is None else float(total)
+    if count == 1:
+        return f"💰 <b>MVR {due:.0f}</b>"
+    # Divided out of the total rather than read off the sailing, because a
+    # return is priced as a pair and the outbound fare is not half of it.
+    return f"💰 <b>MVR {due:.0f}</b>  ·  MVR {due / count:.0f} × {count} passengers"
+
+
+def itinerary_lines(sail, groups=()) -> list[str]:
+    """Every boat on the journey, with the wait between them.
+
+    Written the way the printed ticket reads, because that is what somebody
+    compares it against at the jetty: each boat on its own, and the gap
+    between two of them named rather than left to be worked out from the
+    times. A five minute change and a five hour one look identical otherwise,
+    and only one of them is worth knowing about before paying.
+    """
+    picked = list(groups or ())
+    lines: list[str] = []
+    for at, leg in enumerate(sail.legs):
+        seats = picked[at] if at < len(picked) else ()
+        # On a single-boat journey the panel above already gave the length, and
+        # saying it twice in three lines reads as two different numbers.
+        riding = (
+            spell_minutes(minutes_between(leg.departs, leg.arrives))
+            if len(sail.legs) > 1
+            else ""
+        )
+        detail = [leg.route or leg.boat, riding]
+        if seats:
+            many = "s" if len(list(seats)) != 1 else ""
+            detail.append(f"seat{many} {', '.join(str(n) for n in seats)}")
+        lines.append(
+            f"<b>{leg.departs_at}</b> {leg.from_name} → "
+            f"<b>{leg.arrives_at}</b> {leg.to_name}"
+        )
+        lines.append(f"      {' · '.join(part for part in detail if part)}")
+        if at + 1 < len(sail.legs):
+            following = sail.legs[at + 1]
+            waiting = minutes_between(leg.arrives, following.departs)
+            lines.append(f"⏳ {spell_minutes(waiting)} in {leg.to_name}")
+    return lines
+
+
 def journey_summary(sail, groups) -> str:
     """Every boat and the seats picked on it, before anything is held."""
-    lines = [f"🚤 <b>{sail.departs_at} → {sail.arrives_at}</b> · MVR {sail.fare:.0f}"]
-    if sail.changes:
-        lines.append(
-            f"{sail.changes} boat change{'s' if sail.changes != 1 else ''} on the way."
-        )
-    lines.append("")
-    for leg, group in zip(sail.legs, groups):
-        seats = ", ".join(str(n) for n in group)
-        lines.append(
-            f"<b>{leg.departs_at}</b> {leg.from_name} → {leg.to_name} · seats {seats}"
-        )
+    passengers = len(list(groups[0])) if groups else 1
+    changes = (
+        f" · {sail.changes} boat change{'s' if sail.changes != 1 else ''}"
+        if sail.changes
+        else " · direct"
+    )
+    lines = [
+        f"🚤 <b>{sail.departs_at} → {sail.arrives_at}</b>",
+        f"{journey_length(sail)}{changes}",
+        "",
+    ]
+    lines += itinerary_lines(sail, groups)
     lines += [
+        "",
+        fare_line(sail, passengers),
         "",
         "Holding takes these seats off every boat until paid for or the hold "
         "runs out. Mind cannot pay: that needs your card.",
