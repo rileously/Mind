@@ -229,6 +229,30 @@ class ThePanel(unittest.TestCase):
         self.assertFalse(any("Use this" in label for label in labels))
         self.assertTrue(any("Type it instead" in label for label in labels))
 
+    def test_a_reading_on_its_own_says_it_would_have_worked(self):
+        from mind.telegram_ui import card_reading_text
+
+        card = Card(name="Azaan Bin Ahmed Aslam", number="A433093", born="18/07/2015")
+        text = card_reading_text(card)
+        self.assertIn("Azaan Bin Ahmed Aslam", text)
+        self.assertIn("A433093", text)
+        # The point of testing outside a booking: nothing happened.
+        self.assertIn("Nothing was booked", text)
+
+    def test_a_failed_reading_on_its_own_says_what_to_try(self):
+        from mind.telegram_ui import card_reading_text
+
+        text = card_reading_text(Card())
+        self.assertIn("could not be read", text)
+        self.assertIn("flat", text)
+
+    def test_a_half_reading_on_its_own_shows_the_half(self):
+        from mind.telegram_ui import card_reading_text
+
+        text = card_reading_text(Card(number="A433093"))
+        self.assertIn("A433093", text)
+        self.assertIn("could not be read", text)
+
     def test_the_shortcut_is_mentioned_where_typing_is_asked_for(self):
         from mind.telegram_ui import ask_who_text
 
@@ -238,3 +262,63 @@ class ThePanel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealCards(unittest.TestCase):
+    """Layouts seen from actual photographs, not imagined ones.
+
+    The first version of the parser read the number off a real card and lost
+    the name, because a label landed between the two and the run of words was
+    stopped there rather than restarted after it.
+    """
+
+    def test_a_label_between_the_number_and_the_name(self):
+        text = (
+            "REPUBLIC OF MALDIVES NATIONAL IDENTITY CARD Number: Name Sex "
+            "Address A229095 Date of Birth Aishath Adam 06/08/1965 F "
+            "Muniyaage HDh. Naivaadhoo"
+        )
+        card = parse_card(text)
+        self.assertEqual(card.name, "Aishath Adam")
+        self.assertEqual(card.number, "A229095")
+        self.assertEqual(card.born, "06/08/1965")
+
+    def test_a_name_recognised_before_the_number(self):
+        text = (
+            "REPUBLIC OF MALDIVES NATIONAL IDENTITY CARD Name Aishath Adam "
+            "Number A229095 Date of Birth 06/08/1965"
+        )
+        self.assertEqual(parse_card(text).name, "Aishath Adam")
+
+    def test_a_label_is_never_read_as_a_name(self):
+        # "Date of Birth" is three capitalised words in a row, and "Date of"
+        # was being taken as somebody's name.
+        from mind.id_card import name_runs
+
+        self.assertNotIn("Date of", name_runs("A229095 Date of Birth 06/08/1965"))
+
+    def test_the_address_is_not_preferred_over_the_name(self):
+        text = "A229095 Aishath Adam 06/08/1965 F Muniyaage HDh. Naivaadhoo"
+        self.assertEqual(parse_card(text).name, "Aishath Adam")
+
+    def test_a_two_word_name_is_enough(self):
+        self.assertEqual(parse_card("Number A229095 Aishath Adam").name, "Aishath Adam")
+
+
+class Diagnosing(unittest.TestCase):
+    def test_a_failed_reading_shows_what_ocr_saw(self):
+        from mind.telegram_ui import card_reading_text
+
+        text = card_reading_text(Card(number="A229095"), "MALDIVES Number A229095")
+        self.assertIn("What it saw", text)
+        self.assertIn("MALDIVES Number A229095", text)
+
+    def test_a_long_reading_is_cut_rather_than_sent_whole(self):
+        from mind.telegram_ui import raw_reading
+
+        self.assertLess(len(raw_reading("x " * 2000)), 900)
+
+    def test_nothing_seen_adds_nothing(self):
+        from mind.telegram_ui import raw_reading
+
+        self.assertEqual(raw_reading(""), "")

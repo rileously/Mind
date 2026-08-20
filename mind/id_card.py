@@ -51,6 +51,15 @@ FURNITURE = (
     "valid",
 )
 
+# The same printing broken into single words, because a run of words is
+# scanned one at a time and "Date of Birth" arrives as three of them. Without
+# this, "Date of" is two capitalised words in a row and reads as a name.
+FURNITURE_WORDS = frozenset(
+    "republic of maldives national identity card number name date birth sex "
+    "address male female permanent signature issued expiry valid dob "
+    "sign holder authority".split()
+)
+
 # What a name is allowed to be made of. Apostrophes and hyphens occur; digits
 # do not, and a line containing one is a date or an address.
 NAME_OK = re.compile(r"^[A-Za-z][A-Za-z .'-]{3,59}$")
@@ -152,7 +161,11 @@ def find_name(text: str) -> str:
     for line in lines:
         if looks_like_a_name(line):
             return line.strip().strip(":.")
-    return ""
+    # Last resort: the first run of plain words anywhere on the card. The name
+    # is printed above the address, so on a card whose number was recognised
+    # after its name this still finds the person rather than their house.
+    runs = name_runs(text)
+    return runs[0] if runs else ""
 
 
 def name_after_number(text: str) -> str:
@@ -167,22 +180,48 @@ def name_after_number(text: str) -> str:
     match = NUMBER.search(text or "")
     if not match or not tidy_number(match.group(1), match.group(2)):
         return ""
+    runs = name_runs(text[match.end():])
+    return runs[0] if runs else ""
+
+
+def name_runs(text: str) -> list:
+    """Every stretch of words that could be somebody's name.
+
+    A run ends at anything with a digit in it, and a label inside the values
+    breaks one run and starts another rather than ending the search - which is
+    the whole point. The order the recogniser emits a card's values in varies
+    with the layout, and on some cards "Date of Birth" lands between the number
+    and the name. Stopping there found nothing at all.
+    """
+    runs: list[str] = []
     words: list[str] = []
-    for word in (text[match.end():] or "").split():
-        cleaned = word.strip(",;:")
-        if any(character.isdigit() for character in cleaned):
-            break
-        if is_furniture(cleaned):
-            # A label that landed among the values. Stop rather than absorb it.
-            break
-        if not re.match(r"^[A-Za-z][A-Za-z.'-]*$", cleaned):
-            break
-        words.append(cleaned)
+
+    def keep():
+        if len(words) >= 2:
+            runs.append(" ".join(words))
+
+    for raw in (text or "").replace("\n", " ").split():
+        word = raw.strip(",;:.")
+        if not word:
+            continue
+        if any(character.isdigit() for character in word):
+            keep()
+            words = []
+            continue
+        if word.lower() in FURNITURE_WORDS:
+            keep()
+            words = []
+            continue
+        if not re.match(r"^[A-Za-z][A-Za-z'-]*$", word):
+            keep()
+            words = []
+            continue
+        words.append(word)
         if len(words) >= 5:
-            break
-    if len(words) < 2:
-        return ""
-    return " ".join(words)
+            keep()
+            words = []
+    keep()
+    return runs
 
 
 def parse_card(text: str) -> Card:

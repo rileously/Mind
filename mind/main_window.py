@@ -3652,13 +3652,17 @@ class MindWindow(QMainWindow):
                 # Read at four turns: a card photographed on a table is
                 # sideways as often as not, and OCR reads sideways as nothing.
                 try:
-                    card = best_card(extract_text_at_turns(image))
+                    readings = list(extract_text_at_turns(image))
                 except OcrError as exc:
                     self.telegram.send_text(
                         chat_id, f"Mind could not read that card: {exc}"
                     )
                     return
-                self.telegram.ferry_card_read(chat_id, card)
+                card = best_card(readings)
+                # The longest reading is the turn that saw most of the card,
+                # which is the one worth showing when the parse came up short.
+                fullest = max(readings, key=len) if readings else ""
+                self.telegram.ferry_card_read(chat_id, card, fullest)
                 return
             try:
                 extracted = extract_text_from_image(image)

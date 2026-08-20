@@ -171,6 +171,7 @@ from .telegram_ui import (
     FERRY_AGAIN,
     FERRY_CARD,
     card_text,
+    card_reading_text,
     build_card_keyboard,
     card_hint_text,
     ferry_home_text,
@@ -1260,6 +1261,9 @@ class TelegramBridge(QObject):
                 self._handle_ferry(client, chat_id, request.text)
             else:
                 self._send_ferry_panel(client, chat_id, config)
+            return
+        if trigger in {"card", "id", "idcard"}:
+            self._await_card(client, chat_id)
             return
         if trigger in {"watch", "watchers", "alerts"}:
             self._send_watcher_panel(client, chat_id, config)
@@ -2982,6 +2986,28 @@ class TelegramBridge(QObject):
 
     # -- reading a passenger off a photographed card ----------------------
 
+    def _await_card(self, client: TelegramClient, chat_id: int) -> None:
+        """Read a card on its own, outside a booking.
+
+        The reading is the part worth checking before trusting it with a
+        ticket, and checking it inside a booking means holding seats off a
+        boat first. So it can be done here, against a card in hand, with
+        nothing reserved and nothing owed.
+        """
+        state = self._ferry_pick.get(chat_id) or {}
+        state["card_only"] = True
+        self._ferry_pick[chat_id] = state
+        self._send_panel(
+            client, chat_id, PANEL_FERRY,
+            "🪪 <b>Send a photo of the identity card.</b>\n\n"
+            "The name and number are read on this PC and shown back here. "
+            "Nothing is booked and nothing is saved - this is only to see "
+            "what Mind makes of the card.\n\n"
+            "<i>A photo taken at an angle or in shadow reads worst; flat, "
+            "filling the frame, in daylight reads best. Sideways is fine.</i>",
+            build_ferry_again_keyboard(), html=True,
+        )
+
     def ferry_wants_card(self, chat_id: int) -> bool:
         """Whether a photo arriving now is an identity card rather than an image.
 
@@ -2989,17 +3015,28 @@ class TelegramBridge(QObject):
         moment is still just a photo to run OCR over and hand back.
         """
         state = self._ferry_pick.get(int(chat_id)) or {}
-        return bool(state.get("awaiting_passenger"))
+        return bool(state.get("awaiting_passenger") or state.get("card_only"))
 
-    def ferry_card_read(self, chat_id: int, card) -> None:
+    def ferry_card_read(self, chat_id: int, card, reading: str = "") -> None:
         """Show what was read off a card, for somebody to check."""
         client = self._client
         if client is None:
             return
         chat_id = int(chat_id)
         state = self._ferry_pick.get(chat_id) or {}
+        if state.get("card_only") and not state.get("awaiting_passenger"):
+            # A reading asked for on its own. Shown and then forgotten: there
+            # is no booking to attach it to and nothing was saved.
+            state.pop("card_only", None)
+            self._ferry_pick[chat_id] = state
+            self._send_panel(
+                client, chat_id, PANEL_FERRY,
+                card_reading_text(card, reading), build_ferry_again_keyboard(), html=True,
+            )
+            return
         if not state.get("awaiting_passenger"):
             return
+        state.pop("card_only", None)
         needed = self._ferry_needed(state)
         already = list(state.get("card_people") or [])
         state["card_pending"] = card

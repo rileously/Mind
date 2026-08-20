@@ -729,6 +729,7 @@ BUILT_IN_COMMANDS: tuple[tuple[str, str, str | None], ...] = (
     ("abort", "Call off a shutdown", "telegram_power_enabled"),
     ("hotspot", "Share this PC's Wi-Fi", "telegram_hotspot_enabled"),
     ("ferry", "Which RTL boats go from one island to another", None),
+    ("card", "Read a passenger off a photographed ID card", None),
 )
 
 # Telegram's own limit, and it rejects the whole list if it is exceeded.
@@ -2239,3 +2240,57 @@ def card_hint_text() -> str:
         "📷 <i>Or photograph the identity card and send it here - Mind reads "
         "the name and number off it.</i>"
     )
+
+
+def card_reading_text(card, reading: str = "") -> str:
+    """A card read on its own, to see whether the reading is any good.
+
+    Says what it would have used rather than what it found, because that is
+    the question being asked: not "did OCR see something" but "would this have
+    put the right person on a ticket".
+    """
+    if not card.usable:
+        got = []
+        if card.name:
+            got.append(f"Name: <b>{escape_html(card.name)}</b>")
+        if card.number:
+            got.append(f"ID: <b>{escape_html(card.number)}</b>")
+        found = ("Only this came out:\n" + "\n".join(got) + "\n\n") if got else ""
+        return (
+            "🪪 <b>That card could not be read.</b>\n\n" + found +
+            "A booking would have asked you to type it. Worth another go with "
+            "the card flat, filling the frame, out of shadow - the reading is "
+            "done four ways round, so the angle matters more than which way up "
+            "it is."
+        ) + raw_reading(reading)
+    lines = [
+        "🪪 <b>Read, and it would have worked.</b>",
+        "",
+        f"👤 <b>{escape_html(card.name)}</b>",
+        f"🆔 <code>{escape_html(card.number)}</code>",
+    ]
+    if card.born:
+        lines.append(f"🎂 {escape_html(card.born)}")
+    lines += [
+        "",
+        "Check it against the card. In a booking this is what would go on the "
+        "ticket, after you confirmed it.",
+        "",
+        "<i>Nothing was booked and nothing was saved.</i>",
+    ]
+    return "\n".join(lines)
+
+
+def raw_reading(reading: str, limit: int = 600) -> str:
+    """What the recogniser actually saw, when what it saw was not enough.
+
+    Shown only on a reading that failed, and only from /card, which exists to
+    be tested against a card in hand. A card that reads correctly does not need
+    its own OCR output quoted back at it.
+    """
+    text = " ".join((reading or "").split())
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit] + " ..."
+    return f"{chr(10)}{chr(10)}<i>What it saw:</i>{chr(10)}<code>{escape_html(text)}</code>"
