@@ -844,3 +844,60 @@ class AJourneyThatChangesBoats(unittest.TestCase):
         self.assertEqual(len(body["inbound"]), 3)
         seats = [b["selectedSeats"][0]["seatNumber"] for b in body["inbound"]]
         self.assertEqual(seats, [1, 4, 6])
+
+
+class WhichDay(unittest.TestCase):
+    """Choosing when to travel, not only today."""
+
+    def when(self):
+        # A Thursday, so the labels below are predictable.
+        return time.mktime((2026, 8, 20, 9, 0, 0, 0, 0, -1))
+
+    def test_the_first_two_are_named_rather_than_dated(self):
+        from mind.telegram_ui import days_ahead
+
+        days = days_ahead(now=self.when())
+        self.assertEqual([d[1] for d in days[:2]], ["Today", "Tomorrow"])
+
+    def test_the_rest_carry_their_weekday(self):
+        from mind.telegram_ui import days_ahead
+
+        self.assertEqual(days_ahead(now=self.when())[2][1], "Sat 22")
+
+    def test_the_stamps_are_what_rtl_takes(self):
+        from mind.telegram_ui import days_ahead
+
+        stamps = [d[0] for d in days_ahead(now=self.when())]
+        self.assertEqual(stamps[0], "20260820")
+        self.assertEqual(stamps[3], "20260823")
+        self.assertTrue(all(len(s) == 8 and s.isdigit() for s in stamps))
+
+    def test_a_day_crossing_a_month_still_counts_forward(self):
+        from mind.telegram_ui import days_ahead
+
+        end = time.mktime((2026, 8, 30, 9, 0, 0, 0, 0, -1))
+        self.assertEqual(days_ahead(now=end, count=4)[3][0], "20260902")
+
+    def test_today_is_written_as_today_wherever_it_is_read_back(self):
+        from mind.telegram_ui import day_label, days_ahead
+
+        stamp = days_ahead(now=self.when())[0][0]
+        self.assertEqual(day_label(stamp, now=self.when()), "Today")
+
+    def test_a_further_day_is_written_out(self):
+        from mind.telegram_ui import day_label
+
+        self.assertEqual(day_label("20260823", now=self.when()), "Sun 23 August")
+
+    def test_nonsense_is_given_back_rather_than_crashing(self):
+        from mind.telegram_ui import day_label
+
+        self.assertEqual(day_label("not-a-date"), "not-a-date")
+
+    def test_every_day_offered_has_a_button(self):
+        from mind.telegram_ui import build_date_keyboard, days_ahead
+
+        rows = build_date_keyboard(now=self.when())["inline_keyboard"]
+        labels = [b["text"] for row in rows for b in row]
+        for _stamp, label in days_ahead(now=self.when()):
+            self.assertIn(label, labels)

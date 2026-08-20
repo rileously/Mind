@@ -142,6 +142,10 @@ from .telegram_ui import (
     ask_who_text,
     FERRY_COUNT,
     FERRY_WAY,
+    FERRY_DATE,
+    build_date_keyboard,
+    date_text,
+    day_label,
     build_way_keyboard,
     way_text,
     back_sailings_text,
@@ -2206,6 +2210,22 @@ class TelegramBridge(QObject):
             self._ferry_pick[chat_id] = state
             origin = ferry_stop_by_code(stops, state.get("origin", ""))
             destination = ferry_stop_by_code(stops, state.get("destination", ""))
+            if origin is None or destination is None:
+                return
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                date_text(origin.name, destination.name, state["returning"]),
+                build_date_keyboard(), html=True,
+            )
+            return
+
+        if kind == FERRY_DATE:
+            if not value.isdigit() or len(value) != 8:
+                return
+            state["date"] = value
+            self._ferry_pick[chat_id] = state
+            origin = ferry_stop_by_code(stops, state.get("origin", ""))
+            destination = ferry_stop_by_code(stops, state.get("destination", ""))
             if origin is not None and destination is not None:
                 self._ferry_result(
                     client, chat_id, message_id, origin, destination, described
@@ -2278,10 +2298,15 @@ class TelegramBridge(QObject):
     ) -> None:
         """What sails today, with a button for each one that has room."""
         routes = ferry_routes_between(parse_ferry_routes(described), origin.name, chosen.name)
-        today = time.strftime("%Y%m%d")
-        when = time.strftime("%a %d %B")
+        state = self._ferry_pick.get(chat_id) or {}
+        day = state.get("date") or time.strftime("%Y%m%d")
+        when = day_label(day)
         try:
-            sails = ferry_sailings(origin.code, chosen.code, today)
+            sails = ferry_sailings(
+                origin.code, chosen.code, day,
+                passengers=int(state.get("wanted", 1)),
+                coming_back=bool(state.get("returning")),
+            )
         except FerryError:
             # Routes still answer "can I get there at all".
             self._replace_panel(
@@ -2438,7 +2463,8 @@ class TelegramBridge(QObject):
             state["picked_out"] = chosen
             try:
                 back = ferry_sailings(
-                    origin.code, destination.code, time.strftime("%Y%m%d"),
+                    origin.code, destination.code,
+                    state.get("date") or time.strftime("%Y%m%d"),
                     passengers=wanted, after=sail,
                 )
             except FerryError as exc:

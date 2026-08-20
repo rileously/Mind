@@ -14,6 +14,8 @@ are answered in place and plain confirmations are reactions.
 
 from __future__ import annotations
 
+import time
+
 from dataclasses import dataclass
 
 from .telegram_client import MAX_COPY_TEXT_CHARS, escape_html
@@ -1605,3 +1607,64 @@ def journey_summary(sail, groups) -> str:
         "runs out. Mind cannot pay: that needs your card.",
     ]
     return "\n".join(lines)
+
+
+FERRY_DATE = "g"
+# RTL sells about this far ahead; more buttons than this stops being a choice.
+DAYS_OFFERED = 8
+
+
+def days_ahead(now=None, count: int = DAYS_OFFERED) -> list:
+    """The next few days, as (yyyymmdd, label) to put on buttons."""
+    start = time.localtime(now if now is not None else time.time())
+    base = time.mktime(
+        (start.tm_year, start.tm_mon, start.tm_mday, 12, 0, 0, 0, 0, -1)
+    )
+    days = []
+    for step in range(max(1, count)):
+        moment = time.localtime(base + step * 86400)
+        stamp = time.strftime("%Y%m%d", moment)
+        if step == 0:
+            label = "Today"
+        elif step == 1:
+            label = "Tomorrow"
+        else:
+            label = time.strftime("%a %d", moment)
+        days.append((stamp, label))
+    return days
+
+
+def build_date_keyboard(now=None) -> dict:
+    """Which day to travel, two to a row."""
+    rows: list[list[dict]] = []
+    for index, (stamp, label) in enumerate(days_ahead(now)):
+        button = {"text": label, "callback_data": ferry_callback(FERRY_DATE, stamp)}
+        if index % 2 == 0:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    rows.append([{"text": "‹  Menu", "callback_data": CB_MENU}])
+    return {"inline_keyboard": rows}
+
+
+def date_text(origin: str, destination: str, returning: bool) -> str:
+    kind = "Returning the same day." if returning else "One way."
+    return (
+        f"🚤 <b>{origin}</b> → <b>{destination}</b>\n{kind}\n\n"
+        "Which day?\n"
+        "<i>Fridays have no service on most routes.</i>"
+    )
+
+
+def day_label(stamp: str, now=None) -> str:
+    """A chosen day, written out for the panels that follow."""
+    for value, label in days_ahead(now):
+        if value == stamp:
+            if label in ("Today", "Tomorrow"):
+                return label
+            break
+    try:
+        moment = time.strptime(stamp, "%Y%m%d")
+    except ValueError:
+        return stamp
+    return time.strftime("%a %d %B", moment)
