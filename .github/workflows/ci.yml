@@ -119,3 +119,43 @@ jobs:
 
       - name: Regression tests
         run: python -m unittest discover -s tests -v
+
+  build:
+    # Groundwork for signing. SignPath's free programme for open source - and
+    # every other one worth having - signs what CI built from public source,
+    # not what somebody built on a laptop and uploaded; that provenance is the
+    # whole basis on which a certificate is given away. So the executable has
+    # to be produced here before it can ever be signed.
+    #
+    # Pushes only. A pull request may come from a fork, and a binary built from
+    # a stranger's branch is not something to hand to a signing step later.
+    if: github.event_name == 'push'
+    needs: [lint, tests]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create the virtual environment
+        # build_exe.ps1 refuses to use whatever Python is on PATH and wants
+        # .venv, so that the build here and the build on a developer machine
+        # are the same build rather than two that resemble each other.
+        run: python -m venv .venv
+
+      - name: Build Mind.exe
+        shell: pwsh
+        run: .\build_exe.ps1
+
+      - name: Upload the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mind-exe
+          path: |
+            artifacts/Mind.exe
+            artifacts/Mind.exe.sha256
+          # Silence here would mean a green build that produced nothing.
+          if-no-files-found: error
