@@ -624,7 +624,7 @@ def reserve_body(
     wanted = seats_per_leg(sail, seats)[0]
     if not wanted:
         raise FerryError("No seat was chosen.")
-    coming_back = [int(n) for n in (back_seats or [])]
+    coming_back = seats_per_leg(back_sail, back_seats)[0] if back_sail is not None else []
     if back_sail is not None and len(coming_back) != len(wanted):
         raise FerryError("The way back needs as many seats as the way there.")
     total = _total(sail, back_sail, len(wanted))

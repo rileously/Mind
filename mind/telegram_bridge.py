@@ -2556,6 +2556,18 @@ class TelegramBridge(QObject):
                 f"🚤 {exc}", build_ferry_again_keyboard(), html=True,
             )
             return
+        except Exception as exc:  # anything else, rather than a dead button
+            # A mistake in here used to reach the bridge's own catch and leave
+            # the chat silent, which reads as a button that does nothing. It
+            # is worth one ugly message instead.
+            self.log.emit(f"Telegram: holding ferry seats failed ({exc!r})")
+            self._replace_panel(
+                client, chat_id, message_id, PANEL_FERRY,
+                "🚤 Mind could not hold those seats, and the reason is in "
+                "Diagnostics. Nothing has been taken.",
+                build_ferry_again_keyboard(), html=True,
+            )
+            return
         shown = " / ".join(", ".join(str(n) for n in group) for group in seats)
         self.log.emit(f"Telegram: held ferry seats {shown}, booking {held.booking_id}")
         state["booking"] = held.booking_id

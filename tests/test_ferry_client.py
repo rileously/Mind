@@ -901,3 +901,49 @@ class WhichDay(unittest.TestCase):
         labels = [b["text"] for row in rows for b in row]
         for _stamp, label in days_ahead(now=self.when()):
             self.assertIn(label, labels)
+
+
+class SeatsForTheWayBackArriveGrouped(unittest.TestCase):
+    """The way back carries its seats per boat, like the way there.
+
+    Once seats were grouped by boat, the return leg was still being unpacked
+    as a flat list. It raised a TypeError rather than a FerryError, which the
+    handler did not catch, so the bridge swallowed it and Hold both did
+    nothing at all.
+    """
+
+    def legs(self):
+        from mind.ferry_client import Sailing
+
+        return (
+            Sailing.of(schedule_id="11", fare=70, free_seats=(1, 2)),
+            Sailing.of(schedule_id="22", fare=130, free_seats=(4, 5)),
+        )
+
+    def test_grouped_return_seats_are_accepted(self):
+        from mind.ferry_client import reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [[1]], "105", "104", back_sail=back, back_seats=[[4]])
+        self.assertEqual([s["seatNumber"] for s in body["outbound"][0]["seats"]], [4])
+
+    def test_a_flat_return_list_still_works(self):
+        from mind.ferry_client import reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [1], "105", "104", back_sail=back, back_seats=[4])
+        self.assertEqual([s["seatNumber"] for s in body["outbound"][0]["seats"]], [4])
+
+    def test_the_pair_price_survives_the_grouping(self):
+        from mind.ferry_client import reserve_body
+
+        out, back = self.legs()
+        body = reserve_body(out, [[1, 2]], "105", "104", back_sail=back, back_seats=[[4, 5]])
+        self.assertEqual(body["totalPrice"], 130)
+
+    def test_mismatched_directions_are_still_refused(self):
+        from mind.ferry_client import FerryError, reserve_body
+
+        out, back = self.legs()
+        with self.assertRaises(FerryError):
+            reserve_body(out, [[1, 2]], "105", "104", back_sail=back, back_seats=[[4]])
