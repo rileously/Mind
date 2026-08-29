@@ -55,6 +55,11 @@ class FakeRouter(RouterSession):
         self.refused_stale_token = 0
         self.refused_field_order = 0
         self.next_id = 1
+        # Some firmwares write the network back the way the device rows spell
+        # it, without the hyphen the form was given.
+        self.echo_ssid_without_the_hyphen = False
+        # How many wireless rules this list will take before it is full.
+        self.refuse_wifi_after = None
 
     # -- what the router serves ------------------------------------------
 
@@ -96,11 +101,14 @@ class FakeRouter(RouterSession):
             return 403, "stale token"
         self.token = f"token-{len(self.writes)}"
         if path == FILTER_ADD:
+            if self.refuse_wifi_after is not None and len(self.rules) >= self.refuse_wifi_after:
+                return 403, "that list is full"
             domain = f"InternetGatewayDevice.X_HW_Security.WLANMacFilter.{self.next_id}"
             self.next_id += 1
-            self.rules.append(
-                (domain, fields["x.SSIDName"], fields["x.SourceMACAddress"])
-            )
+            ssid = fields["x.SSIDName"]
+            if self.echo_ssid_without_the_hyphen:
+                ssid = ssid.replace("-", "")
+            self.rules.append((domain, ssid, fields["x.SourceMACAddress"]))
         elif path == FILTER_DELETE:
             targets = {key for key in fields if key.startswith("InternetGatewayDevice")}
             self.rules = [rule for rule in self.rules if rule[0] not in targets]
@@ -135,10 +143,29 @@ class ReadingTests(unittest.TestCase):
     def test_a_whitelist_router_is_recognised_as_one(self):
         self.assertFalse(parse_block_state(FakeRouter(blacklist=False).page()).blacklist)
 
-    def test_only_the_networks_that_are_switched_on_are_offered(self):
+    def test_every_network_is_offered_including_the_ones_switched_off(self):
+        # The Guest network is off. It is still listed, because it is one click
+        # from being on again and that click is now Mind's to make - a device
+        # blocked on the other three and not on this one would walk straight
+        # back on the moment somebody raised it.
         networks = parse_ssids(WLAN_LIST)
-        self.assertEqual([network.field for network in networks], ["SSID-1", "SSID-2", "SSID-5"])
+        self.assertEqual(
+            [network.field for network in networks],
+            ["SSID-1", "SSID-2", "SSID-5", "SSID-6"],
+        )
         self.assertEqual(networks[0].name, "Home 2.4G")
+
+    def test_which_of_them_are_on_the_air_is_read_too(self):
+        on_air = {network.field: network.enabled for network in parse_ssids(WLAN_LIST)}
+        self.assertTrue(on_air["SSID-2"])
+        self.assertFalse(on_air["SSID-6"])
+
+    def test_where_the_router_keeps_each_network_is_read_rather_than_built(self):
+        networks = {network.index: network for network in parse_ssids(WLAN_LIST)}
+        self.assertEqual(
+            networks[2].domain,
+            "InternetGatewayDevice.LANDevice.1.WLANConfiguration.2",
+        )
 
     def test_a_page_that_is_not_the_filter_page_gives_nothing_rather_than_raising(self):
         state = parse_block_state("<html>a login screen</html>")
@@ -147,14 +174,16 @@ class ReadingTests(unittest.TestCase):
 
 
 class BlockingTests(unittest.TestCase):
-    def test_a_device_is_blocked_on_every_network_the_router_broadcasts(self):
+    def test_a_device_is_blocked_on_every_network_the_router_has(self):
         # A rule on the 2.4 GHz network alone leaves the phone free to join the
-        # 5 GHz one, which would read as a block that does not work.
+        # 5 GHz one, which would read as a block that does not work. The Guest
+        # network is switched off and is written to anyway: switching it back
+        # on must not be a way past the block.
         router = FakeRouter()
         BlockList(router).block(PHONE, "Adam's phone")
         self.assertEqual(
             sorted(ssid for _domain, ssid, _mac in router.rules),
-            ["SSID-1", "SSID-2", "SSID-5"],
+            ["SSID-1", "SSID-2", "SSID-5", "SSID-6"],
         )
 
     def test_the_filter_is_switched_on_when_it_was_not_already(self):
@@ -276,6 +305,12 @@ class BothRoadsRouter(FakeRouter):
         self.wired_on = on
         self.wired_rules: list[tuple[str, str]] = []  # domain, mac
         self.wired_id = 1
+        # A wired list that will not take the change: full, or expired, or one
+        # of the several ways the second half of a block fails after the first
+        # half has already gone through.
+        self.refuse_wired = False
+        # A wireless list that fills up partway through the networks.
+        self.refuse_wifi_after = None
 
     def wired_page(self) -> str:
         rows = ",".join(
@@ -286,8 +321,12 @@ class BothRoadsRouter(FakeRouter):
         )
         return (
             "<html><script>"
-            f"var enableFilter = '{1 if self.wired_on else 0}';"
-            f"var Mode = '{0 if self.blacklist else 1}';"
+            # The same two settings as the wireless page, under the names this
+            # page happens to use for them. Read by one spelling only, this
+            # switch was never found, the list read as off, and every rule on
+            # it - real rules, refusing real devices - read as no rule at all.
+            f"var MacFilterEnable = '{1 if self.wired_on else 0}';"
+            f"var MacFilterMode = '{0 if self.blacklist else 1}';"
             f"var MacFilter = new Array({rows});"
             "</script>"
             f'<input type="hidden" name="onttoken" id="hwonttoken" value="{self.token}">'
@@ -305,6 +344,8 @@ class BothRoadsRouter(FakeRouter):
         if path in {WIRED_ADD, WIRED_DELETE, WIRED_SWITCH}:
             fields = dict(parsing.parse_qsl(body.decode(), keep_blank_values=True))
             self.writes.append((path, fields))
+            if self.refuse_wired and path == WIRED_ADD:
+                return 403, "that list is full"
             if fields.get("x.X_HW_Token") != self.token:
                 self.refused_stale_token += 1
                 return 403, "stale token"
@@ -338,7 +379,7 @@ class WiredTests(unittest.TestCase):
         # blocked at all.
         router = BothRoadsRouter()
         BlockList(router).block(PHONE, "Adam's phone")
-        self.assertEqual(len(router.rules), 3)  # one per SSID
+        self.assertEqual(len(router.rules), 4)  # one per SSID the router has
         self.assertEqual(len(router.wired_rules), 1)  # a cable is not chosen
 
     def test_the_wired_form_is_given_the_names_it_uses(self):
@@ -369,17 +410,123 @@ class WiredTests(unittest.TestCase):
         BlockList(router).block(PHONE)
         self.assertEqual(BlockList(router).blocked_macs(), (PHONE,))
 
-    def test_a_device_blocked_on_only_one_list_does_not_read_as_blocked(self):
-        # The half that is missing is the road the device is still using. A
-        # television on a cable, refused on three Wi-Fi networks it was never
-        # on, is not blocked - and saying so is what makes the button offer to
-        # finish the job rather than to undo it.
+    def test_a_device_refused_by_one_list_reads_as_blocked(self):
+        # Refused anywhere is blocked. This used to want both lists, on the
+        # reasoning that the missing half is the road the device is still
+        # using - but the half-blocked device that turns up in practice is the
+        # phone whose Wi-Fi rules were written and whose wired rules were not,
+        # and calling that one "online" left it refused with nothing in Mind
+        # offering to let it back on.
         router = BothRoadsRouter()
         router.wired_on = True
         router.wired_rules = [
             ("InternetGatewayDevice.X_HW_Security.MacFilter.1", "A2:27:EC:61:6A:A6")
         ]
+        self.assertEqual(BlockList(router).blocked_macs(), (PHONE,))
+
+    def test_a_half_block_can_be_let_back_on(self):
+        # The point of seeing it: the way out. Rules on one list only are
+        # cleared by the same unblock as any other.
+        router = BothRoadsRouter()
+        router.rules = [
+            ("InternetGatewayDevice.X_HW_Security.WLANMacFilter.1", "SSID-1", "A2:27:EC:61:6A:A6")
+        ]
+        router.on = True
+        blocking = BlockList(router)
+        self.assertEqual(blocking.blocked_macs(), (PHONE,))
+        blocking.unblock(PHONE)
+        self.assertEqual(router.rules, [])
         self.assertEqual(BlockList(router).blocked_macs(), ())
+
+    def test_the_wired_settings_are_read_though_that_page_names_them_its_own_way(self):
+        # The two pages keep the same two settings under different names. Read
+        # by one spelling, the wired switch was never found and its rules read
+        # as inert - devices the router really was refusing, invisible.
+        router = BothRoadsRouter()
+        router.wired_on = True
+        state = parse_block_state(router.wired_page())
+        self.assertTrue(state.on)
+        self.assertTrue(state.switch_read)
+        self.assertTrue(state.blacklist)
+
+    def test_the_clearer_of_two_names_is_the_one_read(self):
+        # A page that declares both is read by the one that says what it means,
+        # whichever it happened to write first.
+        page = (
+            "<html><script>"
+            "var WlanMacFilterRight = '0';"
+            "var enableFilter = '1';"
+            'var MacFilter = new Array(new stMacFilter("D.1","SSID-1","n","A2:27:EC:61:6A:A6"));'
+            "</script>"
+            '<input type="hidden" name="onttoken" value="t">'
+            "</html>"
+        )
+        self.assertTrue(parse_block_state(page).on)
+
+    def test_a_switch_that_cannot_be_found_is_not_read_as_off(self):
+        # A page Mind cannot read the switch on still holds the rules. Taking
+        # them for nothing is what hides a real block; a rule that shows up and
+        # can be removed is the smaller mistake.
+        page = (
+            "<html><script>"
+            "var Whatever = '0';"
+            'var MacFilter = new Array(new stMacFilter("D.1","A2:27:EC:61:6A:A6","a name"));'
+            "</script>"
+            '<input type="hidden" name="onttoken" value="t">'
+            "</html>"
+        )
+        state = parse_block_state(page)
+        self.assertFalse(state.switch_read)
+        self.assertTrue(state.blocks(PHONE))
+
+    def test_a_block_that_fails_on_the_second_list_leaves_the_first_alone(self):
+        # Otherwise the phone is off the Wi-Fi under a message saying the block
+        # failed: refused, and its owner told there is nothing to undo.
+        router = BothRoadsRouter()
+        router.refuse_wired = True
+        with self.assertRaises(RouterError) as caught:
+            BlockList(router).block(PHONE, "Adam's phone")
+        self.assertIn("Nothing was changed", str(caught.exception))
+        self.assertEqual(router.rules, [])
+        self.assertEqual(router.wired_rules, [])
+        self.assertFalse(router.on)
+        self.assertEqual(BlockList(router).blocked_macs(), ())
+
+    def test_a_list_that_fails_halfway_through_itself_is_taken_back_too(self):
+        # Four networks, and the third refused. The two rules already written
+        # are a phone refused on half the Wi-Fi, which is a phone that cannot
+        # get on the Wi-Fi - under a message saying the block did not work.
+        router = BothRoadsRouter()
+        router.refuse_wifi_after = 2
+        with self.assertRaises(RouterError) as caught:
+            BlockList(router).block(PHONE)
+        self.assertIn("Nothing was changed", str(caught.exception))
+        self.assertEqual(router.rules, [])
+        self.assertFalse(router.on)
+
+    def test_a_failed_block_leaves_an_earlier_block_standing(self):
+        # Only what this attempt added is taken back. Someone else's rules, and
+        # the switch that is holding them up, are not this change's to undo.
+        other = "b8-27-eb-11-22-33"
+        router = BothRoadsRouter()
+        BlockList(router).block(other)
+        router.refuse_wired = True
+        with self.assertRaises(RouterError):
+            BlockList(router).block(PHONE)
+        self.assertTrue(router.on)
+        self.assertEqual(BlockList(router).blocked_macs(), (other,))
+
+    def test_a_network_written_back_under_another_spelling_is_not_written_twice(self):
+        # The form is given SSID-2 and the row can come back as SSID2. Taken
+        # for different networks, every block adds four more rules until the
+        # list is full and nothing can be blocked at all.
+        router = BothRoadsRouter()
+        router.echo_ssid_without_the_hyphen = True
+        blocking = BlockList(router)
+        blocking.block(PHONE)
+        before = len(router.rules)
+        blocking.block(PHONE)
+        self.assertEqual(len(router.rules), before)
 
     def test_a_device_blocked_on_both_lists_reads_as_blocked(self):
         router = BothRoadsRouter()
@@ -439,13 +586,17 @@ class PageTests(unittest.TestCase):
         # It may well still be there and still trying, so "Online" would read
         # as though the block had not worked.
         self.show([self.phone], blocked=[PHONE])
-        self.assertEqual(self.page.table.item(0, 4).text(), "Blocked")
+        status = self.page.COLUMNS.index("Status")
+        self.assertEqual(self.page.table.item(0, status).text(), "Blocked")
 
     def test_the_button_offers_the_way_the_click_would_go(self):
+        # And says which device it means: "Block" and "Block Adams phone" are
+        # different questions, and only one can be answered without looking
+        # away from the button to check what is selected.
         self.show([self.phone])
-        self.assertEqual(self.page.block_button.text(), "Block")
+        self.assertEqual(self.page.block_button.text(), "Block Adams phone")
         self.show([self.phone], blocked=[PHONE])
-        self.assertEqual(self.page.block_button.text(), "Unblock")
+        self.assertEqual(self.page.block_button.text(), "Let Adams phone back on")
 
     def test_this_pc_is_never_offered_for_blocking(self):
         # Blocking it over Wi-Fi would cut the connection that undoes it.

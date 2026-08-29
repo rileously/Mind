@@ -78,6 +78,16 @@ class Device:
     ip: str = ""
     hostname: str = ""
     vendor: str = ""
+    # What sort of thing it is - "Android 15", "Windows" - which only the
+    # router knows, and which is a fact about the device rather than a name for
+    # it. Shown beside the name, never as it: every phone in the house would
+    # otherwise be called the same thing.
+    kind: str = ""
+    # Which Wi-Fi network it joined - "SSID2" - or "" for a cable or for a
+    # scan the router could not be reached for. Only the router knows it, and
+    # it is what makes switching a network off a decision rather than a guess
+    # about who it cuts off.
+    network: str = ""
     # What the user called it. Always wins over anything discovered.
     custom_name: str = ""
     first_seen: float = 0.0
@@ -107,6 +117,12 @@ class Device:
         """How long ago, in words, because a timestamp reads as noise in a list."""
         if self.online:
             return "now"
+        if not self.last_seen:
+            # A device the router named without Mind ever meeting it: blocked
+            # before Mind was here, and refused ever since, which is exactly
+            # why no scan has met it. Counting from zero would say it was last
+            # seen in 1970.
+            return "never"
         gap = max(0.0, now - self.last_seen)
         if gap < 90:
             return "a moment ago"
@@ -126,6 +142,8 @@ class Observation:
     mac: str
     ip: str = ""
     hostname: str = ""
+    kind: str = ""
+    network: str = ""
 
 
 def is_randomised(mac: str) -> bool:
@@ -618,6 +636,8 @@ def merge(
                 ip=observation.ip,
                 hostname=observation.hostname,
                 vendor=vendor_for(observation.mac),
+                kind=observation.kind,
+                network=observation.network,
                 first_seen=now,
                 last_seen=now,
                 online=True,
@@ -631,6 +651,8 @@ def merge(
                 # handed, which mDNS often does for a device that was busy.
                 hostname=observation.hostname or existing.hostname,
                 vendor=existing.vendor or vendor_for(observation.mac),
+                kind=observation.kind or existing.kind,
+                network=observation.network or existing.network,
                 last_seen=now,
                 online=True,
             )
@@ -661,6 +683,8 @@ def to_dict(device: Device) -> dict[str, Any]:
         "ip": device.ip,
         "hostname": device.hostname,
         "vendor": device.vendor,
+        "kind": device.kind,
+        "network": device.network,
         "custom_name": device.custom_name,
         "first_seen": device.first_seen,
         "last_seen": device.last_seen,
@@ -683,6 +707,8 @@ def from_dict(payload: Any) -> Device | None:
         ip=str(payload.get("ip", "")),
         hostname=str(payload.get("hostname", "")),
         vendor=str(payload.get("vendor", "")),
+        kind=str(payload.get("kind", "")),
+        network=str(payload.get("network", "")),
         custom_name=str(payload.get("custom_name", "")),
         first_seen=first_seen,
         last_seen=last_seen,

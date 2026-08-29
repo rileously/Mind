@@ -14,7 +14,14 @@ import unittest
 from pathlib import Path
 
 from mind.config_store import ConfigStore
-from mind.router_client import RouterError, RouterSession, normalise_mac, parse_devices
+from mind.router_client import (
+    RouterError,
+    RouterSession,
+    device_kind,
+    normalise_mac,
+    parse_devices,
+    row_signatures,
+)
 
 
 JSON_BODY = """
@@ -65,6 +72,121 @@ class ParsingTests(unittest.TestCase):
     def test_the_same_device_listed_twice_appears_once(self):
         doubled = JSON_BODY.replace("]}", ',{"HostName": "again", "IPAddress": "192.168.18.5", "MACAddress": "AA:BB:CC:DD:EE:FF"}]}')
         self.assertEqual(len(parse_devices(doubled)), 2)
+
+
+class JsonBoilerplateTests(unittest.TestCase):
+    """The JSON firmwares carry the same nothing the JavaScript rows do."""
+
+    def name_for(self, entry: str) -> str:
+        body = '{"HostInfo": [' + entry + ']}'
+        return parse_devices(body)[0].hostname
+
+    def test_the_network_name_is_not_used_as_a_device_name(self):
+        self.assertEqual(
+            self.name_for(
+                '{"HostName": "SSID2", "IPAddress": "192.168.18.26",'
+                ' "MACAddress": "00:08:22:33:1d:51"}'
+            ),
+            "",
+        )
+
+    def test_a_windows_pc_is_not_called_msft(self):
+        self.assertEqual(
+            self.name_for(
+                '{"HostName": "MSFT 5.0", "IPAddress": "192.168.18.7",'
+                ' "MACAddress": "90:de:80:77:53:37"}'
+            ),
+            "",
+        )
+
+    def test_a_real_name_under_another_key_beats_boilerplate_under_the_first(self):
+        # HostName is read first, but being present is not the same as useful.
+        self.assertEqual(
+            self.name_for(
+                '{"HostName": "android-dhcp-13", "Name": "Redmi-Note-11",'
+                ' "IPAddress": "192.168.18.12", "MACAddress": "a2:27:ec:61:6a:a6"}'
+            ),
+            "Redmi-Note-11",
+        )
+
+    def test_a_nameless_device_is_still_a_known_device(self):
+        devices = parse_devices(
+            '{"HostInfo": [{"HostName": "SSID2", "IPAddress": "192.168.18.26",'
+            ' "MACAddress": "00:08:22:33:1d:51"}]}'
+        )
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].mac, "00-08-22-33-1d-51")
+
+
+# The page as the router really serves it: the constructor is declared first,
+# and the rows that follow are read by the names it gives its own columns. Two
+# of these devices were labelled by hand in the router's pages.
+DECLARED_BODY = (
+    "function USERDeviceNew(Domain, IpAddr, MacAddr, Port, IpType, DevType,"
+    " DevStatus, PortType, Time, HostName, IPv4Enabled, IPv6Enabled, DeviceType,"
+    " UserDevAlias, UserSpecifiedDeviceType, LeaseTimeRemaining, RealMacAddr) {}"
+    "var UserDevinfo = new Array("
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.3",'
+    '"192\x2e168\x2e18\x2e12","a2\x3a27\x3aec\x3a61\x3a6a\x3aa6","SSID1","DHCP",'
+    '"android\x2ddhcp\x2d13","Online","WIFI","0\x3a10","Redmi\x2dNote\x2d11",'
+    '"1","1","0","Shayan","1","2967","a2\x3a27\x3aec\x3a61\x3a6a\x3aa6"),'
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.4",'
+    '"192\x2e168\x2e18\x2e7","90\x3ade\x3a80\x3a77\x3a53\x3a37","SSID5","DHCP",'
+    '"MSFT\x205\x2e0","Online","WIFI","7\x3a45","DESKTOP\x2d2KVG8KH",'
+    '"1","1","0","","0","2676","90\x3ade\x3a80\x3a77\x3a53\x3a37"));'
+)
+
+
+class DeclaredRowTests(unittest.TestCase):
+    """Which field is which, because the page said so rather than because it looked right."""
+
+    def setUp(self):
+        self.devices = {device.ip: device for device in parse_devices(DECLARED_BODY)}
+
+    def test_the_constructors_own_field_names_are_read(self):
+        signature = row_signatures(DECLARED_BODY)["USERDeviceNew"]
+        self.assertEqual(len(signature), 17)
+        self.assertEqual(signature[9], "HostName")
+        self.assertEqual(signature[13], "UserDevAlias")
+
+    def test_a_name_set_on_the_router_beats_the_one_the_device_gave(self):
+        # Someone typed "Shayan" into the router; the phone calls itself a model
+        # number. The person's name is the better one.
+        device = self.devices["192.168.18.12"]
+        self.assertEqual(device.alias, "Shayan")
+        self.assertEqual(device.hostname, "Redmi-Note-11")
+        self.assertEqual(device.name, "Shayan")
+
+    def test_the_devices_own_name_stands_where_nobody_renamed_it(self):
+        self.assertEqual(self.devices["192.168.18.7"].name, "DESKTOP-2KVG8KH")
+
+    def test_the_dhcp_boilerplate_is_read_as_what_the_device_is(self):
+        self.assertEqual(self.devices["192.168.18.12"].kind, "Android 13")
+        self.assertEqual(self.devices["192.168.18.7"].kind, "Windows")
+
+    def test_the_boilerplate_is_still_not_a_name(self):
+        for device in self.devices.values():
+            self.assertNotIn("android-dhcp", device.name)
+            self.assertNotIn("MSFT", device.name)
+
+    def test_a_row_whose_constructor_was_never_declared_is_still_read(self):
+        # The older firmwares publish rows with no function to go with them, and
+        # guessing is better than nothing there.
+        devices = {device.ip: device for device in parse_devices(JS_BODY)}
+        self.assertEqual(devices["192.168.18.9"].hostname, "Adams-Laptop")
+
+
+class DeviceKindTests(unittest.TestCase):
+    def test_an_android_version_is_read_out_of_the_client_name(self):
+        self.assertEqual(device_kind("android-dhcp-15"), "Android 15")
+        self.assertEqual(device_kind("ANDROID-DHCP-9"), "Android 9")
+
+    def test_a_windows_pc_says_so_in_its_own_way(self):
+        self.assertEqual(device_kind("MSFT 5.0"), "Windows")
+
+    def test_anything_else_is_left_alone(self):
+        for value in ("", "--", "Redmi-Note-11", "dhcp", "android-dhcp-"):
+            self.assertEqual(device_kind(value), "")
 
 
 class MacTests(unittest.TestCase):
@@ -248,6 +370,44 @@ class OptiXstarTests(unittest.TestCase):
             self.assertNotIn("InternetGatewayDevice", device.hostname)
 
 
+# The same row from a phone that sent no name of its own: the field that held
+# "Redmi-Note-11" is empty, and the only word left in the row is the network it
+# joined.
+NAMELESS_BODY = (
+    'var UserDevinfo = new Array('
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.9",'
+    '"192.168.18.26","00:08:22:33:1d:51","SSID2","DHCP",'
+    '"","Online","WIFI","0:02","",'
+    '"1","1","0","","0","2967","00:08:22:33:1d:51"),'
+    'new USERDeviceNew("InternetGatewayDevice.LANDevice.1.X_HW_UserDev.10",'
+    '"192.168.18.27","00:08:22:33:1d:52","SSID2","DHCP",'
+    '"","Online","WIFI","0:03","",'
+    '"1","1","0","","0","2968","00:08:22:33:1d:52"));'
+)
+
+
+class NamelessDeviceTests(unittest.TestCase):
+    """A phone that named itself to nobody must not be named after the Wi-Fi.
+
+    Four of these arrived at once and every one of them came through called
+    SSID2 - the same label on four rows, and four block buttons that could not
+    be told apart. No name at all is the honest answer, and it leaves the local
+    scan and then the address free to say something distinct.
+    """
+
+    def setUp(self):
+        self.devices = {device.ip: device for device in parse_devices(NAMELESS_BODY)}
+
+    def test_the_network_name_is_not_used_as_a_device_name(self):
+        self.assertEqual(self.devices["192.168.18.26"].hostname, "")
+        self.assertEqual(self.devices["192.168.18.27"].hostname, "")
+
+    def test_the_rows_are_still_read(self):
+        # Nameless is not the same as missing: both are known devices.
+        self.assertEqual(len(self.devices), 2)
+        self.assertEqual(self.devices["192.168.18.26"].mac, "00-08-22-33-1d-51")
+
+
 class ScanSurvivesTheRouterTests(unittest.TestCase):
     """The sweep of the network needs no router, and must not depend on one.
 
@@ -273,9 +433,10 @@ class ScanSurvivesTheRouterTests(unittest.TestCase):
         from mind.network_scanner import router_facts
 
         self.fill(".")
-        names, blocked = router_facts(self.store)
-        self.assertEqual(names, {})
-        self.assertEqual(blocked, set())
+        reading = router_facts(self.store)
+        self.assertEqual(reading.facts, {})
+        self.assertEqual(reading.blocked, frozenset())
+        self.assertEqual(reading.networks, ())
 
     def test_a_router_that_cannot_be_reached_leaves_the_scan_alone(self):
         # A port on this machine that nothing is listening on: refused at once,
@@ -284,15 +445,59 @@ class ScanSurvivesTheRouterTests(unittest.TestCase):
         from mind.network_scanner import router_facts
 
         self.fill("http://127.0.0.1:1")
-        names, blocked = router_facts(self.store)
-        self.assertEqual(names, {})
-        self.assertEqual(blocked, set())
+        reading = router_facts(self.store)
+        self.assertEqual(reading.facts, {})
+        self.assertEqual(reading.blocked, frozenset())
+        self.assertEqual(reading.networks, ())
 
     def test_no_router_at_all_is_not_a_failure(self):
         from mind.network_scanner import router_facts
 
-        self.assertEqual(router_facts(self.store), ({}, set()))
+        reading = router_facts(self.store)
+        self.assertEqual(reading.facts, {})
+        self.assertEqual(reading.blocked, frozenset())
+        self.assertEqual(reading.networks, ())
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RememberedBoilerplateTests(unittest.TestCase):
+    """A name once written down outlives the reading that wrote it.
+
+    merge() keeps a hostname when a scan comes back empty handed, so the ten
+    devices already saved as SSID2 would have stayed SSID2 for good. They are
+    let go when the remembered list is read.
+    """
+
+    def setUp(self):
+        from mind.network_devices import Device
+
+        self.Device = Device
+        self.devices = [
+            Device(mac="00-08-22-33-1d-51", ip="192.168.18.26", hostname="SSID2"),
+            Device(mac="a2-27-ec-61-6a-a6", ip="192.168.18.12", hostname="Redmi-Note-11"),
+            Device(mac="00-08-22-05-41-08", ip="192.168.18.28", hostname="SSID2",
+                   custom_name="Nuha's tablet"),
+            Device(mac="90-de-80-77-53-37", ip="192.168.18.7", hostname=""),
+        ]
+
+    def healed(self):
+        from mind.network_scanner import without_boilerplate_names
+
+        return {device.mac: device for device in without_boilerplate_names(self.devices)}
+
+    def test_the_network_name_is_let_go(self):
+        self.assertEqual(self.healed()["00-08-22-33-1d-51"].hostname, "")
+
+    def test_a_real_name_is_kept(self):
+        self.assertEqual(self.healed()["a2-27-ec-61-6a-a6"].hostname, "Redmi-Note-11")
+
+    def test_a_name_the_user_typed_is_never_touched(self):
+        device = self.healed()["00-08-22-05-41-08"]
+        self.assertEqual(device.custom_name, "Nuha's tablet")
+        self.assertEqual(device.hostname, "SSID2")
+
+    def test_nothing_is_lost_from_the_list(self):
+        self.assertEqual(len(self.healed()), 4)

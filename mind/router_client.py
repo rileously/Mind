@@ -26,6 +26,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,21 @@ class RouterDevice:
     mac: str
     ip: str = ""
     hostname: str = ""
+    # What someone typed into the router's own page for this device. A real
+    # name, chosen by a person, and better than anything the device says.
+    alias: str = ""
+    # What sort of thing it is, read from the DHCP client's boilerplate.
+    kind: str = ""
+    # Which way in it took: "SSID2" for a Wi-Fi network, "" for a cable. The
+    # row has always carried this; nothing read it until a network could be
+    # switched off, at which point which network a device is on is the first
+    # thing anyone would want to know.
+    network: str = ""
+
+    @property
+    def name(self) -> str:
+        """The best name the router holds: the one a person chose, first."""
+        return self.alias or self.hostname
 
 
 def normalise_mac(value: str) -> str:
@@ -99,9 +115,9 @@ def parse_devices(payload: str) -> list[RouterDevice]:
                 devices[mac] = RouterDevice(
                     mac=mac,
                     ip=str(entry.get("IPAddress") or entry.get("ip") or ""),
-                    hostname=str(
-                        entry.get("HostName") or entry.get("hostname") or entry.get("Name") or ""
-                    ).strip(),
+                    hostname=_first_real_name(
+                        entry.get(key) for key in ("HostName", "hostname", "Name")
+                    ),
                 )
             if devices:
                 return sorted(devices.values(), key=lambda device: device.ip)
@@ -109,19 +125,143 @@ def parse_devices(payload: str) -> list[RouterDevice]:
     # The JavaScript rows. Every value in them is hex escaped - "192\x2e168"
     # rather than "192.168" - so nothing matches until that is undone.
     unescaped = _unescape_hex(payload or "")
+    signatures = row_signatures(unescaped)
     # Any constructor, because the name differs by firmware: this model uses
     # USERDeviceNew where others use stLanUserDevInfo.
-    rows = re.findall(r"new\s+\w*(?:Device|DevInfo)\w*\s*\(([^)]*)\)", unescaped, re.S)
-    for row in rows:
+    rows = re.findall(
+        r"new\s+(\w*(?:Device|DevInfo)\w*)\s*\(([^)]*)\)", unescaped, re.S
+    )
+    for constructor, row in rows:
         fields = [field.strip().strip("\"'") for field in row.split(",")]
-        mac = next((normalise_mac(field) for field in fields if normalise_mac(field)), "")
-        if not mac:
-            continue
-        ip = next(
-            (field for field in fields if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", field)), ""
-        )
-        devices[mac] = RouterDevice(mac=mac, ip=ip, hostname=_best_name(fields))
+        device = _device_from_signature(fields, signatures.get(constructor, ()))
+        if device is None:
+            device = _device_from_guesswork(fields)
+        if device is not None:
+            devices[device.mac] = device
     return sorted(devices.values(), key=lambda device: device.ip)
+
+
+def row_signatures(payload: str) -> dict[str, tuple[str, ...]]:
+    """The field names each row constructor declares, in the order it takes them.
+
+    The page defines its own rows - "function USERDeviceNew(Domain, IpAddr,
+    MacAddr, Port, ...)" - and then calls that function once per device. Reading
+    the declaration is the difference between knowing which field is which and
+    guessing: the tenth value is the host name because the page says the tenth
+    parameter is HostName, not because it looked more like a name than the rest.
+
+    Field order differs between firmwares, which is why it was guessed at
+    before. It does not have to be: every firmware that writes these rows also
+    writes the function that receives them.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for name, params in re.findall(
+        r"function\s+(\w*(?:Device|DevInfo)\w*)\s*\(([^)]*)\)", payload
+    ):
+        fields = tuple(param.strip() for param in params.split(",") if param.strip())
+        if fields:
+            found[name] = fields
+    return found
+
+
+def _device_from_signature(
+    fields: list[str], signature: tuple[str, ...]
+) -> RouterDevice | None:
+    """One device, read by the names the page gave its own columns."""
+    if not signature:
+        return None
+    row = dict(zip(signature, fields))
+    mac = normalise_mac(row.get("MacAddr", "") or row.get("MACAddress", ""))
+    if not mac:
+        return None
+    return RouterDevice(
+        mac=mac,
+        ip=_plain(row.get("IpAddr", "") or row.get("IPAddress", "")),
+        hostname=_real_name(row.get("HostName", "")),
+        alias=_real_name(row.get("UserDevAlias", "")),
+        kind=device_kind(row.get("DevType", "")),
+        network=_wifi_network(row.get("Port", "")),
+    )
+
+
+def _wifi_network(value: str) -> str:
+    """Which Wi-Fi network a device came in on, where it was one.
+
+    The same field names the wired ports too - "LAN1" - and a cable is not a
+    network you can switch off, so only the SSIDs are answered for.
+    """
+    text = _plain(value)
+    if not re.fullmatch(r"(?i)ssid[-_]?\d+", text):
+        return ""
+    # Spelled the one way, so it can be matched against Ssid.port whichever
+    # way this firmware happened to write it.
+    return text.upper().replace("-", "").replace("_", "")
+
+
+def _device_from_guesswork(fields: list[str]) -> RouterDevice | None:
+    """One device from a row whose constructor was never declared."""
+    mac = next((normalise_mac(field) for field in fields if normalise_mac(field)), "")
+    if not mac:
+        return None
+    ip = next(
+        (field for field in fields if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", field)), ""
+    )
+    return RouterDevice(mac=mac, ip=ip, hostname=_best_name(fields))
+
+
+def _plain(value: str) -> str:
+    """A value with the router's own placeholder for nothing taken out."""
+    text = (value or "").strip()
+    return "" if text == "--" else text
+
+
+def _real_name(value: str) -> str:
+    """A name from a named field, or nothing where it is not one.
+
+    Knowing which column a value sits in is not the same as trusting it: a
+    truncated page can put half a row into a name, so it still has to look like
+    one, and boilerplate is still boilerplate wherever it was found.
+    """
+    text = _plain(value)
+    if not text or not _looks_like_a_name(text) or BORING_NAMES.match(text):
+        return ""
+    return text
+
+
+# The DHCP client's boilerplate says nothing about who owns a device and
+# everything about what it is: every Android phone sends the same string, with
+# the version on the end.
+ANDROID_CLIENT = re.compile(r"(?i)^android-dhcp-(\d{1,2})$")
+
+
+def device_kind(value: str) -> str:
+    """What sort of thing this is, out of the name it refused to give.
+
+    Useless as a name - eight phones would all read "Android 15", and a list of
+    eight identical labels is the thing being avoided - but a straight answer to
+    what the device is, worth showing beside the name rather than as it.
+    "android-dhcp-15" is a phone running Android 15; "MSFT 5.0" is Windows.
+    """
+    text = _plain(value)
+    version = ANDROID_CLIENT.match(text)
+    if version:
+        return f"Android {version.group(1)}"
+    if text.lower().startswith("msft"):
+        return "Windows"
+    return ""
+
+
+def _first_real_name(values) -> str:
+    """The first of these keys holding a name rather than boilerplate.
+
+    A firmware that answers in JSON puts the same nothing in HostName that the
+    JavaScript rows carry - the SSID for a phone that sent no name of its own,
+    "MSFT 5.0" for a Windows PC - and it may hold something real under Name
+    while HostName is boilerplate. The keys are read in order of preference and
+    the first useful one wins, rather than the first one merely present.
+    """
+    names = [str(value or "").strip() for value in values]
+    return next((name for name in names if name and not BORING_NAMES.match(name)), "")
 
 
 def _unescape_hex(text: str) -> str:
@@ -161,18 +301,22 @@ def _best_name(fields: list[str]) -> str:
 
     These rows hold both the name the DHCP client sent - "android-dhcp-13",
     which says nothing - and the name the device actually goes by, like
-    "Redmi-Note-11". Anything recognisable beats the boilerplate, and the
-    boilerplate is still better than nothing.
+    "Redmi-Note-11". Anything recognisable beats the boilerplate.
+
+    Where only boilerplate is left, the row is treated as having no name at all.
+    A phone that sent no host name leaves the SSID it joined as the only
+    name-shaped field in its row, and four phones on SSID2 all came through
+    called SSID2 - one label, four devices, four block buttons that could not be
+    told apart. Saying nothing lets the local scan's name stand, and failing
+    that lets the address speak: Device 26 is at least one you can point at.
     """
     candidates = [
         field
         for field in fields
         if _looks_like_a_name(field) and field.strip().lower() not in ROW_VOCABULARY
     ]
-    if not candidates:
-        return ""
     useful = [name for name in candidates if not BORING_NAMES.match(name)]
-    return (useful or candidates)[0]
+    return useful[0] if useful else ""
 
 
 def _looks_like_a_name(field: str) -> bool:
@@ -692,6 +836,13 @@ def survey_filters(
 #
 # A rule is per SSID, so blocking a phone on the 2.4 GHz network alone would
 # leave it free to join the 5 GHz one. Blocking means every SSID the router has.
+#
+# Every SSID it has, including the ones that are switched off. A rule against a
+# network nobody can join looks like a wasted request, and was skipped for that
+# reason - but a switched-off network is one click from being on again, and
+# Mind now has that click. Blocking a phone while the guest network is down and
+# finding it back on the Wi-Fi the moment somebody raises that network is not a
+# block. The extra request is the cheaper half of that trade.
 
 FILTER_PAGE = "/html/bbsp/wlanmacfilter/wlanmacfilter.asp"
 FILTER_ADD = (
@@ -779,11 +930,34 @@ class Ssid:
     index: int
     name: str = ""
     band: str = ""
+    # The object the router keeps this network's settings under. Read off the
+    # page rather than built from the index, because it is what a write has to
+    # be addressed to and the router is the one that knows it.
+    domain: str = ""
+    # Whether it is being broadcast at the moment. A network that is switched
+    # off still exists, still has a name, and can be switched back on.
+    enabled: bool = True
 
     @property
     def field(self) -> str:
         """What the filter form calls it: SSID-1, SSID-5, and so on."""
         return f"SSID-{self.index}"
+
+    @property
+    def port(self) -> str:
+        """What the device list calls it: SSID1, SSID5, and so on.
+
+        The same network under a third spelling. The filter form hyphenates it,
+        the device rows do not, and neither matches the object path - so the
+        translation lives here rather than at each of the three call sites.
+        """
+        return f"SSID{self.index}"
+
+    @property
+    def label(self) -> str:
+        """This network as a person would say it: the name, then the band."""
+        name = self.name or self.field
+        return f"{name} ({self.band})" if self.band else name
 
 
 @dataclass(frozen=True)
@@ -804,24 +978,44 @@ class BlockState:
     blacklist: bool = True
     entries: tuple[BlockEntry, ...] = ()
     token: str = ""
+    # Whether the page actually said. The two lists are the same page written
+    # twice and they do not use the same names for these settings, so a value
+    # that was not found has to be told apart from one that was found to be
+    # off. Read as "off", an unfound switch made every rule on that page
+    # invisible: a phone genuinely refused by the router read as online, which
+    # is a block nobody in Mind could see and so nobody could undo.
+    switch_read: bool = True
+    mode_read: bool = True
 
     def rules_for(self, mac: str) -> tuple[BlockEntry, ...]:
         wanted = normalise_mac(mac)
         return tuple(entry for entry in self.entries if entry.mac == wanted)
 
-    def blocks(self, mac: str) -> bool:
-        """Whether this address is actually being kept off right now.
+    @property
+    def enforcing(self) -> bool:
+        """Whether rules on this page are being acted on.
 
-        A rule in a list nobody is enforcing is not a block, which is why the
-        switch is part of the answer and not a separate question.
+        A rule in a list nobody is enforcing is not a block. A rule in a list
+        whose switch Mind could not find is treated as one anyway: the router
+        holds it either way, and a rule that can be seen and removed is a far
+        smaller mistake than one that is refusing a device Mind insists is fine.
         """
-        return self.on and self.blacklist and bool(self.rules_for(mac))
+        return self.on or not self.switch_read
+
+    def blocks(self, mac: str) -> bool:
+        """Whether this address is actually being kept off right now."""
+        return self.enforcing and self.blacklist and bool(self.rules_for(mac))
 
     @property
     def blocked_macs(self) -> tuple[str, ...]:
-        if not (self.on and self.blacklist):
+        if not (self.enforcing and self.blacklist):
             return ()
         return tuple(dict.fromkeys(entry.mac for entry in self.entries))
+
+
+def _ssid_key(value: str) -> str:
+    """One network under any of its spellings: SSID-2, SSID2, ssid_2."""
+    return re.sub(r"[^0-9a-z]", "", (value or "").lower())
 
 
 def router_mac(mac: str) -> str:
@@ -833,10 +1027,15 @@ def router_mac(mac: str) -> str:
 
 
 def parse_ssids(payload: str) -> tuple[Ssid, ...]:
-    """The networks the router is broadcasting, from its own WLAN list.
+    """Every network the router defines, from its own WLAN list.
 
-    Only the enabled ones: a rule against a network that is switched off costs
-    a request and blocks nothing.
+    Every one, not only the ones on the air. A network that is switched off is
+    still a network: it has a name, it keeps its settings, and it is the one
+    thing a person might want to switch back on - which cannot be offered from
+    a list it was filtered out of.
+
+    Whether each is currently broadcasting comes back as a field, so a caller
+    that only wants the live ones can still say so.
     """
     found: dict[int, Ssid] = {}
     for row in re.findall(r"new stWlanInfo\(([^)]*)\)", _unescape_hex(payload or "")):
@@ -845,11 +1044,241 @@ def parse_ssids(payload: str) -> tuple[Ssid, ...]:
             continue
         domain, _interface, name, enable = fields[0], fields[1], fields[2], fields[3]
         instance = domain.rsplit(".", 1)[-1]
-        if not instance.isdigit() or enable != "1":
+        if not instance.isdigit():
             continue
         band = fields[5] if len(fields) > 5 else ""
-        found[int(instance)] = Ssid(int(instance), name, band)
+        found[int(instance)] = Ssid(
+            int(instance), name, band, domain=domain, enabled=enable == "1"
+        )
     return tuple(found[index] for index in sorted(found))
+
+
+def read_networks(session: RouterSession) -> tuple[Ssid, ...]:
+    """The router's own list of the networks it defines.
+
+    One reading serves both the blocking, which writes a rule per network, and
+    the switch that puts a whole network on or off the air.
+    """
+    status, body = session.read(WLAN_LIST_PAGE)
+    if status != 200 or session.looks_like_login(body):
+        raise RouterError("The router did not say which networks it broadcasts.")
+    found = parse_ssids(body)
+    if not found:
+        raise RouterError("The router listed no Wi-Fi networks.")
+    return found
+
+
+# -- putting a whole network on or off the air -----------------------------
+#
+# Blocking names one device. This is the other end of the same wish: a guest
+# network or a children's network that should simply not be there for a while,
+# whoever owns the phone trying to join it.
+#
+# The router keeps each network's settings under its own object -
+# "...WLANConfiguration.2" - and that path is read off the WLAN list rather
+# than built from the index, because the router is the one that knows it. The
+# write is the same shape as the filter's on/off switch: a set.cgi naming that
+# object, one field, and the page's token last.
+#
+# Which page carries that form differs by firmware, and a write has to quote a
+# token from the page it claims to come from. So the page is found by reading
+# the candidates in turn and keeping the first that answers with a token - a
+# read, before anything is changed.
+WLAN_PAGES = (
+    "/html/bbsp/wlanbasic/wlanbasic.asp",
+    "/html/amp/wlanbasic/wlanbasic.asp",
+    "/html/bbsp/wlan/wlanbasic.asp",
+    "/html/amp/common/wlan_list.asp",
+)
+
+
+@dataclass(frozen=True)
+class WlanForm:
+    """The page a network's on/off switch is written through.
+
+    The path only. Not the token that was on it when it was found: a token is
+    spent by the write that quotes it, so one kept here would be stale by the
+    time anything used it. Each write reads the page again for a fresh one.
+    """
+
+    path: str
+
+    def set_url(self, domain: str) -> str:
+        """Where a change to this network's settings is posted."""
+        return (
+            f"{self.path.rsplit('/', 1)[0]}/set.cgi"
+            f"?x={urllib.parse.quote(domain, safe='.')}"
+            f"&RequestFile={self.path.lstrip('/')}"
+        )
+
+
+class WlanNetworks:
+    """The router's Wi-Fi networks, on a session that is already signed in.
+
+    Reading them needs no form at all. Changing one does, so the page that
+    carries it is looked for only when something is actually being changed -
+    listing the networks on a router whose firmware keeps that form somewhere
+    Mind cannot find must still work.
+    """
+
+    def __init__(self, session: RouterSession):
+        self.session = session
+        self._form: WlanForm | None = None
+
+    # -- reading ---------------------------------------------------------
+
+    def all(self) -> tuple[Ssid, ...]:
+        """Every network the router defines, on the air or not."""
+        return read_networks(self.session)
+
+    def form(self) -> WlanForm:
+        """The page whose token a change has to quote, found by reading.
+
+        A page qualifies by carrying a token, not by existing - a firmware that
+        serves the path but not the form would otherwise be written to and
+        refused. Which page it was is remembered for the session; the token on
+        it is not.
+        """
+        if self._form is not None:
+            return self._form
+        tried: list[str] = []
+        for path in WLAN_PAGES:
+            try:
+                status, body = self.session.read(path)
+            except RouterError:
+                continue
+            tried.append(path)
+            if status != 200 or self.session.looks_like_login(body):
+                continue
+            if _page_token(body):
+                self._form = WlanForm(path)
+                return self._form
+        raise RouterError(
+            "Mind could not find the page this router keeps its Wi-Fi settings on, "
+            "so it will not guess at one - a wrong guess here writes to a form that "
+            f"changes something else. Pages tried: {', '.join(tried) or 'none answered'}."
+        )
+
+    def _fresh_token(self, form: WlanForm) -> str:
+        """The token as the settings page carries it right now."""
+        status, body = self.session.read(form.path)
+        if status != 200 or self.session.looks_like_login(body):
+            raise RouterError("The router asked for a sign-in again part way through.")
+        token = _page_token(body)
+        if not token:
+            raise RouterError(
+                "The router's Wi-Fi page carried no token, so nothing can be changed "
+                "safely. It refuses any write without one."
+            )
+        return token
+
+    # -- writing ---------------------------------------------------------
+
+    def set_enabled(self, index: int, on: bool) -> Ssid:
+        """Put one network on or off the air, and read back what happened.
+
+        The answer comes from asking the router again rather than from the fact
+        that it accepted the form. A firmware that takes the write and ignores
+        it is the failure worth catching here: the network is still there, the
+        button says it is not, and nobody finds out until a phone joins.
+        """
+        network = next((item for item in self.all() if item.index == index), None)
+        if network is None:
+            raise RouterError(f"This router has no network {index}.")
+        if not network.domain:
+            raise RouterError(
+                f"The router did not say where it keeps the settings for "
+                f"{network.label}, so Mind cannot change it."
+            )
+        if network.enabled == on:
+            return network
+        form = self.form()
+        self._send(
+            form,
+            network.domain,
+            {"x.Enable": "1" if on else "0", "x.X_HW_Token": self._fresh_token(form)},
+        )
+        after = next((item for item in self.all() if item.index == index), None)
+        if after is None or after.enabled != on:
+            raise RouterError(
+                f"The router accepted the change but {network.label} is still "
+                f"{'off' if on else 'on'} the air. This firmware may keep that "
+                "switch somewhere else."
+            )
+        return after
+
+    def _send(self, form: WlanForm, domain: str, fields: dict[str, str]) -> None:
+        """One write, token last, with the settings page named as the referer.
+
+        The same two rules the filter forms turned out to have, for the same
+        reason: these pages are only ever reached from themselves, and anything
+        after the token in the body is answered with a 403 whatever it holds.
+        """
+        ordered = [
+            (key, value) for key, value in fields.items() if key != "x.X_HW_Token"
+        ]
+        ordered.append(("x.X_HW_Token", fields.get("x.X_HW_Token", "")))
+        status, answer = self.session.post(
+            form.set_url(domain),
+            urllib.parse.urlencode(ordered).encode(),
+            referer=self.session.base + form.path,
+        )
+        if status >= 400:
+            raise RouterError(f"The router refused the change ({status}).")
+        if self.session.looks_like_login(answer):
+            raise RouterError("The router asked for a sign-in again part way through.")
+
+
+def _page_token(payload: str) -> str:
+    """The hidden one-shot value a settings page carries for its own forms."""
+    found = re.search(
+        r"""name\s*=\s*["']onttoken["'][^>]*?value\s*=\s*["']([^"']+)["']""",
+        _unescape_hex(payload or ""),
+    )
+    return found.group(1) if found else ""
+
+
+def page_settings(text: str) -> dict[str, str]:
+    """Every "var name = 'value'" the page declares, keyed by a plain name."""
+    # Either quote: the filter pages use single ones, and a firmware that
+    # writes the same setting with double quotes is still stating it.
+    return {
+        name.lower(): value
+        for name, value in re.findall(r"""var\s+(\w+)\s*=\s*['"]([^'"]*)['"]""", text)
+    }
+
+
+def _setting_named(
+    settings: dict[str, str], *meanings: Callable[[str], bool]
+) -> str | None:
+    """The setting whose name means this, or None where none does.
+
+    The readings are tried in the order given, so a page carrying two names for
+    the same thing is read by the clearer of them rather than by whichever the
+    page happened to declare first.
+    """
+    for means in meanings:
+        found = next((value for name, value in settings.items() if means(name)), None)
+        if found is not None:
+            return found
+    return None
+
+
+# Whether a filter list is on. The wireless page calls it enableFilter; the
+# wired page is the same page written twice by the same people and is under no
+# obligation to agree, and the field each one is written back through -
+# WlanMacFilterRight, MacFilterRight - is the second name these settings go by.
+# Read by one spelling, an unfound switch made every rule on that page look
+# inert, which is a real block that nothing in Mind could see.
+SWITCH_NAMES = (
+    lambda name: "filter" in name and "enable" in name,
+    lambda name: "filter" in name and name.endswith("right"),
+)
+# Whether the list says who is refused or who is allowed.
+MODE_NAMES = (
+    lambda name: name in {"mode", "policy"},
+    lambda name: "filter" in name and ("mode" in name or "policy" in name),
+)
 
 
 def parse_block_state(payload: str) -> BlockState:
@@ -858,18 +1287,16 @@ def parse_block_state(payload: str) -> BlockState:
     The token is a hidden field the page carries and every write must quote
     back, so it is read here rather than fetched separately - it belongs to the
     page that was just read, and a stale one is refused.
+
+    The switch and the mode are looked for by what their names mean, and the
+    state says whether they were found at all. Both pages keep the same two
+    settings under names that only one of them was ever read by.
     """
     text = _unescape_hex(payload or "")
-    token = ""
-    found = re.search(
-        r"""name\s*=\s*["']onttoken["'][^>]*?value\s*=\s*["']([^"']+)["']""", text
-    )
-    if found:
-        token = found.group(1)
-
-    def setting(name: str, fallback: str) -> str:
-        match = re.search(rf"var\s+{name}\s*=\s*'([^']*)'", text)
-        return match.group(1) if match else fallback
+    token = _page_token(payload)
+    settings = page_settings(text)
+    switch = _setting_named(settings, *SWITCH_NAMES)
+    mode = _setting_named(settings, *MODE_NAMES)
 
     entries: list[BlockEntry] = []
     for row in re.findall(r"new stMacFilter\(([^)]*)\)", text):
@@ -893,11 +1320,27 @@ def parse_block_state(payload: str) -> BlockState:
         )
         entries.append(BlockEntry(domain, mac, ssid, name))
     return BlockState(
-        on=setting("enableFilter", "0") == "1",
-        blacklist=setting("Mode", "0") != "1",
+        on=switch == "1",
+        blacklist=mode != "1",
         entries=tuple(entries),
         token=token,
+        switch_read=switch is not None,
+        mode_read=mode is not None,
     )
+
+
+@dataclass
+class _Written:
+    """What one list took during a block, and so what to take back.
+
+    The rules that were there before this attempt, which are somebody else's
+    block and not this change's to remove, and whether this attempt was the one
+    that turned the list on.
+    """
+
+    kind: FilterKind
+    before: set[str]
+    woke: bool = False
 
 
 class BlockList:
@@ -948,35 +1391,35 @@ class BlockList:
         )
 
     def blocked_macs(self) -> tuple[str, ...]:
-        """Every address that every list on this router is keeping off.
+        """Every address any list on this router is keeping off.
 
-        Every list, not any of them. A device named by one list and not the
-        other is a block that half happened, and the missing half is exactly
-        the road the device is on when it carries on working - a television on
-        a cable, refused on three Wi-Fi networks it was never using, reads as
-        blocked while it streams. Counting that as "not blocked" is what makes
-        the button offer to finish the job rather than to undo it.
+        Any list, not every list. This used to be the addresses both lists
+        named, on the reasoning that a device refused on one road and not the
+        other is still using the other - a television on a cable, refused on
+        three Wi-Fi networks it was never on, reads as blocked while it streams.
+
+        True, and the wrong trade. The half-blocked device that actually turns
+        up is the opposite one: a phone whose Wi-Fi rules were written and whose
+        wired rules were not, because the second half of the change failed.
+        Under "both lists" that phone is off the Wi-Fi and reads as online, so
+        the button offers to block it - the one thing it does not need - and
+        nothing in Mind offers to let it back on. It is refused, the owner
+        complains, and the list says there is nothing to undo.
+
+        So: refused anywhere reads as blocked, and unblocking clears every list,
+        which is the answer that can always be given. Whoever wants that
+        television off the Wi-Fi properly can block it again afterwards.
         """
-        live = [
-            state
-            for state in (self.read_state(kind) for kind in FILTER_KINDS)
-            if state is not None
-        ]
-        if not live:
-            return ()
-        common = set(live[0].blocked_macs)
-        for state in live[1:]:
-            common &= set(state.blocked_macs)
-        return tuple(sorted(common))
+        refused: set[str] = set()
+        for kind in FILTER_KINDS:
+            state = self.read_state(kind)
+            if state is not None:
+                refused |= set(state.blocked_macs)
+        return tuple(sorted(refused))
 
     def networks(self) -> tuple[Ssid, ...]:
-        status, body = self.session.read(WLAN_LIST_PAGE)
-        if status != 200:
-            raise RouterError("The router did not say which networks it broadcasts.")
-        found = parse_ssids(body)
-        if not found:
-            raise RouterError("The router listed no Wi-Fi networks to block a device on.")
-        return found
+        """Every network to write a rule against, switched on or not."""
+        return read_networks(self.session)
 
     # -- writing ---------------------------------------------------------
 
@@ -1009,25 +1452,83 @@ class BlockList:
     def block(self, mac: str, name: str = "") -> BlockState:
         """Keep this device off, by wireless and by cable both.
 
+        Either it takes on every list this router keeps, or the router is left
+        as it was found. The wireless half is written first and there are half a
+        dozen writes in it, so a wired half that fails - a list that is full, a
+        session that expired, a page that answers 403 - used to leave a device
+        refused on the Wi-Fi under a message saying the block had failed. That
+        is the worst of both: the phone is off, and the person reading the
+        message has been told it is not.
+
         Returns the wireless list, which is the one the rest of Mind asks about;
         what was written to each is the router's business.
         """
         first: BlockState | None = None
+        written: list[_Written] = []
         for kind in FILTER_KINDS:
             state = self.read_state(kind)
             if state is None:
                 continue
-            written = self._block_one(kind, state, mac, name)
+            # Written down before the writing starts, and kept up to date as it
+            # goes. A list that fails in the middle of itself - three of the
+            # four networks written, the fourth refused - has to be taken back
+            # as surely as one that never started.
+            record = _Written(kind, {entry.domain for entry in state.rules_for(mac)})
+            written.append(record)
+            try:
+                after = self._block_one(kind, state, mac, name, record)
+            except RouterError as exc:
+                raise RouterError(f"{exc} {self._take_back(written, mac)}") from exc
             if first is None:
-                first = written
+                first = after
         if first is None:
             raise RouterError(
                 "This router published no block list that Mind recognises."
             )
         return first
 
+    def _take_back(self, written: list[_Written], mac: str) -> str:
+        """Undo the lists that took the change, and say whether that worked.
+
+        Only what this attempt added: rules that were already there are somebody
+        else's block, and a switch is put back only where Mind turned it on -
+        one that was already on is holding other rules up.
+        """
+        trouble: list[str] = []
+        for record in reversed(written):
+            kind = record.kind
+            try:
+                state = self.state(kind)
+                for rule in state.rules_for(mac):
+                    if rule.domain in record.before:
+                        continue
+                    self._send(
+                        kind, kind.delete, {rule.domain: "", "x.X_HW_Token": state.token}
+                    )
+                    state = self.state(kind)
+                if record.woke:
+                    self._send(
+                        kind,
+                        kind.switch,
+                        {kind.right_field: "0", "x.X_HW_Token": state.token},
+                    )
+            except RouterError as exc:
+                trouble.append(f"{kind.label}: {exc}")
+        if trouble:
+            return (
+                "What had already been written could not all be taken back, so that "
+                f"device may still be refused on part of the network ({'; '.join(trouble)}). "
+                "Unblock it here to clear the rest."
+            )
+        return "Nothing was changed."
+
     def _block_one(
-        self, kind: FilterKind, state: BlockState, mac: str, name: str
+        self,
+        kind: FilterKind,
+        state: BlockState,
+        mac: str,
+        name: str,
+        record: _Written,
     ) -> BlockState:
         address = router_mac(mac)
         if not state.blacklist:
@@ -1040,9 +1541,14 @@ class BlockList:
         targets = (
             [network.field for network in self.networks()] if kind.per_ssid else [""]
         )
-        already = {entry.ssid for entry in state.rules_for(mac)}
+        # Matched on the network, not on its spelling. The form is given
+        # "SSID-2" and the row may come back saying "SSID2" - the same network
+        # written the way the other half of this firmware writes it - and taking
+        # those for different networks adds four more rules on every block until
+        # the list is full and no further block takes at all.
+        already = {_ssid_key(entry.ssid) for entry in state.rules_for(mac)}
         for target in targets:
-            if target in already:
+            if _ssid_key(target) in already:
                 continue
             fields = {
                 "x.SourceMACAddress": address,
@@ -1058,11 +1564,19 @@ class BlockList:
             state = self.state(kind)  # each write spends the token it was given
 
         if not state.on:
+            # Sent when the switch reads as off and when it could not be read
+            # at all: this list has to be enforcing when this returns, and a
+            # switch already on is not disturbed by being set on again.
             self._send(
                 kind,
                 kind.switch,
                 {kind.right_field: "1", "x.X_HW_Token": state.token},
             )
+            # Taken back only where the page said, in so many words, that it
+            # was off. A switch Mind could not read may have been on and
+            # holding somebody else's rules up, and turning that off to tidy
+            # away a failed block would let every one of them back on.
+            record.woke = state.switch_read
             state = self.state(kind)
 
         if not state.blocks(mac):
@@ -1116,6 +1630,38 @@ def blocked_macs(
     session = RouterSession(address, timeout)
     session.sign_in(username, password)
     return BlockList(session).blocked_macs()
+
+
+def wifi_networks(
+    address: str,
+    username: str,
+    password: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> tuple[Ssid, ...]:
+    """Every Wi-Fi network the router defines, and whether each is on the air."""
+    session = RouterSession(address, timeout)
+    session.sign_in(username, password)
+    return WlanNetworks(session).all()
+
+
+def set_network_enabled(
+    address: str,
+    username: str,
+    password: str,
+    index: int,
+    enabled: bool,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> tuple[Ssid, ...]:
+    """Put one network on or off the air, and report every network afterwards.
+
+    What comes back is read from the router rather than assumed from what was
+    asked for, which is the same rule blocking follows and for the same reason.
+    """
+    session = RouterSession(address, timeout)
+    session.sign_in(username, password)
+    networks = WlanNetworks(session)
+    networks.set_enabled(index, enabled)
+    return networks.all()
 
 
 def set_blocked(

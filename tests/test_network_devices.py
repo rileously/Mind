@@ -231,3 +231,39 @@ class DevicesPanelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+class KindTests(unittest.TestCase):
+    """What a device is, kept apart from what it is called.
+
+    Only the router can say that a phone runs Android 15, so it arrives with a
+    scan and has to survive the ones that follow. It must never become the name:
+    eight phones would all read "Android 15", which is the duplicate label the
+    address fallback exists to avoid.
+    """
+
+    def test_what_the_router_said_is_remembered(self):
+        observed = [Observation(mac="00-08-22-33-1d-51", ip="192.168.18.26", kind="Android 15")]
+        devices, _new = merge([], observed, NOW)
+        self.assertEqual(devices[0].kind, "Android 15")
+
+    def test_it_survives_a_scan_that_could_not_reach_the_router(self):
+        known = [Device(mac="00-08-22-33-1d-51", ip="192.168.18.26", kind="Android 15")]
+        observed = [Observation(mac="00-08-22-33-1d-51", ip="192.168.18.26")]
+        devices, _new = merge(known, observed, NOW)
+        self.assertEqual(devices[0].kind, "Android 15")
+
+    def test_it_is_never_used_as_the_name(self):
+        device = Device(mac="00-08-22-33-1d-51", ip="192.168.18.26", kind="Android 15")
+        self.assertEqual(device.display_name, "Device 26")
+
+    def test_a_name_still_wins_over_it(self):
+        device = Device(mac="a2-27-ec-61-6a-a6", ip="192.168.18.12",
+                        hostname="Shayan", kind="Android 13")
+        self.assertEqual(device.display_name, "Shayan")
+
+    def test_it_is_written_down_and_read_back(self):
+        device = Device(mac="00-08-22-33-1d-51", ip="192.168.18.26", kind="Android 15")
+        self.assertEqual(from_dict(to_dict(device)).kind, "Android 15")
+
+    def test_a_file_written_before_any_of_this_still_loads(self):
+        old = {"mac": "00-08-22-33-1d-51", "ip": "192.168.18.26", "hostname": ""}
+        self.assertEqual(from_dict(old).kind, "")

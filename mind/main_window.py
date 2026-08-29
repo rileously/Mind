@@ -114,6 +114,7 @@ from .network_scanner import (
     NetworkScanner,
     RouterFilterProbe,
     RouterTest,
+    SwitchNetwork,
 )
 from .mail_watch import MailWatcher
 from .phone_watch import (
@@ -933,7 +934,7 @@ class NotificationsPage(QWidget):
         self.empty_label.setObjectName("Muted")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
-        root.addWidget(self.empty_label)
+        root.addWidget(self.empty_label, 1)
 
         self.watchers: list[Watcher] = []
         self._loading = False
@@ -1057,9 +1058,25 @@ MESSAGE_LIMIT = 300
 
 
 class NetworkDevicesPage(QWidget):
-    """What else is on this Wi-Fi, kept up to date while Mind runs."""
+    """What else is on this Wi-Fi, kept up to date while Mind runs.
+
+    Two things can be refused here: one device, or a whole network. They are
+    the same wish at two sizes - "not this phone" and "not this Wi-Fi, by
+    anyone, this week" - so they sit on the one page, and each says plainly
+    which devices it is about to affect before it does anything.
+    """
 
     updated = Signal()
+
+    COLUMNS = (
+        "Name",
+        "What it is",
+        "Network",
+        "IP address",
+        "MAC address",
+        "Status",
+        "Last seen",
+    )
 
     def __init__(self, store: ConfigStore, scanner, parent: QWidget | None = None):
         super().__init__(parent)
@@ -1079,6 +1096,7 @@ class NetworkDevicesPage(QWidget):
         toolbar.setContentsMargins(14, 12, 14, 12)
         toolbar.setSpacing(10)
         self.enabled_switch = ToggleSwitch()
+        self.enabled_switch.setToolTip("Watch this network while Mind runs")
         self.enabled_switch.toggled.connect(self._set_enabled)
         self.status_label = QLabel("")
         self.status_label.setObjectName("Muted")
@@ -1091,34 +1109,62 @@ class NetworkDevicesPage(QWidget):
         self.scan_button = QPushButton("Scan now")
         self.scan_button.setProperty("primary", True)
         self.scan_button.clicked.connect(self._scan_now)
-        self.rename_button = QPushButton("Rename")
-        self.rename_button.clicked.connect(self._rename)
-        self.forget_button = QPushButton("Forget")
-        self.forget_button.setProperty("danger", True)
-        self.forget_button.clicked.connect(self._forget)
-        # One button rather than two: a device is either on the Wi-Fi or it is
-        # not, and the label says which way this click goes.
-        self.block_button = QPushButton("Block")
-        self.block_button.setProperty("danger", True)
-        self.block_button.clicked.connect(self._toggle_block)
         toolbar.addWidget(self.enabled_switch)
         toolbar.addWidget(self.status_label, 1)
         toolbar.addWidget(self.interval)
-        toolbar.addWidget(self.rename_button)
-        toolbar.addWidget(self.forget_button)
-        toolbar.addWidget(self.block_button)
         toolbar.addWidget(self.scan_button)
         root.addWidget(toolbar_card)
 
+        # The networks themselves, each with its own switch. Blocking names one
+        # device; this is the other end of the same wish - a guest network or a
+        # children's network that should simply not be there for a while,
+        # whoever owns the phone trying to join it.
+        self.networks_card = Card(variant="InsetCard")
+        networks = QVBoxLayout(self.networks_card)
+        networks.setContentsMargins(14, 12, 14, 12)
+        networks.setSpacing(8)
+        networks.addWidget(
+            section_title(
+                "Wi-Fi networks",
+                "Turn one off and nothing can join it until you turn it back on.",
+            )
+        )
+        self.networks_rows = QVBoxLayout()
+        self.networks_rows.setContentsMargins(0, 0, 0, 0)
+        self.networks_rows.setSpacing(6)
+        networks.addLayout(self.networks_rows)
+        self.networks_note = QLabel("")
+        self.networks_note.setObjectName("Muted")
+        self.networks_note.setWordWrap(True)
+        networks.addWidget(self.networks_note)
+        root.addWidget(self.networks_card)
+
         # The router's own list is the only place a phone's real name lives, and
         # reaching it means signing in. Everyone's password is different, so it
-        # is asked for here rather than assumed.
+        # is asked for here rather than assumed. It is folded away once it is
+        # working: setting the router up is a thing you do once, and it sat
+        # across the top of the page every day afterwards.
         router_card = Card(variant="InsetCard")
-        router = QHBoxLayout(router_card)
-        router.setContentsMargins(14, 12, 14, 12)
+        router_box = QVBoxLayout(router_card)
+        router_box.setContentsMargins(14, 12, 14, 12)
+        router_box.setSpacing(8)
+        summary = QHBoxLayout()
+        summary.setSpacing(10)
+        self.router_summary = QLabel("")
+        self.router_summary.setWordWrap(True)
+        self.router_toggle = QPushButton("Set up")
+        self.router_toggle.setCheckable(True)
+        self.router_toggle.clicked.connect(self._toggle_router_setup)
+        summary.addWidget(self.router_summary, 1)
+        summary.addWidget(self.router_toggle)
+        router_box.addLayout(summary)
+
+        self.router_details = QWidget()
+        router = QHBoxLayout(self.router_details)
+        router.setContentsMargins(0, 0, 0, 0)
         router.setSpacing(10)
         self.router_address = QLineEdit()
-        self.router_address.setPlaceholderText("Router address")
+        self.router_address.setPlaceholderText("192.168.18.1")
         self.router_address.setMaximumWidth(150)
         self.router_username = QLineEdit()
         self.router_username.setPlaceholderText("Username")
@@ -1128,6 +1174,7 @@ class NetworkDevicesPage(QWidget):
         self.router_password.setEchoMode(QLineEdit.Password)
         self.router_password.setMaximumWidth(150)
         self.router_test = QPushButton("Test")
+        self.router_test.setProperty("primary", True)
         self.router_test.clicked.connect(self._test_router)
         # Blocking a device has to happen on the router, and which page does it
         # differs by firmware. This looks for that page without touching it, so
@@ -1137,52 +1184,116 @@ class NetworkDevicesPage(QWidget):
             "Ask the router which of its pages keeps a block list. Only reads."
         )
         self.router_filters.clicked.connect(self._probe_filters)
-        self.router_status = QLabel("")
-        self.router_status.setObjectName("Muted")
-        self.router_status.setWordWrap(True)
         for field in (self.router_address, self.router_username, self.router_password):
             field.editingFinished.connect(self._save_router)
-        router.addWidget(QLabel("Router"))
+        router.addWidget(QLabel("Address"))
         router.addWidget(self.router_address)
         router.addWidget(self.router_username)
         router.addWidget(self.router_password)
         router.addWidget(self.router_test)
         router.addWidget(self.router_filters)
-        router.addWidget(self.router_status, 1)
+        router.addStretch(1)
+        router_box.addWidget(self.router_details)
+
+        self.router_status = QLabel("")
+        self.router_status.setObjectName("Muted")
+        self.router_status.setWordWrap(True)
+        # Takes no room until it has something to say. An empty line under a
+        # one-line card is a gap the eye reads as a missing thing.
+        self.router_status.setVisible(False)
+        router_box.addWidget(self.router_status)
         root.addWidget(router_card)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["Name", "IP address", "MAC address", "Vendor", "Status", "Last seen"]
+        # Finding one device among forty. A house has more of these than anyone
+        # expects, and scrolling a list looking for the phone you just took off
+        # the charger is not how anyone wants to spend the minute.
+        find_card = Card(variant="InsetCard")
+        find = QHBoxLayout(find_card)
+        find.setContentsMargins(14, 10, 14, 10)
+        find.setSpacing(10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by name, address or maker…")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._redraw)
+        self.filter = SegmentedControl(
+            [("All", "all"), ("Online", "online"), ("Blocked", "blocked")]
         )
+        self.filter.changed.connect(lambda _value: self._redraw())
+        find.addWidget(self.search, 1)
+        find.addWidget(self.filter)
+        self.find_card = find_card
+        root.addWidget(find_card)
+
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(list(self.COLUMNS))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        for column in range(1, 6):
+        for column in range(1, len(self.COLUMNS)):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        # By name to begin with, which is the order anyone looking for one
+        # device would want, and the one the header's arrow already claims.
+        header.setSortIndicator(0, Qt.AscendingOrder)
         self.table.doubleClicked.connect(self._rename)
         self.table.itemSelectionChanged.connect(self._sync_actions)
+        # Everything you can do to a device, where the device is. Reaching for a
+        # button at the top of the page after picking a row halfway down it is a
+        # journey the right-click saves.
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._device_menu)
         root.addWidget(self.table, 1)
 
-        self.empty_label = QLabel(
-            "Nothing found yet. Turn the switch on to look — Mind pings every address "
-            "on this network, asks devices to name themselves, and remembers what it finds."
-        )
+        # The actions, under the list they act on rather than above it, and each
+        # one saying which device it means. "Block" is a different question from
+        # "Block Nuha's tablet", and only one of them can be answered without
+        # looking away.
+        actions_card = Card(variant="InsetCard")
+        actions = QHBoxLayout(actions_card)
+        actions.setContentsMargins(14, 10, 14, 10)
+        actions.setSpacing(10)
+        self.selection_label = QLabel("")
+        self.selection_label.setObjectName("Muted")
+        self.selection_label.setWordWrap(True)
+        self.rename_button = QPushButton("Rename")
+        self.rename_button.clicked.connect(self._rename)
+        self.forget_button = QPushButton("Forget")
+        self.forget_button.clicked.connect(self._forget)
+        # One button rather than two: a device is either on the Wi-Fi or it is
+        # not, and the label says which way this click goes.
+        self.block_button = QPushButton("Block")
+        self.block_button.setProperty("danger", True)
+        self.block_button.clicked.connect(self._toggle_block)
+        actions.addWidget(self.selection_label, 1)
+        actions.addWidget(self.rename_button)
+        actions.addWidget(self.forget_button)
+        actions.addWidget(self.block_button)
+        self.actions_card = actions_card
+        root.addWidget(actions_card)
+
+        self.empty_label = QLabel("")
         self.empty_label.setObjectName("Muted")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
-        root.addWidget(self.empty_label)
+        root.addWidget(self.empty_label, 1)
 
         self._loading = False
         self._busy_blocking = False
+        self._busy_networks = False
+        self._router_ready = False
+        self.devices: list = []
+        self.shown: list = []
         self.blocked: set[str] = set(scanner.blocked) if scanner is not None else set()
+        self.networks: list = list(scanner.networks) if scanner is not None else []
+        self._network_switches: dict[int, ToggleSwitch] = {}
         if scanner is not None:
             scanner.devices_changed.connect(self._show_devices)
             scanner.blocked_changed.connect(self._show_blocked)
+            scanner.networks_changed.connect(self._show_networks)
             scanner.scanning.connect(self._scanning)
         self.refresh()
 
@@ -1203,63 +1314,413 @@ class NetworkDevicesPage(QWidget):
             )
         finally:
             self._loading = False
+        self._sync_router_card()
+        self._show_networks(list(self.networks))
         self._show_devices(list(self.scanner.devices) if self.scanner else [])
 
+    # -- the router's own details ----------------------------------------
+
+    def _router_is_set_up(self) -> bool:
+        """Whether there is a router to ask at all.
+
+        Read from the last save rather than from the file: this is asked again
+        for every keystroke in the search box, and the config is on disk.
+        """
+        return self._router_ready
+
+    def _reread_router(self) -> bool:
+        config = self.store.load()
+        self._router_ready = bool(
+            str(config.get("router_address", "")).strip()
+            and str(config.get("router_username", "")).strip()
+            and self.store.get_router_password(config)
+        )
+        return self._router_ready
+
+    def _sync_router_card(self) -> None:
+        """Show the details while they are needed and fold them away after.
+
+        Setting the router up is a thing you do once. It does not deserve three
+        text boxes across the top of the page every day afterwards - but it does
+        deserve to be findable the day the password changes.
+        """
+        ready = self._reread_router()
+        expanded = self.router_toggle.isChecked() or not ready
+        self.router_details.setVisible(expanded)
+        self.router_toggle.setChecked(expanded)
+        self.router_toggle.setText("Done" if expanded and ready else "Set up")
+        self.router_toggle.setVisible(ready)
+        if ready:
+            address = str(self.store.load().get("router_address", "")).strip()
+            self.router_summary.setText(f"Router at {address}")
+            self.router_summary.setObjectName("")
+        else:
+            self.router_summary.setText(
+                "Sign in to the router to see real device names, block a device, "
+                "or turn a network off. Nothing leaves this network."
+            )
+            self.router_summary.setObjectName("Muted")
+
+    def _toggle_router_setup(self) -> None:
+        self._sync_router_card()
+
+    # -- the networks ----------------------------------------------------
+
+    def _show_networks(self, networks: list) -> None:
+        """One row per network the router has, each with its own switch."""
+        self.networks = list(networks)
+        while self.networks_rows.count():
+            item = self.networks_rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                # Unparented before it is dropped. deleteLater only schedules
+                # the delete, and taking a row out of the layout does not take
+                # it off the card - so the old rows stayed where they were,
+                # drawn over the new ones until the event loop next ran.
+                widget.setParent(None)
+                widget.deleteLater()
+        self._network_switches = {}
+        for network in self.networks:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(10)
+            switch = ToggleSwitch()
+            switch.setChecked(network.enabled)
+            switch.setEnabled(not self._busy_networks)
+            switch.toggled.connect(
+                lambda on, index=network.index: self._switch_network(index, on)
+            )
+            label = QLabel(network.label)
+            here = self._devices_on(network)
+            count = QLabel(
+                "nothing on it"
+                if not here
+                else f"{len(here)} device{'s' if len(here) != 1 else ''}"
+            )
+            count.setObjectName("Muted")
+            line.addWidget(switch)
+            line.addWidget(label, 1)
+            line.addWidget(count)
+            self.networks_rows.addWidget(row)
+            self._network_switches[network.index] = switch
+        known = self._router_is_set_up()
+        self.networks_card.setVisible(bool(self.networks) or known)
+        if self.networks:
+            self.networks_note.setText("")
+            self.networks_note.setVisible(False)
+        else:
+            self.networks_note.setText(
+                "Sign in to the router below to see the networks it broadcasts."
+                if not known
+                else "The router has not said which networks it broadcasts yet."
+            )
+            self.networks_note.setVisible(True)
+
+    def _devices_on(self, network) -> list:
+        """The devices this scan saw on one network, right now."""
+        return [
+            device
+            for device in self.devices
+            if device.online and device.network == network.port
+        ]
+
+    def _switch_network(self, index: int, on: bool) -> None:
+        """Put a whole network on or off the air, after saying who it affects.
+
+        Turning a network off is not blocking one phone: it refuses everything
+        on it at once, including whatever is streaming in another room. So the
+        question names them rather than asking in the abstract.
+        """
+        if self._loading or self._busy_networks or self.scanner is None:
+            return
+        network = next((item for item in self.networks if item.index == index), None)
+        if network is None or network.enabled == on:
+            return
+        if not on:
+            here = self._devices_on(network)
+            who = (
+                "Nothing is on it at the moment."
+                if not here
+                else "This will disconnect "
+                + ", ".join(device.display_name for device in here[:4])
+                + (f" and {len(here) - 4} more" if len(here) > 4 else "")
+                + "."
+            )
+            if self._own_network(network):
+                QMessageBox.warning(
+                    self,
+                    "That is this network",
+                    f"{network.label} is the network this PC is on. Turning it off "
+                    "would cut the connection Mind needs to turn it back on.",
+                )
+                self._restore_switches()
+                return
+            confirmed = QMessageBox.question(
+                self,
+                "Turn this network off",
+                f"Turn {network.label} off?\n\n{who}\n\nIt stays off until you turn "
+                "it back on here or on the router.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirmed != QMessageBox.Yes:
+                self._restore_switches()
+                return
+
+        self._busy_networks = True
+        for switch in self._network_switches.values():
+            switch.setEnabled(False)
+        self._network_thread = QThread(self)
+        self._network_worker = SwitchNetwork(self.store, index, network.label, on)
+        self._network_worker.moveToThread(self._network_thread)
+        self._network_thread.started.connect(self._network_worker.run)
+        self._network_worker.step.connect(self.status_label.setText)
+        self._network_worker.done.connect(self._network_switched)
+        self._network_thread.start()
+
+    def _own_network(self, network) -> bool:
+        """Whether this PC is itself on that network.
+
+        The same guard blocking has for this machine, for the same reason: the
+        connection that undoes the change is the one being cut.
+        """
+        here = local_ipv4()
+        if not here:
+            return False
+        return any(
+            device.ip == here and device.network == network.port
+            for device in self.devices
+        )
+
+    def _restore_switches(self) -> None:
+        """Put the switches back to what the router last said.
+
+        A switch moves the moment it is clicked, and the question comes after.
+        Answering no has to move it back, or the page would be showing a change
+        that never happened.
+        """
+        self._loading = True
+        try:
+            for network in self.networks:
+                switch = self._network_switches.get(network.index)
+                if switch is not None:
+                    switch.setChecked(network.enabled)
+        finally:
+            self._loading = False
+
+    def _network_switched(self, worked: bool, message: str, networks: list) -> None:
+        self._busy_networks = False
+        self.status_label.setText(message)
+        thread = getattr(self, "_network_thread", None)
+        if thread is not None:
+            thread.quit()
+            thread.wait(2000)
+        self._network_thread = None
+        self._network_worker = None
+        if networks:
+            if self.scanner is not None:
+                self.scanner.networks = list(networks)
+            self._show_networks(list(networks))
+        else:
+            self._restore_switches()
+            for switch in self._network_switches.values():
+                switch.setEnabled(True)
+        if not worked:
+            self._say_on_the_router_card(message)
+        # The devices on a network that just went off are about to drop, and
+        # the list should say so rather than showing them online for a minute.
+        if worked and self.scanner is not None:
+            self.scanner.scan_now()
+
+    # -- the devices -----------------------------------------------------
+
     def _show_devices(self, devices: list) -> None:
-        now = time.time()
         self.devices = list(devices)
-        self.table.setRowCount(len(self.devices))
-        for row, device in enumerate(self.devices):
-            # Blocked beats online: a device the router is refusing may still
-            # be there, trying, and "Online" would read as though it worked.
-            if device.mac in self.blocked:
-                status = "Blocked"
-            elif device.online:
-                status = "Online"
-            else:
-                status = "Offline"
+        self._show_networks(list(self.networks))
+        self._redraw()
+
+    def _status_of(self, device) -> str:
+        # Blocked beats online: a device the router is refusing may still be
+        # there, trying, and "Online" would read as though it worked.
+        if device.mac in self.blocked:
+            return "Blocked"
+        return "Online" if device.online else "Offline"
+
+    def _network_label(self, device) -> str:
+        """Which network a device is on, by the name a person gave it."""
+        if not device.network:
+            return "—"
+        named = next(
+            (item for item in self.networks if item.port == device.network), None
+        )
+        return named.name or device.network if named else device.network
+
+    def _matches(self, device) -> bool:
+        """Whether this device survives the search box and the filter."""
+        chosen = self.filter.currentData() or "all"
+        status = self._status_of(device)
+        if chosen == "online" and status != "Online":
+            return False
+        if chosen == "blocked" and status != "Blocked":
+            return False
+        wanted = self.search.text().strip().lower()
+        if not wanted:
+            return True
+        return any(
+            wanted in str(value).lower()
+            for value in (
+                device.display_name,
+                device.ip,
+                device.mac,
+                device.vendor,
+                device.kind,
+                self._network_label(device),
+            )
+        )
+
+    def _redraw(self) -> None:
+        """Draw the rows the search and the filter leave, keeping the selection.
+
+        Sorting is switched off while the rows are written. With it on, each
+        row lands where the sort puts it rather than where it was set, and the
+        cells of one device end up spread across several.
+        """
+        now = time.time()
+        chosen = self._selected()
+        self.shown = [device for device in self.devices if self._matches(device)]
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(self.shown))
+        for row, device in enumerate(self.shown):
             values = [
                 device.display_name,
+                device.kind or device.vendor or "Unknown",
+                self._network_label(device),
                 device.ip or "—",
                 device.mac,
-                device.vendor or "Unknown",
-                status,
+                self._status_of(device),
                 device.seen_label(now),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(row, column, item)
-        self.empty_label.setVisible(not self.devices)
-        self.table.setVisible(bool(self.devices))
-        online = sum(1 for device in self.devices if device.online)
-        if not bool(self.store.load().get("network_scan_enabled", False)):
-            self.status_label.setText("Scanning is off.")
-        else:
-            self.status_label.setText(
-                f"{online} online of {len(self.devices)} known."
-                if self.devices
-                else "Looking…"
+        self.table.setSortingEnabled(True)
+        # Turning sorting back on does not re-apply it, so the rows would sit
+        # in the order they were written while the header's arrow claimed
+        # otherwise. Sorted again here so the two agree.
+        header = self.table.horizontalHeader()
+        if header.isSortIndicatorShown():
+            self.table.sortItems(
+                header.sortIndicatorSection(), header.sortIndicatorOrder()
             )
+        if chosen is not None:
+            self._select(chosen.mac)
+        self._sync_empty()
         self._sync_actions()
+
+    def _sync_empty(self) -> None:
+        """What to say when the list is empty, which is never just "nothing"."""
+        showing = bool(self.shown)
+        self.table.setVisible(showing)
+        self.actions_card.setVisible(showing)
+        self.empty_label.setVisible(not showing)
+        # Nothing to search through is not worth a search box. It appears with
+        # the first device and stays once there is a list to narrow.
+        self.find_card.setVisible(bool(self.devices))
+        if not self.devices:
+            self.empty_label.setText(
+                "Nothing found yet. Turn the switch on to look — Mind pings every "
+                "address on this network, asks devices to name themselves, and "
+                "remembers what it finds."
+            )
+        elif not showing:
+            self.empty_label.setText(
+                f"None of the {len(self.devices)} devices Mind knows about match that."
+            )
+        online = sum(1 for device in self.devices if device.online)
+        if not self.enabled_switch.isChecked():
+            self.status_label.setText("Scanning is off.")
+        elif not self.devices:
+            self.status_label.setText("Looking…")
+        elif len(self.shown) != len(self.devices):
+            self.status_label.setText(
+                f"Showing {len(self.shown)} of {len(self.devices)} known."
+            )
+        else:
+            self.status_label.setText(f"{online} online of {len(self.devices)} known.")
+
+    def _select(self, mac: str) -> None:
+        """Put the selection back on a device after the rows were rewritten.
+
+        By reading the table for the address, not by counting into the list
+        behind it. Sorting means the two orders differ, and selecting by
+        position put the highlight - and every button that names it - on a
+        different device from the one asked for.
+        """
+        column = self.COLUMNS.index("MAC address")
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, column)
+            if item is not None and item.text() == mac:
+                self.table.selectRow(row)
+                return
+
+    def _device_menu(self, position) -> None:
+        """Everything you can do to a device, where the device is."""
+        row = self.table.rowAt(position.y())
+        if row < 0:
+            return
+        self.table.selectRow(row)
+        device = self._selected()
+        if device is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Rename…", self._rename)
+        blocked = device.mac in self.blocked
+        block = menu.addAction(
+            f"Let {device.display_name} back on" if blocked else f"Block {device.display_name}",
+            self._toggle_block,
+        )
+        block.setEnabled(self.block_button.isEnabled())
+        menu.addSeparator()
+        menu.addAction("Forget", self._forget)
+        menu.exec(self.table.viewport().mapToGlobal(position))
 
     def _scanning(self, busy: bool) -> None:
         self.scan_button.setEnabled(not busy)
         self.scan_button.setText("Scanning…" if busy else "Scan now")
 
     def _sync_actions(self) -> None:
-        chosen = self.table.currentRow() >= 0 and bool(getattr(self, "devices", []))
+        device = self._selected()
+        chosen = device is not None
         self.rename_button.setEnabled(chosen)
         self.forget_button.setEnabled(chosen)
-        device = self._selected()
-        blocked = device is not None and device.mac in self.blocked
-        self.block_button.setText("Unblock" if blocked else "Block")
+        blocked = chosen and device.mac in self.blocked
+        # The button says which device it means. "Block" and "Block Nuha's
+        # tablet" are different questions, and only one can be answered without
+        # looking away from the button to check the selection.
+        if not chosen:
+            self.selection_label.setText("Pick a device to rename, forget or block.")
+            self.block_button.setText("Block")
+        else:
+            self.selection_label.setText(
+                f"{device.display_name} — {device.mac}"
+                + (f" on {self._network_label(device)}" if device.network else "")
+            )
+            self.block_button.setText(
+                f"Let {device.display_name} back on" if blocked else f"Block {device.display_name}"
+            )
         self.block_button.setEnabled(chosen and not self._busy_blocking)
-        if device is not None and self._is_this_pc(device):
+        if chosen and self._is_this_pc(device):
             # Blocking the machine Mind is running on would cut the connection
             # that undoes it.
             self.block_button.setEnabled(False)
             self.block_button.setToolTip("This is this PC. Mind will not block it.")
+        elif not self._router_is_set_up():
+            self.block_button.setEnabled(False)
+            self.block_button.setToolTip(
+                "Blocking happens on the router. Sign in to it first."
+            )
         else:
             self.block_button.setToolTip(
                 "Ask the router to refuse this device on every Wi-Fi network it has."
@@ -1272,7 +1733,7 @@ class NetworkDevicesPage(QWidget):
 
     def _show_blocked(self, blocked: list) -> None:
         self.blocked = set(blocked)
-        self._show_devices(list(self.devices))
+        self._redraw()
 
     def _toggle_block(self) -> None:
         """Block the selected device, or let it back on, after asking.
@@ -1305,15 +1766,18 @@ class NetworkDevicesPage(QWidget):
 
         self._busy_blocking = True
         self.block_button.setEnabled(False)
+        self.block_button.setText("Asking the router…")
         self.status_label.setText(
             f"Asking the router to {'block' if blocking else 'unblock'} {device.display_name}…"
         )
+        self._say_on_the_router_card("")
         self._block_thread = QThread(self)
         self._block_worker = BlockDevice(
             self.store, device.mac, device.display_name, blocking
         )
         self._block_worker.moveToThread(self._block_thread)
         self._block_thread.started.connect(self._block_worker.run)
+        self._block_worker.step.connect(self.status_label.setText)
         self._block_worker.done.connect(self._block_finished)
         self._block_thread.start()
 
@@ -1327,7 +1791,11 @@ class NetworkDevicesPage(QWidget):
         self._block_thread = None
         self._block_worker = None
         if not worked:
-            QMessageBox.warning(self, "The router refused", message)
+            # Said on the page rather than in a box to be dismissed. A dialog
+            # here interrupts to deliver something the reader can do nothing
+            # about until they have read it twice, and it takes the message
+            # away with it when they close it.
+            self._say_on_the_router_card(f"The router refused: {message}")
         # Either way the router is the authority on who is blocked, so the next
         # scan is what updates the list rather than anything assumed here.
         if self.scanner is not None:
@@ -1335,9 +1803,19 @@ class NetworkDevicesPage(QWidget):
         self._sync_actions()
 
     def _selected(self):
+        """The device on the selected row.
+
+        Found by the address written in the row rather than by counting down
+        the list: with sorting on, row three is not the third device, and the
+        two disagreeing is how a click on one phone blocks another.
+        """
         row = self.table.currentRow()
-        devices = getattr(self, "devices", [])
-        return devices[row] if 0 <= row < len(devices) else None
+        item = self.table.item(row, self.COLUMNS.index("MAC address")) if row >= 0 else None
+        if item is None:
+            return None
+        return next(
+            (device for device in self.shown if device.mac == item.text()), None
+        )
 
     def _set_enabled(self, on: bool) -> None:
         if self._loading:
@@ -1365,6 +1843,8 @@ class NetworkDevicesPage(QWidget):
         if typed != ROUTER_PASSWORD_MASK:
             config = self.store.set_router_password(config, typed)
         self.store.save(config)
+        self._reread_router()
+        self._sync_actions()
 
     def _test_router(self) -> None:
         """Ask the router now, and say plainly what came back.
@@ -1374,7 +1854,7 @@ class NetworkDevicesPage(QWidget):
         """
         self._save_router()
         self.router_test.setEnabled(False)
-        self.router_status.setText("Asking the router…")
+        self._say_on_the_router_card("Asking the router…")
         self._router_thread = QThread(self)
         self._router_worker = RouterTest(self.store)
         self._router_worker.moveToThread(self._router_thread)
@@ -1382,8 +1862,13 @@ class NetworkDevicesPage(QWidget):
         self._router_worker.done.connect(self._router_tested)
         self._router_thread.start()
 
-    def _router_tested(self, message: str) -> None:
+    def _say_on_the_router_card(self, message: str) -> None:
+        """Put a line under the router details, and show it only when there is one."""
         self.router_status.setText(message)
+        self.router_status.setVisible(bool(message))
+
+    def _router_tested(self, message: str) -> None:
+        self._say_on_the_router_card(message)
         self.router_test.setEnabled(True)
         thread = getattr(self, "_router_thread", None)
         if thread is not None:
@@ -1391,15 +1876,19 @@ class NetworkDevicesPage(QWidget):
             thread.wait(2000)
         self._router_thread = None
         self._router_worker = None
-        # A successful sign-in changes what the next scan can name.
-        if message.startswith("Signed in") and self.scanner is not None:
-            self.scanner.scan_now()
+        # A successful sign-in changes what the next scan can name, and what
+        # this page can offer: the networks and the block button both need one.
+        if message.startswith("Signed in"):
+            self._sync_router_card()
+            self._sync_actions()
+            if self.scanner is not None:
+                self.scanner.scan_now()
 
     def _probe_filters(self) -> None:
         """Look for the router page that blocks a device, on its own thread."""
         self._save_router()
         self.router_filters.setEnabled(False)
-        self.router_status.setText("Looking through the router's pages…")
+        self._say_on_the_router_card("Looking through the router's pages…")
         self._filter_thread = QThread(self)
         self._filter_worker = RouterFilterProbe(self.store)
         self._filter_worker.moveToThread(self._filter_thread)
@@ -1408,7 +1897,7 @@ class NetworkDevicesPage(QWidget):
         self._filter_thread.start()
 
     def _filters_probed(self, message: str) -> None:
-        self.router_status.setText(message)
+        self._say_on_the_router_card(message)
         self.router_filters.setEnabled(True)
         thread = getattr(self, "_filter_thread", None)
         if thread is not None:
@@ -1444,8 +1933,19 @@ class NetworkDevicesPage(QWidget):
         if device is None or self.scanner is None:
             return
         # Forgetting only clears the history; a device still here is found again
-        # by the next scan, which is worth saying so it is not a surprise.
-        self.scanner.forget(device.mac)
+        # by the next scan, which is worth saying so it is not a surprise - and
+        # worth asking about, because the name someone typed goes with it.
+        named = f'The name "{device.custom_name}" goes with it. ' if device.custom_name else ""
+        confirmed = QMessageBox.question(
+            self,
+            "Forget this device",
+            f"Forget {device.display_name}?\n\n{named}If it is still on the network "
+            "the next scan finds it again, as something Mind has not seen before.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmed == QMessageBox.Yes:
+            self.scanner.forget(device.mac)
 
 
 
