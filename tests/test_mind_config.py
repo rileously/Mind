@@ -81,6 +81,52 @@ class ConfigStoreTests(unittest.TestCase):
         stored = json.loads(self.store.config_path.read_text(encoding="utf-8"))
         self.assertEqual(stored["bundled_commands_revision"], BUNDLED_COMMANDS_REVISION)
 
+    def test_upgrade_scopes_existing_fix_and_improve_to_the_sentence(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.store.config_path.write_text(
+            json.dumps({"bundled_commands_revision": 1}), encoding="utf-8"
+        )
+        self.store.commands_path.write_text(
+            json.dumps([
+                {"trigger": "fix", "type": "ai", "prompt": "My custom fix."},
+                {"trigger": "improve", "type": "ai", "prompt": "My custom improve."},
+                {"trigger": "summarize", "type": "ai", "prompt": "Summarize it."},
+            ]),
+            encoding="utf-8",
+        )
+
+        by_trigger = {
+            str(command["trigger"]): command for command in self.store.load_commands()
+        }
+
+        self.assertEqual(by_trigger["fix"]["scope"], "sentence")
+        self.assertEqual(by_trigger["improve"]["scope"], "sentence")
+        self.assertEqual(by_trigger["fix"]["prompt"], "My custom fix.")
+        self.assertNotIn("scope", by_trigger["summarize"])
+
+    def test_upgrade_leaves_a_command_the_user_unscoped_alone(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.store.config_path.write_text(
+            json.dumps({"bundled_commands_revision": BUNDLED_COMMANDS_REVISION}),
+            encoding="utf-8",
+        )
+        self.store.commands_path.write_text(
+            json.dumps([{"trigger": "fix", "type": "ai", "prompt": "Fix it."}]),
+            encoding="utf-8",
+        )
+
+        commands = self.store.load_commands()
+
+        self.assertNotIn("scope", commands[0])
+
+    def test_bundled_commands_are_sentence_scoped_for_fix_and_improve(self):
+        commands_path = Path(__file__).resolve().parents[1] / "commands.json"
+        commands = json.loads(commands_path.read_text(encoding="utf-8"))
+        by_trigger = {item.get("trigger"): item for item in commands}
+        self.assertEqual(by_trigger["fix"]["scope"], "sentence")
+        self.assertEqual(by_trigger["improve"]["scope"], "sentence")
+        self.assertNotIn("scope", by_trigger["summarize"])
+
     def test_bundled_commands_include_dhivehi_translation(self):
         commands_path = Path(__file__).resolve().parents[1] / "commands.json"
         commands = json.loads(commands_path.read_text(encoding="utf-8"))

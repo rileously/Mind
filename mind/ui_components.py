@@ -487,7 +487,7 @@ class CommandDialog(QDialog):
         root.setSpacing(16)
         root.addWidget(section_title(self.windowTitle(), "Create a trigger that works in every text field."))
 
-        form = QFormLayout()
+        form = self._form = QFormLayout()
         form.setSpacing(12)
         self.trigger = QLineEdit(str(self._command.get("trigger", "")))
         self.trigger.setPlaceholderText("Example: polish")
@@ -503,6 +503,9 @@ class CommandDialog(QDialog):
         self.enabled = QCheckBox("Enabled")
         self.enabled.setChecked(bool(self._command.get("enabled", True)))
         form.addRow("", self.enabled)
+        self.sentence_scope = QCheckBox("Only the sentence you are typing, not the whole field")
+        self.sentence_scope.setChecked(self._command.get("scope") == "sentence")
+        form.addRow("", self.sentence_scope)
         root.addLayout(form)
 
         self.content_header = QHBoxLayout()
@@ -555,12 +558,15 @@ class CommandDialog(QDialog):
             "enabled": self.enabled.isChecked(),
         }
         result["prompt" if kind == "ai" else "value"] = self.content.toPlainText().strip()
+        if kind == "ai" and self.sentence_scope.isChecked():
+            result["scope"] = "sentence"
         return result
 
     def _update_content_label(self) -> None:
         kind = str(self.kind.currentData())
         self.content_label.setText("Transformation instruction" if kind == "ai" else "Snippet template" if kind == "replacer-text" else "Replacement value")
         self.snippet_vars_widget.setVisible(kind == "replacer-text")
+        self._form.setRowVisible(self.sentence_scope, kind == "ai")
         self.warning.setVisible(kind == "replacer-shell")
 
     def _validate(self) -> None:

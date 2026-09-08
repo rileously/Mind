@@ -13,7 +13,7 @@ from .secrets import protect_text, unprotect_text
 
 
 CONFIG_SCHEMA_VERSION = 2
-BUNDLED_COMMANDS_REVISION = 1
+BUNDLED_COMMANDS_REVISION = 2
 LEGACY_DEFAULT_PALETTE_ACTIONS = [
     "fix", "improve", "formal", "casual", "shorten", "reply", "dhivehi",
 ]
@@ -31,6 +31,12 @@ DEFAULT_PALETTE_ACTIONS = [
 ]
 _BUNDLED_ADDITIONS = {
     1: {"summarize", "action-items", "english", "bullets"},
+}
+# Commands whose bundled default became sentence-scoped. An install that already
+# has its own commands.json never sees a changed bundled file, so the flag is
+# stamped onto the user's copy once, at the revision that introduced it.
+_BUNDLED_SENTENCE_SCOPE = {
+    2: {"fix", "improve"},
 }
 
 
@@ -477,10 +483,14 @@ class ConfigStore:
         if not isinstance(current, list) or not isinstance(bundled, list):
             return
 
-        additions = set().union(*(
-            triggers for item_revision, triggers in _BUNDLED_ADDITIONS.items()
-            if revision < item_revision <= BUNDLED_COMMANDS_REVISION
-        ))
+        def pending(table: dict[int, set[str]]) -> set[str]:
+            return set().union(*(
+                triggers for item_revision, triggers in table.items()
+                if revision < item_revision <= BUNDLED_COMMANDS_REVISION
+            ), set())
+
+        additions = pending(_BUNDLED_ADDITIONS)
+        scoped = pending(_BUNDLED_SENTENCE_SCOPE)
         existing = {
             str(command.get("trigger", "")) for command in current if isinstance(command, dict)
         }
@@ -490,8 +500,14 @@ class ConfigStore:
             and str(command.get("trigger", "")) in additions
             and str(command.get("trigger", "")) not in existing
         ]
-        if new_items:
-            self.save_commands([*current, *new_items])
+        upgraded = [dict(command) for command in current if isinstance(command, dict)]
+        rescoped = False
+        for command in upgraded:
+            if str(command.get("trigger", "")) in scoped and "scope" not in command:
+                command["scope"] = "sentence"
+                rescoped = True
+        if new_items or rescoped:
+            self.save_commands([*upgraded, *new_items])
 
         config = self.load()
         config["bundled_commands_revision"] = BUNDLED_COMMANDS_REVISION
@@ -581,6 +597,8 @@ class ConfigStore:
             }
             if kind == "ai":
                 item["prompt"] = str(command.get("prompt", "")).strip()
+                if command.get("scope") == "sentence":
+                    item["scope"] = "sentence"
             else:
                 item["value"] = str(command.get("value", ""))
             clean.append(item)

@@ -1,6 +1,6 @@
 [
-  { "trigger": "fix", "type": "ai", "prompt": "Fix grammar, spelling, and punctuation errors." },
-  { "trigger": "improve", "type": "ai", "prompt": "Rewrite to improve clarity, flow, and coherence." },
+  { "trigger": "fix", "type": "ai", "prompt": "Fix grammar, spelling, and punctuation errors.", "scope": "sentence" },
+  { "trigger": "improve", "type": "ai", "prompt": "Rewrite to improve clarity, flow, and coherence.", "scope": "sentence" },
   { "trigger": "summarize", "type": "ai", "prompt": "Summarize clearly and concisely. Preserve important facts, names, numbers, dates, decisions, and conclusions." },
   { "trigger": "action-items", "type": "ai", "prompt": "Extract concrete action items, owners, and deadlines from the text. Return a concise checklist. Do not invent missing owners or dates." },
   { "trigger": "english", "type": "ai", "prompt": "Translate into fluent, natural English. Preserve names, numbers, URLs, paragraph breaks, formatting, tone, and meaning. Return only the translation." },
